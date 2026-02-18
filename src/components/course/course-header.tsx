@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { courseColors } from "@/lib/constants";
+import { DeleteCourseButton } from "./delete-course-button";
 
 interface Course {
   name: string;
@@ -12,7 +13,7 @@ interface Course {
   location: string | null;
 }
 
-export function CourseHeader({ course }: { course: Course }) {
+export function CourseHeader({ course, courseId }: { course: Course; courseId: string }) {
   const colors = courseColors[course.color];
   const details = [course.instructor, course.schedule, course.location]
     .filter(Boolean)
@@ -20,13 +21,16 @@ export function CourseHeader({ course }: { course: Course }) {
 
   return (
     <div>
-      <Link
-        href="/"
-        className="inline-flex items-center gap-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronLeft className="h-4 w-4" />
-        Dashboard
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Dashboard
+        </Link>
+        <DeleteCourseButton courseId={courseId} />
+      </div>
 
       <div className="mt-4 rounded-lg border border-border bg-card p-6">
         <div className="flex items-center gap-2">
