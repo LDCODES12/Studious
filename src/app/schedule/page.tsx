@@ -1,10 +1,10 @@
+import { ScheduleView } from "@/components/schedule/schedule-view";
+
 export default function SchedulePage() {
   return (
-    <div className="flex flex-col items-center justify-center py-32 text-center">
-      <h1 className="text-lg font-semibold">Schedule</h1>
-      <p className="mt-2 max-w-xs text-[13px] text-muted-foreground">
-        Your adaptive weekly planner is coming soon.
-      </p>
+    <div className="mx-auto max-w-[1200px]">
+      <h1 className="mb-6 text-lg font-semibold">Schedule</h1>
+      <ScheduleView />
     </div>
   );
 }

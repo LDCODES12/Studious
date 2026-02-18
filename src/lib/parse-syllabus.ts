@@ -57,3 +57,53 @@ Return a JSON object with an "events" array. Each event must have:
   const parsed = JSON.parse(content);
   return parsed.events ?? [];
 }
+
+export interface ParsedTopic {
+  weekNumber: number;
+  weekLabel: string;
+  startDate?: string;
+  topics: string[];
+  readings: string[];
+  notes?: string;
+  courseName: string;
+}
+
+export async function parseSyllabusTopics(text: string): Promise<ParsedTopic[]> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are a syllabus parser. Extract the weekly content schedule — topics covered each week and assigned readings.
+
+INCLUDE:
+- Weekly topics/subjects (e.g. "Sorting Algorithms", "The Civil War")
+- Assigned readings (textbook chapters, articles)
+- Approximate start dates if listed
+- Brief notes about labs, field trips, guest speakers (NOT graded assessments)
+
+EXCLUDE:
+- Graded assessments (quizzes, exams, homework, projects)
+- Administrative info, office hours, regrade deadlines
+
+Return JSON with a "weeks" array. Each item must have:
+- weekNumber: integer (1-based)
+- weekLabel: 2-5 word label for the main topic
+- startDate: ISO date (YYYY-MM-DD) if available, otherwise omit
+- topics: string array of topics covered
+- readings: string array (e.g. "Chapter 3", "Smith et al. 2020")
+- notes: optional brief note
+- courseName: course name from the syllabus header
+
+If no weekly schedule exists, return { "weeks": [] }.`,
+      },
+      { role: "user", content: text },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) return [];
+  const parsed = JSON.parse(content);
+  return parsed.weeks ?? [];
+}

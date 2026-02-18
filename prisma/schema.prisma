@@ -56,18 +56,45 @@ model VerificationToken {
 }
 
 model Course {
-  id          String       @id @default(cuid())
+  id          String           @id @default(cuid())
   userId      String
   name        String
   shortName   String?
   instructor  String?
   term        String?
-  color       String       @default("blue")
+  color       String           @default("blue")
   schedule    String?
   location    String?
-  createdAt   DateTime     @default(now())
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime         @default(now())
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments Assignment[]
+  topics      CourseTopic[]
+  materials   CourseMaterial[]
+}
+
+model CourseTopic {
+  id          String   @id @default(cuid())
+  courseId    String
+  weekNumber  Int
+  weekLabel   String
+  startDate   String?
+  topics      String[]
+  readings    String[]
+  notes       String?
+  createdAt   DateTime @default(now())
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+}
+
+model CourseMaterial {
+  id            String   @id @default(cuid())
+  courseId      String
+  fileName      String
+  detectedType  String
+  summary       String
+  relatedTopics String[]
+  rawText       String
+  uploadedAt    DateTime @default(now())
+  course        Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }
 
 model Assignment {

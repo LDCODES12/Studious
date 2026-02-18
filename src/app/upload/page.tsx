@@ -19,6 +19,7 @@ function UploadPageInner() {
   const [syncResults, setSyncResults] = useState<
     { title: string; success: boolean; googleEventId?: string | null }[]
   >([]);
+  const [topicsByCourse, setTopicsByCourse] = useState<Record<string, unknown[]>>({});
   const [removing, setRemoving] = useState(false);
 
   const googleConnected = searchParams.get("google") === "connected";
@@ -30,6 +31,12 @@ function UploadPageInner() {
       try {
         setEvents(JSON.parse(saved));
         setStage("review");
+      } catch {}
+    }
+    const savedTopics = sessionStorage.getItem("pendingTopicsByCourse");
+    if (savedTopics) {
+      try {
+        setTopicsByCourse(JSON.parse(savedTopics));
       } catch {}
     }
   }, []);
@@ -67,7 +74,9 @@ function UploadPageInner() {
 
       const data = await res.json();
       setEvents(data.events);
+      setTopicsByCourse(data.topicsByCourse ?? {});
       sessionStorage.setItem("pendingEvents", JSON.stringify(data.events));
+      sessionStorage.setItem("pendingTopicsByCourse", JSON.stringify(data.topicsByCourse ?? {}));
       setStage("review");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -112,14 +121,15 @@ function UploadPageInner() {
         }
       }
 
-      // Always save to Study Circle DB
+      // Always save to Study Circle DB (with topics)
       await fetch("/api/syllabus/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ events: selected, syncResults: calendarResults }),
+        body: JSON.stringify({ events: selected, syncResults: calendarResults, topicsByCourse }),
       });
 
       sessionStorage.removeItem("pendingEvents");
+      sessionStorage.removeItem("pendingTopicsByCourse");
       setStage("done");
     } catch {
       setError("Failed to save. Please try again.");
@@ -156,9 +166,11 @@ function UploadPageInner() {
     setFiles([]);
     setEvents([]);
     setSyncResults([]);
+    setTopicsByCourse({});
     setError(null);
     setStage("upload");
     sessionStorage.removeItem("pendingEvents");
+    sessionStorage.removeItem("pendingTopicsByCourse");
   };
 
   const selectedCount = events.filter((e) => e.selected).length;

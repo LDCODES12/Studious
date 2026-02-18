@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseSyllabusText } from "@/lib/parse-syllabus";
+import { parseSyllabusText, parseSyllabusTopics } from "@/lib/parse-syllabus";
 import { type SyllabusEvent } from "@/types";
+
+type TopicRow = {
+  weekNumber: number;
+  weekLabel: string;
+  startDate?: string;
+  topics: string[];
+  readings: string[];
+  notes?: string;
+};
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,26 +20,38 @@ export async function POST(request: NextRequest) {
     }
 
     const allEvents: SyllabusEvent[] = [];
+    const topicsByCourse: Record<string, TopicRow[]> = {};
 
-    for (const text of texts) {
-      if (!text.trim()) continue;
+    await Promise.all(
+      texts
+        .filter((t) => t.trim())
+        .map(async (text) => {
+          const [events, topics] = await Promise.all([
+            parseSyllabusText(text),
+            parseSyllabusTopics(text),
+          ]);
 
-      const parsed = await parseSyllabusText(text);
+          for (const event of events) {
+            allEvents.push({
+              id: crypto.randomUUID(),
+              title: event.title,
+              type: event.type,
+              dueDate: event.dueDate,
+              courseName: event.courseName,
+              description: event.description,
+              selected: true,
+            });
+          }
 
-      for (const event of parsed) {
-        allEvents.push({
-          id: crypto.randomUUID(),
-          title: event.title,
-          type: event.type,
-          dueDate: event.dueDate,
-          courseName: event.courseName,
-          description: event.description,
-          selected: true,
-        });
-      }
-    }
+          for (const topic of topics) {
+            const key = topic.courseName;
+            if (!topicsByCourse[key]) topicsByCourse[key] = [];
+            topicsByCourse[key].push(topic);
+          }
+        })
+    );
 
-    return NextResponse.json({ events: allEvents });
+    return NextResponse.json({ events: allEvents, topicsByCourse });
   } catch (error) {
     console.error("Syllabus parse error:", error);
     return NextResponse.json(

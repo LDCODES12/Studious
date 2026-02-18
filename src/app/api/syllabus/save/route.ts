@@ -5,15 +5,25 @@ import { type SyllabusEvent } from "@/types";
 
 const COLORS = ["blue", "green", "purple", "orange", "rose"];
 
+type TopicData = {
+  weekNumber: number;
+  weekLabel: string;
+  startDate?: string;
+  topics: string[];
+  readings: string[];
+  notes?: string;
+};
+
 export async function POST(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { events, syncResults } = (await request.json()) as {
+  const { events, syncResults, topicsByCourse } = (await request.json()) as {
     events: SyllabusEvent[];
     syncResults: { title: string; success: boolean; googleEventId?: string | null }[];
+    topicsByCourse?: Record<string, TopicData[]>;
   };
 
   if (!events || events.length === 0) {
@@ -42,7 +52,8 @@ export async function POST(request: NextRequest) {
     select: { color: true },
   });
   const usedColors = new Set(existingCourses.map((c) => c.color));
-  const nextColor = () => COLORS.find((c) => !usedColors.has(c)) ?? COLORS[existingCourses.length % COLORS.length];
+  const nextColor = () =>
+    COLORS.find((c) => !usedColors.has(c)) ?? COLORS[existingCourses.length % COLORS.length];
 
   for (const [courseName, courseEvents] of byCourse) {
     // Find or create the course
@@ -67,7 +78,6 @@ export async function POST(request: NextRequest) {
     for (const event of courseEvents) {
       await db.assignment.upsert({
         where: {
-          // Use a composite-ish approach: find by title+dueDate+courseId
           id: (
             await db.assignment.findFirst({
               where: { courseId: course.id, title: event.title, dueDate: event.dueDate },
@@ -86,6 +96,23 @@ export async function POST(request: NextRequest) {
           description: event.description ?? null,
           googleEventId: googleIdMap.get(event.title) ?? null,
         },
+      });
+    }
+
+    // Save weekly topics if provided
+    const courseTopics = topicsByCourse?.[courseName];
+    if (courseTopics && courseTopics.length > 0) {
+      await db.courseTopic.deleteMany({ where: { courseId: course.id } });
+      await db.courseTopic.createMany({
+        data: courseTopics.map((t) => ({
+          courseId: course.id,
+          weekNumber: t.weekNumber,
+          weekLabel: t.weekLabel,
+          startDate: t.startDate ?? null,
+          topics: t.topics,
+          readings: t.readings,
+          notes: t.notes ?? null,
+        })),
       });
     }
   }

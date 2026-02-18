@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { cookies } from "next/headers";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { CourseHeader } from "@/components/course/course-header";
@@ -14,12 +15,30 @@ export default async function CoursePage({ params }: CoursePageProps) {
   const session = await auth();
   if (!session?.user?.id) notFound();
 
+  const cookieStore = await cookies();
+  const googleConnected = !!cookieStore.get("google_tokens");
+
   const course = await db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
-    include: { assignments: { orderBy: { dueDate: "asc" } } },
+    include: {
+      assignments: { orderBy: { dueDate: "asc" } },
+      topics: { orderBy: { weekNumber: "asc" } },
+      materials: { orderBy: { uploadedAt: "desc" } },
+    },
   });
 
   if (!course) notFound();
+
+  // Serialize Date fields for client components
+  const materials = course.materials.map((m) => ({
+    id: m.id,
+    courseId: m.courseId,
+    fileName: m.fileName,
+    detectedType: m.detectedType,
+    summary: m.summary,
+    relatedTopics: m.relatedTopics,
+    uploadedAt: m.uploadedAt.toISOString(),
+  }));
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-7">
@@ -27,7 +46,13 @@ export default async function CoursePage({ params }: CoursePageProps) {
 
       <div className="grid grid-cols-3 gap-7">
         <div className="col-span-2">
-          <CourseTabs assignments={course.assignments} />
+          <CourseTabs
+            assignments={course.assignments}
+            topics={course.topics}
+            materials={materials}
+            courseId={course.id}
+            googleConnected={googleConnected}
+          />
         </div>
         <div className="col-span-1">
           <CourseSidebar course={course} assignments={course.assignments} />
