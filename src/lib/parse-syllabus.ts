@@ -75,7 +75,17 @@ export async function parseSyllabusTopics(text: string): Promise<ParsedTopic[]> 
     messages: [
       {
         role: "system",
-        content: `You are an expert academic content extractor. Extract the COMPLETE week-by-week learning schedule from this syllabus — every topic, concept, lecture subject, and reading. Be exhaustive.
+        content: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
+
+CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY written in the text as a schedule. If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITHOUT a clear topic schedule, return {"weeks": []}. Never invent or infer topics from the course name.
+
+A real schedule looks like:
+- "Week 1 (Jan 13): Introduction to Calculus, Limits"
+- "Lecture 3: The French Revolution, Ch. 4"
+- A table with dates/weeks in one column and topics in another
+
+Course policies text (return empty for this):
+- "Attendance Policy: ...", "Grading: 40% exams...", "Late work: -10% per day..."
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly
@@ -84,11 +94,10 @@ IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Module/unit-based: Group modules into sequential weeks
 - Table format: Many syllabi use schedule tables — read every row
 
-WHAT TO EXTRACT (be thorough):
-- Every topic title, subtopic, and specific concept (e.g. "Big-O notation", "Dijkstra's algorithm", "The French Revolution", "protein folding")
+WHAT TO EXTRACT:
+- Every topic title, subtopic, and specific concept explicitly listed in the schedule
 - All readings: textbook chapters with numbers, papers, articles — include page ranges and chapter titles when listed
 - Lab or recitation topics if different from lecture content
-- Guest lectures, field trips, special sessions and their topics
 - The start date for each week if you can determine it from dates in the schedule
 
 WHAT NOT TO EXTRACT:
@@ -96,16 +105,16 @@ WHAT NOT TO EXTRACT:
 - Grading policies, office hours, late policy, attendance rules
 - Administrative dates (registration deadlines, drop dates)
 
-OUTPUT: Return JSON with a "weeks" array. Include EVERY week of the course — if it is a 15-week course, return 15 entries. Do not truncate or summarize. Each week must have:
+OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include EVERY week — do not truncate. Each week must have:
 - weekNumber: integer starting at 1
 - weekLabel: 3-7 word description of the main theme (e.g. "Dynamic Programming and Memoization")
 - startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
-- topics: COMPLETE array of ALL topics/concepts for this week — list every single one, do not shorten
-- readings: COMPLETE array of ALL readings (chapter numbers, titles, page ranges, paper names)
-- notes: optional — only for truly special notes like "No class — Spring Break" or "Lab meets in Room 204"
+- topics: array of ALL topics/concepts for this week
+- readings: array of ALL readings (chapter numbers, titles, page ranges, paper names)
+- notes: optional — only for truly special notes like "No class — Spring Break"
 - courseName: exact course name/code from the syllabus header
 
-If the syllabus genuinely contains no content schedule whatsoever, return {"weeks": []}.`,
+If you cannot find an explicit schedule, return {"weeks": []}.`,
       },
       { role: "user", content: text },
     ],

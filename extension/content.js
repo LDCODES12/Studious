@@ -165,25 +165,53 @@
         }
       } catch { /* modules disabled — skip */ }
 
+      // ── Canvas Pages — look for syllabus/schedule pages ───────────────────
+      // Professors often create a Canvas Page titled "Syllabus" instead of using
+      // the built-in syllabus field (which is why syllabus_body is often empty).
+      try {
+        const allPages = await fetchAll(
+          `${BASE}/courses/${course.id}/pages?per_page=50&sort=updated_at&order=desc`
+        );
+        const syllabusPages = allPages.filter((p) =>
+          /syllab|schedul|course.{0,10}info|course.{0,10}guide|course.{0,10}outline|course.{0,10}overview/i.test(p.title || "")
+        );
+        for (const p of syllabusPages.slice(0, 3)) {
+          try {
+            const [pageData] = await fetchAll(`${BASE}/courses/${course.id}/pages/${p.url}`);
+            const bodyHtml = pageData?.body?.trim();
+            if (bodyHtml && bodyHtml.length > 200) {
+              // Append to syllabusBody — server-side htmlToText will strip tags
+              course.syllabusBody = (course.syllabusBody ?? "") + "\n" + bodyHtml;
+            }
+          } catch { /* skip individual page fetch failures */ }
+        }
+      } catch { /* pages endpoint not available */ }
+
       // ── Syllabus PDF files ─────────────────────────────────────────────────
-      // Download PDFs whose names suggest they're the syllabus.
-      // We send the raw bytes (base64) so the server can extract text + save as material.
+      // Two strategies to find the syllabus PDF:
+      //   1. Filename match (broad regex)
+      //   2. Chronological: first 3 PDFs uploaded to the course (syllabi are
+      //      uploaded at semester start; weekly lecture PDFs come later)
+      // Cap at 3 PDFs total to avoid downloading lecture slides.
       try {
         const files = await fetchAll(
-          `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=50`
+          `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
         );
-        for (const file of files) {
-          const name = file.display_name ?? "";
-          // Detect likely syllabus filenames
-          if (!/syllab|course[\s._-]?guide|course[\s._-]?outline|course[\s._-]?info/i.test(name)) continue;
-          if ((file.size ?? 0) > 3_000_000) continue; // skip files over 3 MB
 
+        // Score each file: name match = high priority, else use upload order
+        const SYLLABUS_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)|course\s*\d/i;
+        const scored = files
+          .filter((f) => (f.size ?? 0) > 0 && (f.size ?? 0) < 5_000_000)
+          .map((f, idx) => ({ file: f, score: SYLLABUS_RE.test(f.display_name ?? "") ? 1000 - idx : -idx }))
+          .sort((a, b) => b.score - a.score);
+
+        for (const { file } of scored.slice(0, 3)) {
           try {
             const fileRes = await fetch(file.url, { credentials: "include" });
             if (!fileRes.ok) continue;
             const buf = await fileRes.arrayBuffer();
             course.syllabusFiles.push({
-              fileName: name,
+              fileName: file.display_name,
               base64: bufferToBase64(buf),
             });
           } catch { /* skip individual download failures */ }
