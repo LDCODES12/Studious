@@ -214,25 +214,33 @@
       } catch { /* pages endpoint not available */ }
 
       // ── Syllabus PDF files ─────────────────────────────────────────────────
-      // Primary source: module file items via content_details (always accessible).
-      // Fallback source: course files endpoint (often restricted for students).
+      // content_details.url is the Canvas API info endpoint, NOT a download URL.
+      // Instead use content_id → GET /api/v1/files/:id to get the real download URL.
+      // Fallback: course files endpoint (often restricted for students).
       // Strategy: name-match first, then peek inside unmatched ones. Cap at 3.
       {
         const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)/i;
-        const toDownload = []; // { name, url }
-        const seenUrls   = new Set();
+        const toDownload    = []; // { name, url }
+        const peekCandidates = []; // { title, content_id } — resolve later if needed
+        const seenIds       = new Set();
 
-        // ── Source 1: module file items ──────────────────────────────────────
+        // ── Source 1: module file items — resolve download URL via files API ──
         for (const mod of rawModules) {
           for (const item of (mod.items ?? [])) {
-            if (item.type !== "File") continue;
-            const url  = item.content_details?.url;
-            const size = item.content_details?.size ?? 0;
-            if (!url || size === 0 || size > 5_000_000) continue;
-            if (seenUrls.has(url)) continue;
-            seenUrls.add(url);
+            if (item.type !== "File" || !item.content_id) continue;
+            if (seenIds.has(item.content_id)) continue;
+            seenIds.add(item.content_id);
             if (SYLLABUS_NAME_RE.test(item.title ?? "")) {
-              toDownload.push({ name: item.title, url });
+              // Name match — fetch the real download URL now
+              try {
+                const [fileInfo] = await fetchAll(`${BASE}/files/${item.content_id}`);
+                if (fileInfo?.url && (fileInfo.size ?? 0) < 5_000_000) {
+                  toDownload.push({ name: fileInfo.display_name ?? item.title, url: fileInfo.url });
+                }
+              } catch { /* skip */ }
+            } else {
+              // No name match — save for peek phase
+              peekCandidates.push({ title: item.title, content_id: item.content_id });
             }
           }
         }
@@ -243,36 +251,34 @@
             `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
           );
           for (const f of files) {
-            const size = f.size ?? 0;
-            if (size === 0 || size > 5_000_000 || !f.url) continue;
-            if (seenUrls.has(f.url)) continue;
-            seenUrls.add(f.url);
+            if (!f.url || (f.size ?? 0) === 0 || (f.size ?? 0) > 5_000_000) continue;
+            if (seenIds.has(f.id)) continue;
+            seenIds.add(f.id);
             if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) {
               toDownload.push({ name: f.display_name, url: f.url });
+            } else {
+              peekCandidates.push({ title: f.display_name, url: f.url });
             }
           }
-        } catch { /* files endpoint restricted — that's fine, modules covered it */ }
+        } catch { /* files endpoint restricted */ }
 
         // ── Peek inside unmatched candidates if still under limit ────────────
         if (toDownload.length < 3) {
-          // Collect unmatched candidates: module items first, then files endpoint items
-          const peekCandidates = [];
-          for (const mod of rawModules) {
-            for (const item of (mod.items ?? [])) {
-              if (item.type !== "File") continue;
-              const url  = item.content_details?.url;
-              const size = item.content_details?.size ?? 0;
-              if (!url || size === 0 || size > 5_000_000) continue;
-              if (!seenUrls.has(url) || !toDownload.some((d) => d.url === url)) {
-                if (!SYLLABUS_NAME_RE.test(item.title ?? "")) {
-                  peekCandidates.push({ name: item.title, url });
-                }
-              }
-            }
-          }
           for (const candidate of peekCandidates) {
             if (toDownload.length >= 3) break;
-            if (await peekIsSyllabus(candidate.url)) toDownload.push(candidate);
+            try {
+              // Resolve download URL if we only have content_id
+              let url = candidate.url;
+              if (!url && candidate.content_id) {
+                const [fileInfo] = await fetchAll(`${BASE}/files/${candidate.content_id}`);
+                if (!fileInfo?.url || fileInfo["content-type"] !== "application/pdf") continue;
+                if ((fileInfo.size ?? 0) > 5_000_000) continue;
+                url = fileInfo.url;
+              }
+              if (url && await peekIsSyllabus(url)) {
+                toDownload.push({ name: candidate.title, url });
+              }
+            } catch { /* skip */ }
           }
         }
 
