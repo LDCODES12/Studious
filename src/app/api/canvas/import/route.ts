@@ -145,15 +145,10 @@ export async function POST(request: NextRequest) {
     const canvasId = String(c.id);
     const lc = c.name.toLowerCase();
 
-    // First try exact match by canvasCourseId, then fuzzy by name
+    // Match by canvasCourseId (exact) or exact name (for courses synced before canvasCourseId was stored)
     let existing = existingCourses.find((e) => e.canvasCourseId === canvasId);
     if (!existing) {
-      existing = existingCourses.find(
-        (e) =>
-          e.name.toLowerCase() === lc ||
-          e.name.toLowerCase().includes(lc) ||
-          lc.includes(e.name.toLowerCase())
-      );
+      existing = existingCourses.find((e) => e.name.toLowerCase() === lc);
     }
 
     if (existing) {
