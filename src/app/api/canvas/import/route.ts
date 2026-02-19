@@ -305,7 +305,13 @@ export async function POST(request: NextRequest) {
       for (const sf of syllabusFiles) {
         try {
           const buf = Buffer.from(sf.base64, "base64");
-          const parsed = await pdfParse(buf);
+          // pdf-parse can hang on malformed PDFs — cap at 10s
+          const parsed = await Promise.race([
+            pdfParse(buf),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("pdf-parse timeout")), 10_000)
+            ),
+          ]);
           const pdfText = parsed.text.trim();
 
           // Prefer PDF text if it's more complete than the HTML body
