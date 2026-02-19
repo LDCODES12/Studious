@@ -2,10 +2,13 @@
  * background.js — Manifest V3 service worker.
  *
  * Two-phase sync flow:
- *   Phase 1: inject content.js (no selectedCourseIds) → receives CANVAS_COURSES
+ *   Phase 1: clear window.__sc_selectedIds → inject content.js → receives CANVAS_COURSES
  *            → sends COURSE_SELECTION to popup for user to pick
- *   Phase 2: popup sends SYNC_SELECTED → store IDs → re-inject content.js
+ *   Phase 2: popup sends SYNC_SELECTED → set window.__sc_selectedIds → re-inject content.js
  *            → receives CANVAS_DATA → POST to Study Circle
+ *
+ * Phase info is passed via window.__sc_selectedIds (set by inline executeScript),
+ * not chrome.storage.session, to avoid MV3 service worker dormancy timing issues.
  */
 
 // ── Alarm for auto-sync ───────────────────────────────────────────────────────
@@ -68,11 +71,14 @@ async function startPhase1() {
       await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken"]);
     if (!canvasUrl || !scUrl || !apiToken) throw new Error("Extension not fully configured.");
 
-    // Clear any previous selection
-    await chrome.storage.session.remove(["selectedCourseIds"]);
-
     const tabId = await getCanvasTabId();
     broadcastToPopup({ type: "SYNC_PROGRESS", percent: 15, label: "Fetching your courses…" });
+
+    // Clear any stale selection, then inject content.js for Phase 1
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => { delete window.__sc_selectedIds; },
+    });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (err) {
     await chrome.storage.session.set({ syncRunning: false });
@@ -90,10 +96,15 @@ async function handleCourseList(courses) {
 // ── Phase 2: fetch full data for selected courses ─────────────────────────────
 async function startPhase2(selectedIds) {
   try {
-    await chrome.storage.session.set({ selectedCourseIds: selectedIds });
-
     const tabId = await getCanvasTabId();
     broadcastToPopup({ type: "SYNC_PROGRESS", percent: 10, label: "Syncing selected courses…" });
+
+    // Pass selected IDs to content.js via window variable, then inject
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (ids) => { window.__sc_selectedIds = ids; },
+      args: [selectedIds],
+    });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (err) {
     await chrome.storage.session.set({ syncRunning: false });
@@ -119,7 +130,7 @@ async function handleCanvasData(payload) {
 
     const result = await res.json();
     await chrome.storage.session.set({ syncRunning: false });
-    await chrome.storage.session.remove(["selectedCourseIds", "pendingCourses"]);
+    await chrome.storage.session.remove(["pendingCourses"]);
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {

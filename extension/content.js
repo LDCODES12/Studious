@@ -2,8 +2,12 @@
  * content.js — injected into Canvas pages by the background service worker.
  *
  * Two-phase sync:
- *   Phase 1 (no selectedCourseIds in session) → fetch course list only
- *   Phase 2 (selectedCourseIds set)           → fetch full data for chosen courses
+ *   Phase 1 (window.__sc_selectedIds not set) → fetch course list only
+ *   Phase 2 (window.__sc_selectedIds set by background before injection) → fetch full data
+ *
+ * Phase info is passed via a window variable set by an inline executeScript call
+ * immediately before this file is injected — avoids any chrome.storage.session
+ * dependency inside the content script.
  */
 
 (async function canvasSync() {
@@ -36,9 +40,9 @@
     chrome.runtime.sendMessage({ type: "SYNC_PROGRESS", percent, label });
   }
 
-  // ── Check phase ───────────────────────────────────────────────────────────
-  const session = await chrome.storage.session.get(["selectedCourseIds"]);
-  const selectedIds = session.selectedCourseIds ?? null;
+  // ── Check phase via window variable (set by background before injection) ──
+  const selectedIds = window.__sc_selectedIds ?? null;
+  delete window.__sc_selectedIds;
 
   // ── Phase 1: fetch course list and let user pick ──────────────────────────
   if (!selectedIds) {
@@ -73,69 +77,69 @@
   }
 
   // ── Phase 2: fetch full data for selected courses only ────────────────────
-  const selectedSet = new Set(selectedIds.map(String));
-
   try {
-  progress(10, "Fetching your courses…");
-  const rawCourses = await fetchAll(
-    `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
-    `&include[]=teachers&include[]=term&per_page=100`
-  );
+    const selectedSet = new Set(selectedIds.map(String));
 
-  const courses = rawCourses
-    .filter((c) => c.name && !c.access_restricted_by_date && selectedSet.has(String(c.id)))
-    .map((c) => ({
-      id: c.id,
-      name: c.name,
-      courseCode: c.course_code ?? null,
-      term: c.term?.name ?? null,
-      instructor: c.teachers?.[0]?.display_name ?? null,
-    }));
+    progress(10, "Fetching your courses…");
+    const rawCourses = await fetchAll(
+      `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
+      `&include[]=teachers&include[]=term&per_page=100`
+    );
 
-  const payload = { courses, assignments: [], modules: [] };
-  const total   = courses.length;
+    const courses = rawCourses
+      .filter((c) => c.name && !c.access_restricted_by_date && selectedSet.has(String(c.id)))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        courseCode: c.course_code ?? null,
+        term: c.term?.name ?? null,
+        instructor: c.teachers?.[0]?.display_name ?? null,
+      }));
 
-  for (let i = 0; i < courses.length; i++) {
-    const course = courses[i];
-    const pct = 15 + Math.floor((i / total) * 70);
-    progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
+    const payload = { courses, assignments: [], modules: [] };
+    const total   = courses.length;
 
-    // Assignments
-    try {
-      const rawAssignments = await fetchAll(
-        `${BASE}/courses/${course.id}/assignments?per_page=100&order_by=due_at&include[]=submission`
-      );
-      for (const a of rawAssignments) {
-        if (!a.due_at) continue;
-        payload.assignments.push({
-          id: a.id,
-          courseId: course.id,
-          title: a.name,
-          dueDate: a.due_at,
-          description: stripHtml(a.description),
-          submissionType: a.submission_types?.[0] ?? "assignment",
-          htmlUrl: a.html_url ?? null,
-          pointsPossible: a.points_possible ?? null,
-        });
-      }
-    } catch { /* restricted — skip */ }
+    for (let i = 0; i < courses.length; i++) {
+      const course = courses[i];
+      const pct = 15 + Math.floor((i / total) * 70);
+      progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
 
-    // Modules
-    try {
-      const rawModules = await fetchAll(
-        `${BASE}/courses/${course.id}/modules?include[]=items&per_page=100`
-      );
-      for (const mod of rawModules) {
-        const items    = mod.items ?? [];
-        const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
-        const readings = items.filter((it) => it.type === "File").map((it) => it.title).filter(Boolean);
-        payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
-      }
-    } catch { /* modules disabled — skip */ }
-  }
+      // Assignments
+      try {
+        const rawAssignments = await fetchAll(
+          `${BASE}/courses/${course.id}/assignments?per_page=100&order_by=due_at&include[]=submission`
+        );
+        for (const a of rawAssignments) {
+          if (!a.due_at) continue;
+          payload.assignments.push({
+            id: a.id,
+            courseId: course.id,
+            title: a.name,
+            dueDate: a.due_at,
+            description: stripHtml(a.description),
+            submissionType: a.submission_types?.[0] ?? "assignment",
+            htmlUrl: a.html_url ?? null,
+            pointsPossible: a.points_possible ?? null,
+          });
+        }
+      } catch { /* restricted — skip */ }
 
-  progress(90, "Saving to Study Circle…");
-  chrome.runtime.sendMessage({ type: "CANVAS_DATA", payload });
+      // Modules
+      try {
+        const rawModules = await fetchAll(
+          `${BASE}/courses/${course.id}/modules?include[]=items&per_page=100`
+        );
+        for (const mod of rawModules) {
+          const items    = mod.items ?? [];
+          const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
+          const readings = items.filter((it) => it.type === "File").map((it) => it.title).filter(Boolean);
+          payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
+        }
+      } catch { /* modules disabled — skip */ }
+    }
+
+    progress(90, "Saving to Study Circle…");
+    chrome.runtime.sendMessage({ type: "CANVAS_DATA", payload });
   } catch (err) {
     chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: `Sync failed: ${err.message}` });
   }
