@@ -56,6 +56,31 @@
     return btoa(binary);
   }
 
+  /**
+   * Peek at the first 64 KB of a PDF via an HTTP Range request and return
+   * true if it looks like a syllabus. PDFs embed text as semi-readable byte
+   * sequences — enough to detect keywords like "syllabus", "week 1", etc.
+   * without downloading the full file.
+   */
+  async function peekIsSyllabus(url) {
+    try {
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: { Range: "bytes=0-65535" },
+      });
+      if (!res.ok) return false;
+      const buf = await res.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let raw = "";
+      for (let i = 0; i < bytes.byteLength; i += 1024) {
+        raw += String.fromCharCode(...bytes.subarray(i, Math.min(i + 1024, bytes.byteLength)));
+      }
+      // Strip null bytes (common in PDF UTF-16 text encoding)
+      const text = raw.replace(/\0/g, "");
+      return /syllab|course\s{0,3}schedul|week\s{0,3}\d|lecture\s{0,3}\d|course\s{0,3}outline/i.test(text);
+    } catch { return false; }
+  }
+
   function progress(percent, label) {
     chrome.runtime.sendMessage({ type: "SYNC_PROGRESS", percent, label });
   }
@@ -188,24 +213,37 @@
       } catch { /* pages endpoint not available */ }
 
       // ── Syllabus PDF files ─────────────────────────────────────────────────
-      // Two strategies to find the syllabus PDF:
-      //   1. Filename match (broad regex)
-      //   2. Chronological: first 3 PDFs uploaded to the course (syllabi are
-      //      uploaded at semester start; weekly lecture PDFs come later)
-      // Cap at 3 PDFs total to avoid downloading lecture slides.
+      // Strategy:
+      //   1. Name-matched files (broad regex) — always included
+      //   2. If still under 3, peek inside the earliest-uploaded unmatched PDFs
+      //      using a 64 KB Range request to check for syllabus keywords before
+      //      committing to a full download
+      // Cap at 3 PDFs total.
       try {
         const files = await fetchAll(
           `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
         );
 
-        // Score each file: name match = high priority, else use upload order
-        const SYLLABUS_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)|course\s*\d/i;
-        const scored = files
-          .filter((f) => (f.size ?? 0) > 0 && (f.size ?? 0) < 5_000_000)
-          .map((f, idx) => ({ file: f, score: SYLLABUS_RE.test(f.display_name ?? "") ? 1000 - idx : -idx }))
-          .sort((a, b) => b.score - a.score);
+        const candidates = files.filter((f) => (f.size ?? 0) > 0 && (f.size ?? 0) < 5_000_000);
+        const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)|course\s*\d/i;
 
-        for (const { file } of scored.slice(0, 3)) {
+        const toDownload = [];
+
+        // Phase 1: name-matched files
+        for (const f of candidates) {
+          if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) toDownload.push(f);
+        }
+
+        // Phase 2: peek inside earliest unmatched files if we still need more
+        if (toDownload.length < 3) {
+          const unmatched = candidates.filter((f) => !SYLLABUS_NAME_RE.test(f.display_name ?? ""));
+          for (const f of unmatched) {
+            if (toDownload.length >= 3) break;
+            if (await peekIsSyllabus(f.url)) toDownload.push(f);
+          }
+        }
+
+        for (const file of toDownload.slice(0, 3)) {
           try {
             const fileRes = await fetch(file.url, { credentials: "include" });
             if (!fileRes.ok) continue;
