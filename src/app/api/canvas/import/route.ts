@@ -341,7 +341,7 @@ export async function POST(request: NextRequest) {
         : `run(${syllabusText.length})`;
 
       if (!shouldRunAI || syllabusText.length < 500) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ${aiStatus}`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ${aiStatus}`);
         return;
       }
 
@@ -372,9 +372,9 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ai-ran(${topics.length} weeks)`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ai-ran(${topics.length} weeks)`);
       } catch (err) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ai-error:${err}`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ai-error:${err}`);
       }
     })
   );

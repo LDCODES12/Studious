@@ -177,11 +177,15 @@
         }
       } catch { /* restricted — skip */ }
 
-      // ── Modules (fallback topic structure if no syllabus content) ──────────
+      // ── Modules (fallback topic structure + source of file download URLs) ───
+      // include[]=content_details gives us direct download URLs for File items —
+      // much more reliable than the files endpoint which is often restricted.
+      const rawModules = [];
       try {
-        const rawModules = await fetchAll(
-          `${BASE}/courses/${course.id}/modules?include[]=items&per_page=100`
+        const fetched = await fetchAll(
+          `${BASE}/courses/${course.id}/modules?include[]=items&include[]=content_details&per_page=100`
         );
+        rawModules.push(...fetched);
         for (const mod of rawModules) {
           const items    = mod.items ?? [];
           const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
@@ -191,8 +195,6 @@
       } catch { /* modules disabled — skip */ }
 
       // ── Canvas Pages — look for syllabus/schedule pages ───────────────────
-      // Professors often create a Canvas Page titled "Syllabus" instead of using
-      // the built-in syllabus field (which is why syllabus_body is often empty).
       try {
         const allPages = await fetchAll(
           `${BASE}/courses/${course.id}/pages?per_page=50&sort=updated_at&order=desc`
@@ -205,56 +207,85 @@
             const [pageData] = await fetchAll(`${BASE}/courses/${course.id}/pages/${p.url}`);
             const bodyHtml = pageData?.body?.trim();
             if (bodyHtml && bodyHtml.length > 200) {
-              // Append to syllabusBody — server-side htmlToText will strip tags
               course.syllabusBody = (course.syllabusBody ?? "") + "\n" + bodyHtml;
             }
-          } catch { /* skip individual page fetch failures */ }
+          } catch { /* skip */ }
         }
       } catch { /* pages endpoint not available */ }
 
       // ── Syllabus PDF files ─────────────────────────────────────────────────
-      // Strategy:
-      //   1. Name-matched files (broad regex) — always included
-      //   2. If still under 3, peek inside the earliest-uploaded unmatched PDFs
-      //      using a 64 KB Range request to check for syllabus keywords before
-      //      committing to a full download
-      // Cap at 3 PDFs total.
-      try {
-        const files = await fetchAll(
-          `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
-        );
+      // Primary source: module file items via content_details (always accessible).
+      // Fallback source: course files endpoint (often restricted for students).
+      // Strategy: name-match first, then peek inside unmatched ones. Cap at 3.
+      {
+        const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)/i;
+        const toDownload = []; // { name, url }
+        const seenUrls   = new Set();
 
-        const candidates = files.filter((f) => (f.size ?? 0) > 0 && (f.size ?? 0) < 5_000_000);
-        const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)|course\s*\d/i;
-
-        const toDownload = [];
-
-        // Phase 1: name-matched files
-        for (const f of candidates) {
-          if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) toDownload.push(f);
-        }
-
-        // Phase 2: peek inside earliest unmatched files if we still need more
-        if (toDownload.length < 3) {
-          const unmatched = candidates.filter((f) => !SYLLABUS_NAME_RE.test(f.display_name ?? ""));
-          for (const f of unmatched) {
-            if (toDownload.length >= 3) break;
-            if (await peekIsSyllabus(f.url)) toDownload.push(f);
+        // ── Source 1: module file items ──────────────────────────────────────
+        for (const mod of rawModules) {
+          for (const item of (mod.items ?? [])) {
+            if (item.type !== "File") continue;
+            const url  = item.content_details?.url;
+            const size = item.content_details?.size ?? 0;
+            if (!url || size === 0 || size > 5_000_000) continue;
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            if (SYLLABUS_NAME_RE.test(item.title ?? "")) {
+              toDownload.push({ name: item.title, url });
+            }
           }
         }
 
-        for (const file of toDownload.slice(0, 3)) {
+        // ── Source 2: course files endpoint (fallback) ───────────────────────
+        try {
+          const files = await fetchAll(
+            `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
+          );
+          for (const f of files) {
+            const size = f.size ?? 0;
+            if (size === 0 || size > 5_000_000 || !f.url) continue;
+            if (seenUrls.has(f.url)) continue;
+            seenUrls.add(f.url);
+            if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) {
+              toDownload.push({ name: f.display_name, url: f.url });
+            }
+          }
+        } catch { /* files endpoint restricted — that's fine, modules covered it */ }
+
+        // ── Peek inside unmatched candidates if still under limit ────────────
+        if (toDownload.length < 3) {
+          // Collect unmatched candidates: module items first, then files endpoint items
+          const peekCandidates = [];
+          for (const mod of rawModules) {
+            for (const item of (mod.items ?? [])) {
+              if (item.type !== "File") continue;
+              const url  = item.content_details?.url;
+              const size = item.content_details?.size ?? 0;
+              if (!url || size === 0 || size > 5_000_000) continue;
+              if (!seenUrls.has(url) || !toDownload.some((d) => d.url === url)) {
+                if (!SYLLABUS_NAME_RE.test(item.title ?? "")) {
+                  peekCandidates.push({ name: item.title, url });
+                }
+              }
+            }
+          }
+          for (const candidate of peekCandidates) {
+            if (toDownload.length >= 3) break;
+            if (await peekIsSyllabus(candidate.url)) toDownload.push(candidate);
+          }
+        }
+
+        // ── Download the selected files ──────────────────────────────────────
+        for (const { name, url } of toDownload.slice(0, 3)) {
           try {
-            const fileRes = await fetch(file.url, { credentials: "include" });
+            const fileRes = await fetch(url, { credentials: "include" });
             if (!fileRes.ok) continue;
             const buf = await fileRes.arrayBuffer();
-            course.syllabusFiles.push({
-              fileName: file.display_name,
-              base64: bufferToBase64(buf),
-            });
+            course.syllabusFiles.push({ fileName: name, base64: bufferToBase64(buf) });
           } catch { /* skip individual download failures */ }
         }
-      } catch { /* files endpoint not available for this course */ }
+      }
     }
 
     progress(90, "Saving to Study Circle…");
