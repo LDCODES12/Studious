@@ -13,6 +13,13 @@ const resultNote      = document.getElementById("resultNote");
 const errorSection    = document.getElementById("errorSection");
 const errorText       = document.getElementById("errorText");
 
+const coursePicker    = document.getElementById("coursePicker");
+const courseList      = document.getElementById("courseList");
+const selectAllBtn    = document.getElementById("selectAllBtn");
+const selectNoneBtn   = document.getElementById("selectNoneBtn");
+const importBtn       = document.getElementById("importBtn");
+const cancelPickerBtn = document.getElementById("cancelPickerBtn");
+
 const gearBtn         = document.getElementById("gearBtn");
 const settingsPanel   = document.getElementById("settingsPanel");
 const closeSettings   = document.getElementById("closeSettings");
@@ -139,6 +146,131 @@ async function rescan() {
   await render();
 }
 
+// ── Course picker ─────────────────────────────────────────────────────────────
+
+function termSortKey(term) {
+  if (!term) return 0;
+  const lower = term.toLowerCase();
+  const yearMatch = lower.match(/\d{4}/);
+  const year = yearMatch ? parseInt(yearMatch[0], 10) : 0;
+  const season = lower.includes("fall") || lower.includes("autumn") ? 3
+               : lower.includes("summer") ? 2
+               : lower.includes("spring") ? 1
+               : lower.includes("winter") ? 0 : -1;
+  return year * 10 + (season >= 0 ? season : -1);
+}
+
+function showCoursePicker(courses) {
+  // Stop the spinning state — we're waiting for user input
+  setSyncing(false);
+
+  // Group courses by term, sort terms newest-first
+  const termMap = new Map();
+  for (const c of courses) {
+    const key = c.term || "Other";
+    if (!termMap.has(key)) termMap.set(key, []);
+    termMap.get(key).push(c);
+  }
+  const sortedTerms = [...termMap.keys()].sort(
+    (a, b) => termSortKey(b) - termSortKey(a)
+  );
+
+  // Render
+  courseList.innerHTML = "";
+  const showTermHeaders = sortedTerms.length > 1 || sortedTerms[0] !== "Other";
+
+  for (const term of sortedTerms) {
+    const group = document.createElement("div");
+    group.className = "term-group";
+
+    if (showTermHeaders) {
+      const lbl = document.createElement("div");
+      lbl.className = "term-label";
+      lbl.textContent = term;
+      group.appendChild(lbl);
+    }
+
+    for (const c of termMap.get(term)) {
+      const label = document.createElement("label");
+      label.className = "course-row";
+
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.value = String(c.id);
+      check.checked = true;
+
+      const info = document.createElement("div");
+      info.className = "course-info";
+
+      const name = document.createElement("span");
+      name.className = "course-name";
+      name.textContent = c.name;
+      info.appendChild(name);
+
+      const meta = [];
+      if (c.courseCode) meta.push(c.courseCode);
+      if (c.instructor) meta.push(c.instructor);
+      if (meta.length) {
+        const m = document.createElement("span");
+        m.className = "course-meta";
+        m.textContent = meta.join(" · ");
+        info.appendChild(m);
+      }
+
+      label.appendChild(check);
+      label.appendChild(info);
+      group.appendChild(label);
+    }
+
+    courseList.appendChild(group);
+  }
+
+  updateImportBtn();
+  coursePicker.style.display = "flex";
+}
+
+function getCheckedBoxes() {
+  return [...courseList.querySelectorAll("input[type=checkbox]")];
+}
+
+function updateImportBtn() {
+  const count = getCheckedBoxes().filter((cb) => cb.checked).length;
+  importBtn.disabled = count === 0;
+  importBtn.textContent = count > 0 ? `Import ${count} Course${count !== 1 ? "s" : ""}` : "Import Selected";
+}
+
+courseList.addEventListener("change", updateImportBtn);
+
+selectAllBtn.addEventListener("click", () => {
+  getCheckedBoxes().forEach((cb) => { cb.checked = true; });
+  updateImportBtn();
+});
+
+selectNoneBtn.addEventListener("click", () => {
+  getCheckedBoxes().forEach((cb) => { cb.checked = false; });
+  updateImportBtn();
+});
+
+importBtn.addEventListener("click", () => {
+  const selectedIds = getCheckedBoxes()
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.value);
+
+  if (selectedIds.length === 0) return;
+
+  coursePicker.style.display = "none";
+  setSyncing(true);
+  progressFill.style.width = "5%";
+  progressLabel.textContent = "Syncing selected courses…";
+
+  chrome.runtime.sendMessage({ type: "SYNC_SELECTED", selectedIds });
+});
+
+cancelPickerBtn.addEventListener("click", () => {
+  coursePicker.style.display = "none";
+  chrome.storage.session.set({ syncRunning: false });
+});
+
 // ── Settings panel ────────────────────────────────────────────────────────────
 
 gearBtn.addEventListener("click",     () => { settingsPanel.style.display = "flex"; });
@@ -194,6 +326,9 @@ syncBtn.addEventListener("click", () => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "COURSE_SELECTION") {
+    showCoursePicker(msg.courses);
+  }
   if (msg.type === "SYNC_PROGRESS") {
     progressFill.style.width  = msg.percent + "%";
     progressLabel.textContent = msg.label;

@@ -1,106 +1,114 @@
 /**
  * background.js — Manifest V3 service worker.
- * Orchestrates the sync: gets settings, injects content.js into a Canvas tab,
- * receives the Canvas data, posts it to the Study Circle API.
+ *
+ * Two-phase sync flow:
+ *   Phase 1: inject content.js (no selectedCourseIds) → receives CANVAS_COURSES
+ *            → sends COURSE_SELECTION to popup for user to pick
+ *   Phase 2: popup sends SYNC_SELECTED → store IDs → re-inject content.js
+ *            → receives CANVAS_DATA → POST to Study Circle
  */
 
 // ── Alarm for auto-sync ───────────────────────────────────────────────────────
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "autoSync") {
-    runSync();
-  }
+  if (alarm.name === "autoSync") startPhase1();
 });
 
-// ── Message from popup ────────────────────────────────────────────────────────
+// ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+
   if (msg.type === "SYNC_START") {
     sendResponse({ ok: true });
-    runSync();
+    startPhase1();
   }
 
-  // Messages relayed from content.js
-  if (msg.type === "SYNC_PROGRESS") {
-    broadcastToPopup(msg);
+  if (msg.type === "SYNC_SELECTED") {
+    // User chose courses in popup — kick off phase 2
+    startPhase2(msg.selectedIds);
   }
 
-  if (msg.type === "CANVAS_DATA") {
-    handleCanvasData(msg.payload);
-  }
+  if (msg.type === "SYNC_PROGRESS") broadcastToPopup(msg);
+  if (msg.type === "CANVAS_COURSES") handleCourseList(msg.courses);
+  if (msg.type === "CANVAS_DATA")    handleCanvasData(msg.payload);
+  if (msg.type === "SYNC_ERROR")     handleError(msg.error);
 
-  if (msg.type === "SYNC_ERROR") {
-    handleError(msg.error);
-  }
-
-  return false; // synchronous response
+  return false;
 });
 
-// ── Main sync orchestrator ────────────────────────────────────────────────────
-async function runSync() {
-  await chrome.storage.session.set({ syncRunning: true });
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
+async function getCanvasTabId() {
+  const { canvasUrl } = await chrome.storage.local.get(["canvasUrl"]);
+  const canvasOrigin  = `https://${canvasUrl}`;
+  const tabs = await chrome.tabs.query({ url: `${canvasOrigin}/*` });
+
+  if (tabs.length > 0) return tabs[0].id;
+
+  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 5, label: "Opening Canvas…" });
+  const tab = await chrome.tabs.create({ url: canvasOrigin, active: false });
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Canvas took too long to load")), 30000);
+    chrome.tabs.onUpdated.addListener(function listener(id, info) {
+      if (id === tab.id && info.status === "complete") {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    });
+  });
+
+  return tab.id;
+}
+
+// ── Phase 1: fetch course list ────────────────────────────────────────────────
+async function startPhase1() {
+  await chrome.storage.session.set({ syncRunning: true });
   try {
     const { canvasUrl, scUrl, apiToken } =
       await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken"]);
+    if (!canvasUrl || !scUrl || !apiToken) throw new Error("Extension not fully configured.");
 
-    if (!canvasUrl || !scUrl || !apiToken) {
-      throw new Error("Extension not fully configured. Open the popup and fill in Settings.");
-    }
+    // Clear any previous selection
+    await chrome.storage.session.remove(["selectedCourseIds"]);
 
-    // Find or create a Canvas tab
-    const canvasOrigin = `https://${canvasUrl}`;
-    const tabs = await chrome.tabs.query({ url: `${canvasOrigin}/*` });
-
-    let tabId;
-    if (tabs.length > 0) {
-      tabId = tabs[0].id;
-    } else {
-      // Open Canvas in a new tab (background)
-      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 5, label: "Opening Canvas…" });
-      const tab = await chrome.tabs.create({ url: canvasOrigin, active: false });
-      tabId = tab.id;
-
-      // Wait for tab to finish loading
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Canvas took too long to load")), 30000);
-        chrome.tabs.onUpdated.addListener(function listener(id, info) {
-          if (id === tabId && info.status === "complete") {
-            clearTimeout(timeout);
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        });
-      });
-    }
-
-    // Inject content script
-    broadcastToPopup({ type: "SYNC_PROGRESS", percent: 8, label: "Connecting to Canvas…" });
-
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"],
-    });
-
-    // content.js will send CANVAS_DATA or SYNC_ERROR messages back
-    // (handled in the message listener above)
-
+    const tabId = await getCanvasTabId();
+    broadcastToPopup({ type: "SYNC_PROGRESS", percent: 15, label: "Fetching your courses…" });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (err) {
     await chrome.storage.session.set({ syncRunning: false });
     handleError(err.message ?? String(err));
   }
 }
 
-// ── Handle Canvas data returned from content.js ───────────────────────────────
+// ── Receive course list → send to popup for selection ─────────────────────────
+async function handleCourseList(courses) {
+  // Stash courses so phase 2 can reference them if needed
+  await chrome.storage.session.set({ pendingCourses: courses });
+  broadcastToPopup({ type: "COURSE_SELECTION", courses });
+}
+
+// ── Phase 2: fetch full data for selected courses ─────────────────────────────
+async function startPhase2(selectedIds) {
+  try {
+    await chrome.storage.session.set({ selectedCourseIds: selectedIds });
+
+    const tabId = await getCanvasTabId();
+    broadcastToPopup({ type: "SYNC_PROGRESS", percent: 10, label: "Syncing selected courses…" });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+  } catch (err) {
+    await chrome.storage.session.set({ syncRunning: false });
+    handleError(err.message ?? String(err));
+  }
+}
+
+// ── Handle full Canvas payload → POST to Study Circle ─────────────────────────
 async function handleCanvasData(payload) {
   try {
-    const { scUrl, apiToken } =
-      await chrome.storage.local.get(["scUrl", "apiToken"]);
+    const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
 
     const res = await fetch(`https://${scUrl}/api/canvas/import`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiToken}`,
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
       body: JSON.stringify(payload),
     });
 
@@ -110,8 +118,8 @@ async function handleCanvasData(payload) {
     }
 
     const result = await res.json();
-
     await chrome.storage.session.set({ syncRunning: false });
+    await chrome.storage.session.remove(["selectedCourseIds", "pendingCourses"]);
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {
@@ -125,9 +133,6 @@ function handleError(message) {
   broadcastToPopup({ type: "SYNC_ERROR", error: message });
 }
 
-// ── Broadcast to popup (if open) ──────────────────────────────────────────────
 function broadcastToPopup(msg) {
-  chrome.runtime.sendMessage(msg).catch(() => {
-    // Popup may be closed — that's fine
-  });
+  chrome.runtime.sendMessage(msg).catch(() => { /* popup may be closed */ });
 }

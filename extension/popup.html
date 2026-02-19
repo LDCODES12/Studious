@@ -48,6 +48,24 @@
     <p class="error-text" id="errorText"></p>
   </div>
 
+  <!-- Course picker overlay -->
+  <section class="course-picker" id="coursePicker" style="display:none">
+    <div class="settings-header">
+      <span class="settings-title">Select Courses</span>
+    </div>
+    <p class="picker-sub">Choose which courses to import into Study Circle.</p>
+    <div class="picker-controls">
+      <button class="btn-text" id="selectAllBtn">Select all</button>
+      <span class="picker-sep">·</span>
+      <button class="btn-text" id="selectNoneBtn">Clear</button>
+    </div>
+    <div id="courseList" class="course-list"></div>
+    <div class="settings-footer">
+      <button id="importBtn" class="btn-primary btn-sm">Import Selected</button>
+      <button id="cancelPickerBtn" class="btn-danger-link">Cancel</button>
+    </div>
+  </section>
+
   <!-- Settings overlay -->
   <section class="settings-panel" id="settingsPanel" style="display:none">
     <div class="settings-header">
