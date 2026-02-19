@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Study Circle — Canvas Sync</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <header>
+      <div class="logo-row">
+        <div class="logo-icon">SC</div>
+        <div class="logo-text">
+          <span class="logo-name">Study Circle</span>
+          <span class="logo-sub">Canvas Sync</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Status indicators -->
+    <section class="status-section">
+      <div class="status-row">
+        <span class="status-label">Canvas</span>
+        <span class="status-value" id="canvasStatus">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Study Circle</span>
+        <span class="status-value" id="scStatus">—</span>
+      </div>
+    </section>
+
+    <!-- Sync button + last sync -->
+    <section class="action-section">
+      <button id="syncBtn" class="btn-primary" disabled>Sync Now</button>
+      <p class="last-sync" id="lastSync"></p>
+    </section>
+
+    <!-- Progress (hidden until syncing) -->
+    <section class="progress-section" id="progressSection" hidden>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="progressFill"></div>
+      </div>
+      <p class="progress-label" id="progressLabel">Starting sync…</p>
+    </section>
+
+    <!-- Result (hidden until done) -->
+    <section class="result-section" id="resultSection" hidden>
+      <div class="result-grid">
+        <div class="result-item">
+          <span class="result-num" id="rCourses">0</span>
+          <span class="result-lbl">courses</span>
+        </div>
+        <div class="result-item">
+          <span class="result-num" id="rAssignments">0</span>
+          <span class="result-lbl">assignments</span>
+        </div>
+        <div class="result-item">
+          <span class="result-num" id="rModules">0</span>
+          <span class="result-lbl">modules</span>
+        </div>
+      </div>
+      <p class="result-note" id="resultNote"></p>
+    </section>
+
+    <!-- Error (hidden until error) -->
+    <section class="error-section" id="errorSection" hidden>
+      <p class="error-text" id="errorText"></p>
+    </section>
+
+    <!-- Divider -->
+    <hr class="divider" />
+
+    <!-- Settings toggle -->
+    <button class="settings-toggle" id="settingsToggle">
+      <span id="settingsArrow">▸</span> Settings
+    </button>
+
+    <!-- Settings panel -->
+    <section class="settings-panel" id="settingsPanel" hidden>
+      <div class="field">
+        <label class="field-label" for="canvasUrl">Canvas URL</label>
+        <input
+          type="text"
+          id="canvasUrl"
+          class="field-input"
+          placeholder="canvas.cornell.edu"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <span class="field-hint">Enter your school's Canvas domain (no https://)</span>
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="scUrl">Study Circle URL</label>
+        <input
+          type="text"
+          id="scUrl"
+          class="field-input"
+          placeholder="your-app.vercel.app"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <span class="field-hint">Your deployed Study Circle domain (no https://)</span>
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="apiToken">API Token</label>
+        <input
+          type="password"
+          id="apiToken"
+          class="field-input"
+          placeholder="Paste token from Settings page"
+          autocomplete="off"
+        />
+        <span class="field-hint">Generate this from Study Circle → Settings</span>
+      </div>
+
+      <div class="field-row">
+        <label class="field-label">Auto-sync</label>
+        <label class="toggle">
+          <input type="checkbox" id="autoSync" />
+          <span class="toggle-slider"></span>
+        </label>
+        <span class="field-hint-inline">Sync daily when Canvas is open</span>
+      </div>
+
+      <div class="settings-actions">
+        <button id="saveSettings" class="btn-primary btn-sm">Save Settings</button>
+        <span class="save-confirm" id="saveConfirm" hidden>Saved!</span>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

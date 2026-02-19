@@ -5,6 +5,7 @@ import {
   Users,
   Upload,
   FolderOpen,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 
@@ -21,6 +22,7 @@ export const mainNavItems: NavItem[] = [
   { label: "Schedule", href: "/schedule", icon: Calendar },
   { label: "Study Tools", href: "/study-tools", icon: Brain },
   { label: "Study Buddies", href: "/buddies", icon: Users },
+  { label: "Settings", href: "/settings", icon: Settings },
 ];
 
 export const courseColors: Record<
