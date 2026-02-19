@@ -79,6 +79,25 @@ body {
 .setup-title { font-size: 13px; font-weight: 600; }
 .setup-body  { font-size: 12px; color: #555; line-height: 1.5; }
 
+.setup-checklist { display: flex; flex-direction: column; gap: 5px; }
+
+.setup-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.check-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d1d5db;
+  flex-shrink: 0;
+}
+.setup-check.done .check-dot  { background: #22c55e; }
+.setup-check.done .check-label { color: #444; }
+.setup-check:not(.done) .check-label { color: #999; }
+
 /* ── Status ──────────────────────────────────────────────────── */
 .status-section {
   display: flex;
@@ -249,6 +268,10 @@ body {
 
 /* ── Fields ──────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: 4px; }
+/* Explicitly override hidden on flex containers — browser UA doesn't add !important */
+.field[hidden],
+.token-set-row[hidden],
+.field-row-toggle[hidden] { display: none !important; }
 
 .field-label {
   font-size: 12px;

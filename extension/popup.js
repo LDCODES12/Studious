@@ -140,6 +140,23 @@ async function init({ autoDetect = true } = {}) {
     setupView.hidden = false;
     readyView.hidden = true;
     canvasField.hidden = !!canvasUrl;
+
+    // Checklist — show exactly what's missing
+    const checkCanvas = document.getElementById("checkCanvas");
+    const checkSC     = document.getElementById("checkSC");
+    const checkToken  = document.getElementById("checkToken");
+
+    checkCanvas.className = "setup-check" + (canvasUrl ? " done" : "");
+    document.getElementById("checkCanvasLabel").textContent =
+      canvasUrl ? "Canvas: " + canvasUrl : "Canvas URL — enter below or open Canvas tab first";
+
+    checkSC.className = "setup-check" + (scUrl ? " done" : "");
+    document.getElementById("checkSCLabel").textContent =
+      scUrl ? "Study Circle: " + scUrl : "Study Circle URL — open the gear menu ⚙";
+
+    checkToken.className = "setup-check" + (apiToken ? " done" : "");
+    document.getElementById("checkTokenLabel").textContent =
+      apiToken ? "Token connected" : "API Token — go to Study Circle → Settings → Generate Token";
   }
 
   // Restore syncing state

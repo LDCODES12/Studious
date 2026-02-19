@@ -27,11 +27,20 @@
     <section id="setupView">
       <div class="setup-card">
         <p class="setup-title">Almost ready</p>
-        <p class="setup-body">
-          Go to <strong>Study Circle → Settings</strong> and click
-          <strong>Generate Token</strong>. Then come back here — the extension
-          will configure itself automatically.
-        </p>
+        <div class="setup-checklist">
+          <div class="setup-check" id="checkCanvas">
+            <span class="check-dot"></span>
+            <span class="check-label" id="checkCanvasLabel">Canvas URL</span>
+          </div>
+          <div class="setup-check" id="checkSC">
+            <span class="check-dot"></span>
+            <span class="check-label" id="checkSCLabel">Study Circle URL</span>
+          </div>
+          <div class="setup-check" id="checkToken">
+            <span class="check-dot"></span>
+            <span class="check-label" id="checkTokenLabel">API Token</span>
+          </div>
+        </div>
         <button class="btn-secondary full-width" id="rescanBtn">
           <span id="rescanIcon">⟳</span> Detect from open tabs
         </button>
