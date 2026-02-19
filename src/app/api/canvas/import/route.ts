@@ -2,7 +2,35 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { parseSyllabusTopics } from "@/lib/parse-syllabus";
 import crypto from "crypto";
-import pdfParse from "pdf-parse";
+import { Worker } from "worker_threads";
+
+/**
+ * Run pdf-parse in a worker thread so CPU-heavy font processing can't
+ * block the main event loop (which would prevent setTimeout from firing).
+ */
+function parsePdfInWorker(buf: Buffer, timeoutMs = 8_000): Promise<string> {
+  return new Promise((resolve) => {
+    const workerCode = `
+const { parentPort, workerData } = require('worker_threads');
+const pdfParse = require('pdf-parse');
+const buf = Buffer.from(workerData.buf);
+pdfParse(buf, { max: 15 })
+  .then(r  => parentPort.postMessage(r.text || ''))
+  .catch(() => parentPort.postMessage(''));
+`;
+    let done = false;
+    const worker = new Worker(workerCode, { eval: true, workerData: { buf } });
+    const timer = setTimeout(() => {
+      if (!done) { done = true; worker.terminate(); resolve(""); }
+    }, timeoutMs);
+    worker.on("message", (text: string) => {
+      if (!done) { done = true; clearTimeout(timer); resolve(text); }
+    });
+    worker.on("error", () => {
+      if (!done) { done = true; clearTimeout(timer); resolve(""); }
+    });
+  });
+}
 
 // ─── Types mirroring what the extension sends ────────────────────────────────
 
@@ -305,16 +333,9 @@ export async function POST(request: NextRequest) {
       for (const sf of syllabusFiles) {
         try {
           const buf = Buffer.from(sf.base64, "base64");
-          // pdf-parse loads the full PDF structure even with { max } set, so a
-          // corrupt/encrypted PDF can still hang. Use a soft timeout that resolves
-          // with empty text rather than throwing — the function always completes.
-          const parsed = await Promise.race([
-            pdfParse(buf, { max: 15 }),
-            new Promise<{ text: string }>((resolve) =>
-              setTimeout(() => resolve({ text: "" }), 8_000)
-            ),
-          ]);
-          const pdfText = parsed.text.trim();
+          // Run pdf-parse in a worker thread so CPU-heavy font processing
+          // can't block the main event loop. Times out after 8s.
+          const pdfText = (await parsePdfInWorker(buf)).trim();
 
           // Prefer PDF text if it's more complete than the HTML body
           if (pdfText.length > syllabusText.length) {
