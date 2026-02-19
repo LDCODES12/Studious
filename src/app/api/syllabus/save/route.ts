@@ -99,8 +99,16 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Save weekly topics if provided
-    const courseTopics = topicsByCourse?.[courseName];
+    // Save weekly topics if provided — try exact match first, then fuzzy
+    const lc = courseName.toLowerCase();
+    const courseTopics =
+      topicsByCourse?.[courseName] ??
+      Object.entries(topicsByCourse ?? {}).find(
+        ([k]) =>
+          k.toLowerCase() === lc ||
+          k.toLowerCase().includes(lc) ||
+          lc.includes(k.toLowerCase())
+      )?.[1];
     if (courseTopics && courseTopics.length > 0) {
       await db.courseTopic.deleteMany({ where: { courseId: course.id } });
       await db.courseTopic.createMany({

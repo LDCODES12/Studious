@@ -75,28 +75,37 @@ export async function parseSyllabusTopics(text: string): Promise<ParsedTopic[]> 
     messages: [
       {
         role: "system",
-        content: `You are a syllabus parser. Extract the weekly content schedule — topics covered each week and assigned readings.
+        content: `You are an expert academic content extractor. Extract the COMPLETE week-by-week learning schedule from this syllabus — every topic, concept, lecture subject, and reading. Be exhaustive.
 
-INCLUDE:
-- Weekly topics/subjects (e.g. "Sorting Algorithms", "The Civil War")
-- Assigned readings (textbook chapters, articles)
-- Approximate start dates if listed
-- Brief notes about labs, field trips, guest speakers (NOT graded assessments)
+IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
+- Week-based: "Week 1: Introduction, Week 2: ..." → use directly
+- Lecture-based: "Lecture 1, Lecture 2, ..." → group 2-3 lectures per week
+- Date-based: Individual class session dates → calculate week numbers from the dates
+- Module/unit-based: Group modules into sequential weeks
+- Table format: Many syllabi use schedule tables — read every row
 
-EXCLUDE:
-- Graded assessments (quizzes, exams, homework, projects)
-- Administrative info, office hours, regrade deadlines
+WHAT TO EXTRACT (be thorough):
+- Every topic title, subtopic, and specific concept (e.g. "Big-O notation", "Dijkstra's algorithm", "The French Revolution", "protein folding")
+- All readings: textbook chapters with numbers, papers, articles — include page ranges and chapter titles when listed
+- Lab or recitation topics if different from lecture content
+- Guest lectures, field trips, special sessions and their topics
+- The start date for each week if you can determine it from dates in the schedule
 
-Return JSON with a "weeks" array. Each item must have:
-- weekNumber: integer (1-based)
-- weekLabel: 2-5 word label for the main topic
-- startDate: ISO date (YYYY-MM-DD) if available, otherwise omit
-- topics: string array of topics covered
-- readings: string array (e.g. "Chapter 3", "Smith et al. 2020")
-- notes: optional brief note
-- courseName: course name from the syllabus header
+WHAT NOT TO EXTRACT:
+- Graded items with due dates (homework, quizzes, exams, projects) — those are handled separately
+- Grading policies, office hours, late policy, attendance rules
+- Administrative dates (registration deadlines, drop dates)
 
-If no weekly schedule exists, return { "weeks": [] }.`,
+OUTPUT: Return JSON with a "weeks" array. Include EVERY week of the course — if it is a 15-week course, return 15 entries. Do not truncate or summarize. Each week must have:
+- weekNumber: integer starting at 1
+- weekLabel: 3-7 word description of the main theme (e.g. "Dynamic Programming and Memoization")
+- startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
+- topics: COMPLETE array of ALL topics/concepts for this week — list every single one, do not shorten
+- readings: COMPLETE array of ALL readings (chapter numbers, titles, page ranges, paper names)
+- notes: optional — only for truly special notes like "No class — Spring Break" or "Lab meets in Room 204"
+- courseName: exact course name/code from the syllabus header
+
+If the syllabus genuinely contains no content schedule whatsoever, return {"weeks": []}.`,
       },
       { role: "user", content: text },
     ],

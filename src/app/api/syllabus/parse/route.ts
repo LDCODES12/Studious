@@ -43,10 +43,15 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          for (const topic of topics) {
-            const key = topic.courseName;
-            if (!topicsByCourse[key]) topicsByCourse[key] = [];
-            topicsByCourse[key].push(topic);
+          if (topics.length > 0) {
+            // Key by the event courseName (same source the save route uses) to
+            // guarantee the lookup matches. Fall back to what the AI returned.
+            const courseKey = events[0]?.courseName ?? topics[0]?.courseName;
+            if (courseKey) {
+              topicsByCourse[courseKey] = topics.map(
+                ({ courseName: _cn, ...rest }) => rest
+              );
+            }
           }
         })
     );

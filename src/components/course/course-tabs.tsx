@@ -189,12 +189,12 @@ export function CourseTabs({
   return (
     <Tabs defaultValue="assignments">
       <TabsList className="mb-4">
-        <TabsTrigger value="assignments">Assignments</TabsTrigger>
+        <TabsTrigger value="assignments">Deadlines</TabsTrigger>
         <TabsTrigger value="content">Content</TabsTrigger>
         <TabsTrigger value="materials">Materials</TabsTrigger>
       </TabsList>
 
-      {/* ── Assignments Tab ── */}
+      {/* ── Deadlines Tab ── */}
       <TabsContent value="assignments">
         {sorted.length === 0 ? (
           <div className="rounded-lg border border-border bg-card px-6 py-10 text-center">
