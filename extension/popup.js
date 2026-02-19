@@ -388,4 +388,10 @@ function timeAgo(ts) {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-render();
+render().then(async () => {
+  // If picker message was missed while popup was closed, recover from session
+  const session = await chrome.storage.session.get(["pendingCourses", "syncRunning"]);
+  if (session.syncRunning && session.pendingCourses?.length) {
+    showCoursePicker(session.pendingCourses);
+  }
+});

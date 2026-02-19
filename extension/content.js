@@ -42,35 +42,40 @@
 
   // ── Phase 1: fetch course list and let user pick ──────────────────────────
   if (!selectedIds) {
-    progress(30, "Fetching your courses…");
+    try {
+      progress(30, "Fetching your courses…");
 
-    const rawCourses = await fetchAll(
-      `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
-      `&include[]=teachers&include[]=term&per_page=100`
-    );
+      const rawCourses = await fetchAll(
+        `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
+        `&include[]=teachers&include[]=term&per_page=100`
+      );
 
-    const courses = rawCourses
-      .filter((c) => c.name && !c.access_restricted_by_date)
-      .map((c) => ({
-        id: c.id,
-        name: c.name,
-        courseCode: c.course_code ?? null,
-        term: c.term?.name ?? null,
-        instructor: c.teachers?.[0]?.display_name ?? null,
-      }));
+      const courses = rawCourses
+        .filter((c) => c.name && !c.access_restricted_by_date)
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          courseCode: c.course_code ?? null,
+          term: c.term?.name ?? null,
+          instructor: c.teachers?.[0]?.display_name ?? null,
+        }));
 
-    if (courses.length === 0) {
-      chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: "No active Canvas courses found." });
-      return;
+      if (courses.length === 0) {
+        chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: "No active Canvas courses found." });
+        return;
+      }
+
+      chrome.runtime.sendMessage({ type: "CANVAS_COURSES", courses });
+    } catch (err) {
+      chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: `Could not fetch courses: ${err.message}` });
     }
-
-    chrome.runtime.sendMessage({ type: "CANVAS_COURSES", courses });
     return;
   }
 
   // ── Phase 2: fetch full data for selected courses only ────────────────────
   const selectedSet = new Set(selectedIds.map(String));
 
+  try {
   progress(10, "Fetching your courses…");
   const rawCourses = await fetchAll(
     `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
@@ -131,4 +136,7 @@
 
   progress(90, "Saving to Study Circle…");
   chrome.runtime.sendMessage({ type: "CANVAS_DATA", payload });
+  } catch (err) {
+    chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: `Sync failed: ${err.message}` });
+  }
 })();
