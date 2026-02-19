@@ -311,7 +311,7 @@ export async function POST(request: NextRequest) {
           const parsed = await Promise.race([
             pdfParse(buf, { max: 15 }),
             new Promise<{ text: string }>((resolve) =>
-              setTimeout(() => resolve({ text: "" }), 12_000)
+              setTimeout(() => resolve({ text: "" }), 8_000)
             ),
           ]);
           const pdfText = parsed.text.trim();
