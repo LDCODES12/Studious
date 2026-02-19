@@ -387,11 +387,37 @@ function timeAgo(ts) {
   return `${Math.floor(hrs / 24)} day${Math.floor(hrs / 24) !== 1 ? "s" : ""} ago`;
 }
 
+// ── Live stats ────────────────────────────────────────────────────────────────
+
+async function refreshLiveStats() {
+  const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
+  if (!scUrl || !apiToken) return;
+  try {
+    const res = await fetch(`https://${scUrl}/api/canvas/import`, {
+      headers: { "Authorization": `Bearer ${apiToken}` },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.courses !== "number") return;
+
+    // Show live counts — reflects the website's actual current state
+    rCourses.textContent     = data.courses;
+    rAssignments.textContent = data.assignments;
+    rModules.textContent     = data.topics;
+    resultNote.textContent   = `${data.courses} course${data.courses !== 1 ? "s" : ""} in Study Circle`;
+    resultSection.hidden = false;
+    errorSection.hidden  = true;
+  } catch { /* offline or unreachable — keep cached display */ }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 render().then(async () => {
   // If picker message was missed while popup was closed, recover from session
   const session = await chrome.storage.session.get(["pendingCourses", "syncRunning"]);
   if (session.syncRunning && session.pendingCourses?.length) {
     showCoursePicker(session.pendingCourses);
+    return;
   }
+  // Fetch live counts from Study Circle so the popup always reflects reality
+  refreshLiveStats();
 });

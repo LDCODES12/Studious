@@ -88,26 +88,37 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-// ─── Route ───────────────────────────────────────────────────────────────────
+// ─── Auth helper ─────────────────────────────────────────────────────────────
+
+async function authedUser(request: NextRequest) {
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const rawToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+  if (!rawToken) return null;
+  const hash = sha256(rawToken);
+  return db.user.findUnique({ where: { apiTokenHash: hash }, select: { id: true } });
+}
+
+// ─── GET — live stats (called by extension on popup open) ────────────────────
+
+export async function GET(request: NextRequest) {
+  const user = await authedUser(request);
+  if (!user) return NextResponse.json({ error: "Invalid or missing token" }, { status: 401 });
+
+  const [courses, assignments, topics] = await Promise.all([
+    db.course.count({ where: { userId: user.id } }),
+    db.assignment.count({ where: { course: { userId: user.id } } }),
+    db.courseTopic.count({ where: { course: { userId: user.id } } }),
+  ]);
+
+  return NextResponse.json({ courses, assignments, topics });
+}
+
+// ─── POST — full Canvas sync ──────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   // 1. Authenticate via Bearer token
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const rawToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
-
-  if (!rawToken) {
-    return NextResponse.json({ error: "Missing authorization token" }, { status: 401 });
-  }
-
-  const hash = sha256(rawToken);
-  const user = await db.user.findUnique({
-    where: { apiTokenHash: hash },
-    select: { id: true },
-  });
-
-  if (!user) {
-    return NextResponse.json({ error: "Invalid or revoked token" }, { status: 401 });
-  }
+  const user = await authedUser(request);
+  if (!user) return NextResponse.json({ error: "Invalid or missing token" }, { status: 401 });
 
   // 2. Parse payload
   const payload: ImportPayload = await request.json();
