@@ -305,10 +305,15 @@ export async function POST(request: NextRequest) {
       for (const sf of syllabusFiles) {
         try {
           const buf = Buffer.from(sf.base64, "base64");
-          // Limit to first 15 pages — syllabi are short, and parsing hundreds
-          // of pages (lecture packets etc.) causes hangs on certain encodings.
-          // The { max: 15 } option tells pdf-parse to stop after page 15.
-          const parsed = await pdfParse(buf, { max: 15 });
+          // pdf-parse loads the full PDF structure even with { max } set, so a
+          // corrupt/encrypted PDF can still hang. Use a soft timeout that resolves
+          // with empty text rather than throwing — the function always completes.
+          const parsed = await Promise.race([
+            pdfParse(buf, { max: 15 }),
+            new Promise<{ text: string }>((resolve) =>
+              setTimeout(() => resolve({ text: "" }), 12_000)
+            ),
+          ]);
           const pdfText = parsed.text.trim();
 
           // Prefer PDF text if it's more complete than the HTML body
