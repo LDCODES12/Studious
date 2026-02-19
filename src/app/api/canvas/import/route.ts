@@ -302,6 +302,8 @@ export async function POST(request: NextRequest) {
       // ── b) Build best available syllabus text ─────────────────────────────
       let syllabusText = c.syllabusBody ? htmlToText(c.syllabusBody) : "";
 
+      console.log(`[canvas-import] ${c.name}: syllabusBody=${syllabusText.length}chars, pdfFiles=${(c.syllabusFiles ?? []).length}, shouldRunAI=${shouldRunAI}`);
+
       // ── c) Process PDF files ───────────────────────────────────────────────
       const syllabusFiles = c.syllabusFiles ?? [];
       for (const sf of syllabusFiles) {
@@ -309,6 +311,8 @@ export async function POST(request: NextRequest) {
           const buf = Buffer.from(sf.base64, "base64");
           const parsed = await pdfParse(buf);
           const pdfText = parsed.text.trim();
+
+          console.log(`[canvas-import] ${c.name}: PDF "${sf.fileName}" → ${pdfText.length} chars`);
 
           // Prefer PDF text if it's more complete than the HTML body
           if (pdfText.length > syllabusText.length) {
@@ -338,6 +342,7 @@ export async function POST(request: NextRequest) {
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
+      console.log(`[canvas-import] ${c.name}: final syllabusText=${syllabusText.length}chars → ${!shouldRunAI ? "SKIP (already has AI topics)" : syllabusText.length < 500 ? "SKIP (text too short)" : "RUNNING AI"}`);
       if (!shouldRunAI || syllabusText.length < 500) return;
 
       try {
