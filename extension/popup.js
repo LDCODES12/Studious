@@ -190,13 +190,23 @@ saveSettings.addEventListener("click", async () => {
   await chrome.alarms.clear("autoSync");
   if (autoSync) chrome.alarms.create("autoSync", { periodInMinutes: 1440 });
 
-  // Show confirmation
+  // Read back exactly what's now in storage — don't trust local vars
+  const saved = await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken"]);
+
   saveConfirm.hidden = false;
   setTimeout(() => { saveConfirm.hidden = true; }, 2000);
-
-  // Close panel and refresh view — skip auto-detect since user just set manually
   settingsPanel.hidden = true;
-  await init({ autoDetect: false });
+
+  if (saved.canvasUrl && saved.scUrl && saved.apiToken) {
+    // All three present — go straight to ready view
+    setupView.hidden = true;
+    readyView.hidden = false;
+    canvasStatus.textContent = saved.canvasUrl;
+    scStatus.textContent     = saved.scUrl;
+  } else {
+    // Something still missing — show setup with checklist
+    await init({ autoDetect: false });
+  }
 });
 
 replaceTokenBtn.addEventListener("click", () => {
