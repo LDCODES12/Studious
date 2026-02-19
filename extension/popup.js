@@ -197,7 +197,7 @@ function showCoursePicker(courses) {
       const check = document.createElement("input");
       check.type = "checkbox";
       check.value = String(c.id);
-      check.checked = true;
+      check.checked = false;
 
       const info = document.createElement("div");
       info.className = "course-info";
