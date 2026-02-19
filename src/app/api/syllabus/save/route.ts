@@ -55,6 +55,8 @@ export async function POST(request: NextRequest) {
   const nextColor = () =>
     COLORS.find((c) => !usedColors.has(c)) ?? COLORS[existingCourses.length % COLORS.length];
 
+  const savedCourses: { id: string; name: string }[] = [];
+
   for (const [courseName, courseEvents] of byCourse) {
     // Find or create the course
     let course = await db.course.findFirst({
@@ -73,6 +75,8 @@ export async function POST(request: NextRequest) {
         },
       });
     }
+
+    savedCourses.push({ id: course.id, name: course.name });
 
     // Upsert assignments (avoid duplicates on re-upload)
     for (const event of courseEvents) {
@@ -99,7 +103,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Save weekly topics if provided — try exact match first, then fuzzy
+    // Save weekly topics — try exact match first, then fuzzy
     const lc = courseName.toLowerCase();
     const courseTopics =
       topicsByCourse?.[courseName] ??
@@ -125,5 +129,5 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, courses: savedCourses });
 }

@@ -2,11 +2,12 @@
 
 import { useState, useEffect } from "react";
 import { format, parseISO } from "date-fns";
-import { ChevronRight, CalendarCheck } from "lucide-react";
+import { ChevronRight, CalendarCheck, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MaterialCard } from "./material-card";
 import { MaterialUploader, type UploadedMaterial } from "./material-uploader";
+import { QuizSection } from "./quiz-section";
 
 interface Assignment {
   id: string;
@@ -26,6 +27,7 @@ interface CourseTopic {
   topics: string[];
   readings: string[];
   notes: string | null;
+  completedTopics: string[];
 }
 
 interface CourseMaterial {
@@ -34,6 +36,7 @@ interface CourseMaterial {
   detectedType: string;
   summary: string;
   relatedTopics: string[];
+  storedForAI: boolean;
   uploadedAt: string;
 }
 
@@ -52,8 +55,39 @@ const statusDot: Record<string, string> = {
   graded: "bg-green-500",
 };
 
-function WeekTopicSection({ topic }: { topic: CourseTopic }) {
+function WeekTopicSection({
+  topic,
+  courseId,
+  onProgressUpdate,
+}: {
+  topic: CourseTopic;
+  courseId: string;
+  onProgressUpdate: (topicId: string, completed: string[]) => void;
+}) {
   const [open, setOpen] = useState(topic.weekNumber <= 2);
+  const [completed, setCompleted] = useState<Set<string>>(new Set(topic.completedTopics));
+  const [saving, setSaving] = useState(false);
+
+  const toggleTopic = async (t: string) => {
+    const next = new Set(completed);
+    if (next.has(t)) next.delete(t);
+    else next.add(t);
+    setCompleted(next);
+    setSaving(true);
+    try {
+      await fetch(`/api/courses/${courseId}/topics/${topic.id}/progress`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completedTopics: Array.from(next) }),
+      });
+      onProgressUpdate(topic.id, Array.from(next));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const doneCount = completed.size;
+  const totalCount = topic.topics.length;
 
   return (
     <div className="rounded-lg border border-border bg-card">
@@ -69,6 +103,20 @@ function WeekTopicSection({ topic }: { topic: CourseTopic }) {
         />
         <span className="text-[13px] font-medium">Week {topic.weekNumber}</span>
         <span className="text-[13px] text-muted-foreground">· {topic.weekLabel}</span>
+        {totalCount > 0 && (
+          <span
+            className={cn(
+              "ml-2 rounded-full px-2 py-0.5 text-[11px] font-medium",
+              doneCount === totalCount
+                ? "bg-green-100 text-green-700"
+                : doneCount > 0
+                ? "bg-blue-50 text-blue-600"
+                : "bg-gray-100 text-gray-500"
+            )}
+          >
+            {doneCount}/{totalCount}
+          </span>
+        )}
         {topic.startDate && (
           <span className="ml-auto text-[12px] text-muted-foreground">
             {format(parseISO(topic.startDate), "MMM d")}
@@ -84,12 +132,33 @@ function WeekTopicSection({ topic }: { topic: CourseTopic }) {
                 Topics
               </p>
               <ul className="space-y-1">
-                {topic.topics.map((t, i) => (
-                  <li key={i} className="flex items-start gap-2 text-[13px]">
-                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-foreground/40" />
-                    {t}
-                  </li>
-                ))}
+                {topic.topics.map((t, i) => {
+                  const done = completed.has(t);
+                  return (
+                    <li key={i} className="flex items-start gap-2">
+                      <button
+                        onClick={() => toggleTopic(t)}
+                        disabled={saving}
+                        className={cn(
+                          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors",
+                          done
+                            ? "border-green-500 bg-green-500 text-white"
+                            : "border-border hover:border-foreground/40"
+                        )}
+                      >
+                        {done && <Check className="h-2.5 w-2.5" />}
+                      </button>
+                      <span
+                        className={cn(
+                          "text-[13px] leading-snug",
+                          done && "text-muted-foreground line-through decoration-muted-foreground/40"
+                        )}
+                      >
+                        {t}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -119,7 +188,7 @@ function WeekTopicSection({ topic }: { topic: CourseTopic }) {
 
 export function CourseTabs({
   assignments,
-  topics,
+  topics: initialTopics,
   materials: initialMaterials,
   courseId,
   googleConnected,
@@ -129,9 +198,12 @@ export function CourseTabs({
   );
 
   const [materials, setMaterials] = useState<CourseMaterial[]>(initialMaterials);
+  const [topics, setTopics] = useState<CourseTopic[]>(initialTopics);
   const [calendarStatuses, setCalendarStatuses] = useState<
     Map<string, "synced" | "missing" | "loading">
   >(new Map());
+
+  const hasStudyMaterials = materials.some((m) => m.storedForAI);
 
   // Initialize and fetch calendar statuses
   useEffect(() => {
@@ -186,12 +258,19 @@ export function CourseTabs({
     setMaterials((prev) => [material, ...prev]);
   };
 
+  const handleProgressUpdate = (topicId: string, completed: string[]) => {
+    setTopics((prev) =>
+      prev.map((t) => (t.id === topicId ? { ...t, completedTopics: completed } : t))
+    );
+  };
+
   return (
     <Tabs defaultValue="assignments">
       <TabsList className="mb-4">
         <TabsTrigger value="assignments">Deadlines</TabsTrigger>
         <TabsTrigger value="content">Content</TabsTrigger>
         <TabsTrigger value="materials">Materials</TabsTrigger>
+        <TabsTrigger value="quiz">Quiz</TabsTrigger>
       </TabsList>
 
       {/* ── Deadlines Tab ── */}
@@ -260,7 +339,12 @@ export function CourseTabs({
         ) : (
           <div className="space-y-2">
             {topics.map((topic) => (
-              <WeekTopicSection key={topic.id} topic={topic} />
+              <WeekTopicSection
+                key={topic.id}
+                topic={topic}
+                courseId={courseId}
+                onProgressUpdate={handleProgressUpdate}
+              />
             ))}
           </div>
         )}
@@ -287,6 +371,11 @@ export function CourseTabs({
             </div>
           )}
         </div>
+      </TabsContent>
+
+      {/* ── Quiz Tab ── */}
+      <TabsContent value="quiz">
+        <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} />
       </TabsContent>
     </Tabs>
   );

@@ -70,19 +70,21 @@ model Course {
   assignments Assignment[]
   topics      CourseTopic[]
   materials   CourseMaterial[]
+  quizzes     Quiz[]
 }
 
 model CourseTopic {
-  id          String   @id @default(cuid())
-  courseId    String
-  weekNumber  Int
-  weekLabel   String
-  startDate   String?
-  topics      String[]
-  readings    String[]
-  notes       String?
-  createdAt   DateTime @default(now())
-  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  courseId        String
+  weekNumber      Int
+  weekLabel       String
+  startDate       String?
+  topics          String[]
+  readings        String[]
+  notes           String?
+  completedTopics String[] @default([])
+  createdAt       DateTime @default(now())
+  course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }
 
 model CourseMaterial {
@@ -93,8 +95,28 @@ model CourseMaterial {
   summary       String
   relatedTopics String[]
   rawText       String
+  storedForAI   Boolean  @default(false)
   uploadedAt    DateTime @default(now())
   course        Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+}
+
+model Quiz {
+  id        String         @id @default(cuid())
+  courseId  String
+  title     String
+  createdAt DateTime       @default(now())
+  course    Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  questions QuizQuestion[]
+}
+
+model QuizQuestion {
+  id           String   @id @default(cuid())
+  quizId       String
+  question     String
+  options      String[]
+  correctIndex Int
+  explanation  String?
+  quiz         Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
 }
 
 model Assignment {

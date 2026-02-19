@@ -4,6 +4,7 @@ import {
   Brain,
   Users,
   Upload,
+  FolderOpen,
   type LucideIcon,
 } from "lucide-react";
 
@@ -16,6 +17,7 @@ export interface NavItem {
 export const mainNavItems: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
   { label: "Upload", href: "/upload", icon: Upload },
+  { label: "Library", href: "/library", icon: FolderOpen },
   { label: "Schedule", href: "/schedule", icon: Calendar },
   { label: "Study Tools", href: "/study-tools", icon: Brain },
   { label: "Study Buddies", href: "/buddies", icon: Users },

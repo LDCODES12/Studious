@@ -37,6 +37,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
     detectedType: m.detectedType,
     summary: m.summary,
     relatedTopics: m.relatedTopics,
+    storedForAI: m.storedForAI,
     uploadedAt: m.uploadedAt.toISOString(),
   }));
 

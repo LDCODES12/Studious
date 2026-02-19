@@ -42,6 +42,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const topicLabels = course.topics.map((t) => t.weekLabel);
   const analysis = await analyzeCourseMaterial(text, topicLabels);
 
+  const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
+
   const material = await db.courseMaterial.create({
     data: {
       courseId,
@@ -50,6 +52,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
       rawText: text.slice(0, 10000),
+      storedForAI,
     },
   });
 
@@ -61,6 +64,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       detectedType: material.detectedType,
       summary: material.summary,
       relatedTopics: material.relatedTopics,
+      storedForAI: material.storedForAI,
       uploadedAt: material.uploadedAt.toISOString(),
     },
     { status: 201 }
@@ -92,6 +96,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       detectedType: true,
       summary: true,
       relatedTopics: true,
+      storedForAI: true,
       uploadedAt: true,
     },
   });

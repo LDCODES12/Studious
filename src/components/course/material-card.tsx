@@ -7,6 +7,7 @@ interface CourseMaterial {
   detectedType: string;
   summary: string;
   relatedTopics: string[];
+  storedForAI?: boolean;
   uploadedAt: string;
 }
 
@@ -14,6 +15,7 @@ const typeLabels: Record<string, string> = {
   problem_set: "Problem Set",
   lecture_notes: "Lecture Notes",
   lecture_slides: "Lecture Slides",
+  textbook: "Textbook",
   syllabus: "Syllabus",
   other: "Other",
 };
@@ -38,14 +40,21 @@ export function MaterialCard({ material }: { material: CourseMaterial }) {
             </p>
           )}
         </div>
-        <span
-          className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
-            typeBadgeColor[material.detectedType] ?? typeBadgeColor.other
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[11px] font-medium",
+              typeBadgeColor[material.detectedType] ?? typeBadgeColor.other
+            )}
+          >
+            {typeLabels[material.detectedType] ?? "Other"}
+          </span>
+          {material.storedForAI && (
+            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-700">
+              Study material
+            </span>
           )}
-        >
-          {typeLabels[material.detectedType] ?? "Other"}
-        </span>
+        </div>
       </div>
 
       {material.relatedTopics.length > 0 && (

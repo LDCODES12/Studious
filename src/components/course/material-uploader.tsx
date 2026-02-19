@@ -9,6 +9,7 @@ export interface UploadedMaterial {
   detectedType: string;
   summary: string;
   relatedTopics: string[];
+  storedForAI: boolean;
   uploadedAt: string;
 }
 

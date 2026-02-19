@@ -8,7 +8,7 @@ import { GoogleConnectButton } from "@/components/upload/google-connect-button";
 import { extractTextFromPDF } from "@/lib/extract-pdf-text";
 import { type SyllabusEvent } from "@/types";
 
-type Stage = "upload" | "parsing" | "review" | "syncing" | "done";
+type Stage = "upload" | "parsing" | "review" | "syncing";
 
 function UploadPageInner() {
   const searchParams = useSearchParams();
@@ -16,11 +16,7 @@ function UploadPageInner() {
   const [files, setFiles] = useState<File[]>([]);
   const [events, setEvents] = useState<SyllabusEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [syncResults, setSyncResults] = useState<
-    { title: string; success: boolean; googleEventId?: string | null }[]
-  >([]);
   const [topicsByCourse, setTopicsByCourse] = useState<Record<string, unknown[]>>({});
-  const [removing, setRemoving] = useState(false);
 
   const googleConnected = searchParams.get("google") === "connected";
 
@@ -117,12 +113,11 @@ function UploadPageInner() {
         if (res.ok) {
           const data = await res.json();
           calendarResults = data.results;
-          setSyncResults(data.results);
         }
       }
 
       // Always save to Study Circle DB (with topics)
-      await fetch("/api/syllabus/save", {
+      const saveRes = await fetch("/api/syllabus/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ events: selected, syncResults: calendarResults, topicsByCourse }),
@@ -130,42 +125,23 @@ function UploadPageInner() {
 
       sessionStorage.removeItem("pendingEvents");
       sessionStorage.removeItem("pendingTopicsByCourse");
-      setStage("done");
+
+      const saveData = await saveRes.json();
+      const courses: { id: string; name: string }[] = saveData.courses ?? [];
+      if (courses.length === 1) {
+        window.location.href = `/courses/${courses[0].id}`;
+      } else {
+        window.location.href = "/";
+      }
     } catch {
       setError("Failed to save. Please try again.");
       setStage("review");
     }
   };
 
-  const handleRemove = async () => {
-    const ids = syncResults
-      .filter((r) => r.success && r.googleEventId)
-      .map((r) => r.googleEventId as string);
-    if (ids.length === 0) return;
-
-    setRemoving(true);
-    setError(null);
-
-    try {
-      const res = await fetch("/api/calendar/remove", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventIds: ids }),
-      });
-
-      if (!res.ok) throw new Error("Remove failed");
-
-      handleReset();
-    } catch {
-      setError("Failed to remove events from Google Calendar.");
-      setRemoving(false);
-    }
-  };
-
   const handleReset = () => {
     setFiles([]);
     setEvents([]);
-    setSyncResults([]);
     setTopicsByCourse({});
     setError(null);
     setStage("upload");
@@ -259,44 +235,6 @@ function UploadPageInner() {
         </div>
       )}
 
-      {/* Done stage */}
-      {stage === "done" && (
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border p-4">
-            <p className="text-[13px] font-medium">Sync complete</p>
-            <div className="mt-3 space-y-1">
-              {syncResults.map((r, i) => (
-                <div key={i} className="flex items-center gap-2 text-[13px]">
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      r.success ? "bg-green-500" : "bg-red-500"
-                    }`}
-                  />
-                  <span className={r.success ? "" : "text-red-600"}>
-                    {r.title}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleRemove}
-              disabled={removing}
-              className="rounded-md border border-red-200 px-4 py-2 text-[13px] font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
-            >
-              {removing ? "Removing..." : "Remove from Calendar"}
-            </button>
-            <button
-              onClick={handleReset}
-              className="rounded-md border border-border px-4 py-2 text-[13px] font-medium transition-colors hover:bg-accent"
-            >
-              Upload another syllabus
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
