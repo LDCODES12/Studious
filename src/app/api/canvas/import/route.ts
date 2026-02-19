@@ -282,6 +282,9 @@ export async function POST(request: NextRequest) {
   let aiTopicsCreated = 0;
   let syllabusFilesImported = 0;
 
+  // Collect per-course debug info for a single summary log
+  const debugRows: string[] = [];
+
   await Promise.all(
     courses.map(async (c) => {
       const scCourseId = courseIdMap.get(c.id);
@@ -297,8 +300,6 @@ export async function POST(request: NextRequest) {
       // ── b) Build best available syllabus text ─────────────────────────────
       let syllabusText = c.syllabusBody ? htmlToText(c.syllabusBody) : "";
 
-      console.log(`[canvas-import] ${c.name}: syllabusBody=${syllabusText.length}chars, pdfFiles=${(c.syllabusFiles ?? []).length}, shouldRunAI=${shouldRunAI}`);
-
       // ── c) Process PDF files ───────────────────────────────────────────────
       const syllabusFiles = c.syllabusFiles ?? [];
       for (const sf of syllabusFiles) {
@@ -306,8 +307,6 @@ export async function POST(request: NextRequest) {
           const buf = Buffer.from(sf.base64, "base64");
           const parsed = await pdfParse(buf);
           const pdfText = parsed.text.trim();
-
-          console.log(`[canvas-import] ${c.name}: PDF "${sf.fileName}" → ${pdfText.length} chars`);
 
           // Prefer PDF text if it's more complete than the HTML body
           if (pdfText.length > syllabusText.length) {
@@ -337,8 +336,14 @@ export async function POST(request: NextRequest) {
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
-      console.log(`[canvas-import] ${c.name}: final syllabusText=${syllabusText.length}chars → ${!shouldRunAI ? "SKIP (already has AI topics)" : syllabusText.length < 500 ? "SKIP (text too short)" : "RUNNING AI"}`);
-      if (!shouldRunAI || syllabusText.length < 500) return;
+      const aiStatus = !shouldRunAI ? "skip:has-ai-topics"
+        : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length})`
+        : `run(${syllabusText.length})`;
+
+      if (!shouldRunAI || syllabusText.length < 500) {
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ${aiStatus}`);
+        return;
+      }
 
       try {
         // Truncate to ~12k chars — enough for a full semester syllabus
@@ -367,9 +372,14 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-      } catch { /* if AI fails, module-based topics remain as fallback */ }
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ai-ran(${topics.length} weeks)`);
+      } catch (err) {
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=${syllabusFiles.length} → ai-error:${err}`);
+      }
     })
   );
+
+  console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
 
   return NextResponse.json({
     ok: true,
