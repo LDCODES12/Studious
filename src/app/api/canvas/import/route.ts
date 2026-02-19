@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { parseSyllabusTopics } from "@/lib/parse-syllabus";
 import crypto from "crypto";
+import pdfParse from "pdf-parse";
 
 // ─── Types mirroring what the extension sends ────────────────────────────────
+
+interface SyllabusFile {
+  fileName: string;
+  base64: string;
+}
 
 interface CanvasCourse {
   id: number;
@@ -10,6 +17,10 @@ interface CanvasCourse {
   courseCode: string | null;
   term: string | null;
   instructor: string | null;
+  /** HTML from Canvas's built-in syllabus page, or null */
+  syllabusBody?: string | null;
+  /** Syllabus PDFs downloaded by the extension (base64-encoded) */
+  syllabusFiles?: SyllabusFile[];
 }
 
 interface CanvasAssignment {
@@ -60,6 +71,21 @@ function inferType(title: string, submissionType: string): string {
 /** Canvas returns ISO datetime; we store YYYY-MM-DD */
 function toDateOnly(iso: string): string {
   return iso.slice(0, 10);
+}
+
+/** Strip HTML tags and decode common entities to plain text. */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#\d+;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ─── Route ───────────────────────────────────────────────────────────────────
@@ -163,7 +189,6 @@ export async function POST(request: NextRequest) {
     const dueDate = toDateOnly(a.dueDate);
     const type = inferType(a.title, a.submissionType);
 
-    // Clean HTML from description
     const description = a.description
       ? a.description.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000) || null
       : null;
@@ -196,7 +221,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 6. Upsert modules as CourseTopics
+  // 6. Upsert modules as CourseTopic (fallback — may be replaced by AI below)
   let newModules = 0;
   let updatedModules = 0;
 
@@ -238,12 +263,110 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // 7. AI syllabus processing — run all courses in parallel for speed
+  //    For each course that provided syllabus content:
+  //      a) Extract text from HTML body and/or PDF files
+  //      b) Save syllabus PDFs as CourseMaterial records
+  //      c) Run parseSyllabusTopics() if we have substantial text
+  //      d) If AI returns a schedule, replace module-based topics with it
+  //
+  //    Skip courses that already have AI-parsed topics (canvasModuleId = null)
+  //    so subsequent syncs are fast and don't overwrite user-annotated progress.
+
+  let aiTopicsCreated = 0;
+  let syllabusFilesImported = 0;
+
+  await Promise.all(
+    courses.map(async (c) => {
+      const scCourseId = courseIdMap.get(c.id);
+      if (!scCourseId) return;
+
+      // ── a) Check whether AI topics already exist ─────────────────────────
+      const existingAiTopics = await db.courseTopic.count({
+        where: { courseId: scCourseId, canvasModuleId: null },
+      });
+      // If we already parsed this course's syllabus, don't overwrite
+      const shouldRunAI = existingAiTopics === 0;
+
+      // ── b) Build best available syllabus text ─────────────────────────────
+      let syllabusText = c.syllabusBody ? htmlToText(c.syllabusBody) : "";
+
+      // ── c) Process PDF files ───────────────────────────────────────────────
+      const syllabusFiles = c.syllabusFiles ?? [];
+      for (const sf of syllabusFiles) {
+        try {
+          const buf = Buffer.from(sf.base64, "base64");
+          const parsed = await pdfParse(buf);
+          const pdfText = parsed.text.trim();
+
+          // Prefer PDF text if it's more complete than the HTML body
+          if (pdfText.length > syllabusText.length) {
+            syllabusText = pdfText;
+          }
+
+          // Save as CourseMaterial (visible in the Materials tab)
+          const existing = await db.courseMaterial.findFirst({
+            where: { courseId: scCourseId, fileName: sf.fileName },
+            select: { id: true },
+          });
+          if (!existing) {
+            await db.courseMaterial.create({
+              data: {
+                courseId: scCourseId,
+                fileName: sf.fileName,
+                detectedType: "syllabus",
+                summary: "Syllabus automatically imported from Canvas.",
+                relatedTopics: [],
+                rawText: pdfText.slice(0, 10_000),
+                storedForAI: false,
+              },
+            });
+            syllabusFilesImported++;
+          }
+        } catch { /* skip if PDF parsing fails */ }
+      }
+
+      // ── d) AI topic extraction ─────────────────────────────────────────────
+      if (!shouldRunAI || syllabusText.length < 500) return;
+
+      try {
+        // Truncate to ~12k chars — enough for a full semester syllabus
+        const topics = await parseSyllabusTopics(syllabusText.slice(0, 12_000));
+        if (topics.length === 0) return;
+
+        // Delete module-based topics (those sourced from Canvas modules)
+        // and replace with the AI-parsed weekly schedule.
+        // Topics from manual syllabus upload (canvasModuleId = null) are
+        // already excluded by the shouldRunAI check above.
+        await db.courseTopic.deleteMany({
+          where: { courseId: scCourseId, canvasModuleId: { not: null } },
+        });
+
+        await db.courseTopic.createMany({
+          data: topics.map((t) => ({
+            courseId: scCourseId,
+            weekNumber: t.weekNumber,
+            weekLabel: t.weekLabel,
+            startDate: t.startDate ?? null,
+            topics: t.topics,
+            readings: t.readings,
+            notes: t.notes ?? null,
+            canvasModuleId: null, // marks this as AI-sourced (not from a Canvas module)
+          })),
+        });
+
+        aiTopicsCreated += topics.length;
+      } catch { /* if AI fails, module-based topics remain as fallback */ }
+    })
+  );
+
   return NextResponse.json({
     ok: true,
     summary: {
       courses: { new: newCourses, updated: updatedCourses },
       assignments: { new: newAssignments, updated: updatedAssignments },
       modules: { new: newModules, updated: updatedModules },
+      syllabus: { aiWeeks: aiTopicsCreated, filesImported: syllabusFilesImported },
     },
   });
 }

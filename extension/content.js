@@ -8,6 +8,15 @@
  * Phase info is passed via a window variable set by an inline executeScript call
  * immediately before this file is injected — avoids any chrome.storage.session
  * dependency inside the content script.
+ *
+ * Phase 2 collects per course:
+ *   - Assignments (with due dates)
+ *   - Canvas modules (fallback topic structure)
+ *   - syllabus_body HTML (Canvas's built-in syllabus page)
+ *   - Syllabus PDF files (auto-detected by name, downloaded if < 3 MB)
+ *
+ * The import API uses syllabus content to run AI topic extraction,
+ * producing a proper weekly schedule rather than just module names.
  */
 
 (async function canvasSync() {
@@ -34,6 +43,17 @@
   function stripHtml(html) {
     if (!html) return null;
     return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
+  }
+
+  /** Convert an ArrayBuffer to a base64 string (safe for large files). */
+  function bufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    // 1 KB chunks — safe for call stack regardless of file size
+    for (let i = 0; i < bytes.byteLength; i += 1024) {
+      binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 1024, bytes.byteLength)));
+    }
+    return btoa(binary);
   }
 
   function progress(percent, label) {
@@ -81,9 +101,11 @@
     const selectedSet = new Set(selectedIds.map(String));
 
     progress(10, "Fetching your courses…");
+
+    // Include syllabus_body in the bulk course fetch — one call, no extra round-trips
     const rawCourses = await fetchAll(
       `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
-      `&include[]=teachers&include[]=term&per_page=100`
+      `&include[]=teachers&include[]=term&include[]=syllabus_body&per_page=100`
     );
 
     const courses = rawCourses
@@ -94,6 +116,12 @@
         courseCode: c.course_code ?? null,
         term: c.term?.name ?? null,
         instructor: c.teachers?.[0]?.display_name ?? null,
+        // Syllabus HTML — may be null, empty, or rich HTML with the full schedule
+        syllabusBody: (c.syllabus_body && c.syllabus_body.trim().length > 100)
+          ? c.syllabus_body
+          : null,
+        // Will be populated below
+        syllabusFiles: [],
       }));
 
     const payload = { courses, assignments: [], modules: [] };
@@ -104,7 +132,7 @@
       const pct = 15 + Math.floor((i / total) * 70);
       progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
 
-      // Assignments
+      // ── Assignments ────────────────────────────────────────────────────────
       try {
         const rawAssignments = await fetchAll(
           `${BASE}/courses/${course.id}/assignments?per_page=100&order_by=due_at&include[]=submission`
@@ -124,7 +152,7 @@
         }
       } catch { /* restricted — skip */ }
 
-      // Modules
+      // ── Modules (fallback topic structure if no syllabus content) ──────────
       try {
         const rawModules = await fetchAll(
           `${BASE}/courses/${course.id}/modules?include[]=items&per_page=100`
@@ -136,6 +164,31 @@
           payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
         }
       } catch { /* modules disabled — skip */ }
+
+      // ── Syllabus PDF files ─────────────────────────────────────────────────
+      // Download PDFs whose names suggest they're the syllabus.
+      // We send the raw bytes (base64) so the server can extract text + save as material.
+      try {
+        const files = await fetchAll(
+          `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=50`
+        );
+        for (const file of files) {
+          const name = file.display_name ?? "";
+          // Detect likely syllabus filenames
+          if (!/syllab|course[\s._-]?guide|course[\s._-]?outline|course[\s._-]?info/i.test(name)) continue;
+          if ((file.size ?? 0) > 3_000_000) continue; // skip files over 3 MB
+
+          try {
+            const fileRes = await fetch(file.url, { credentials: "include" });
+            if (!fileRes.ok) continue;
+            const buf = await fileRes.arrayBuffer();
+            course.syllabusFiles.push({
+              fileName: name,
+              base64: bufferToBase64(buf),
+            });
+          } catch { /* skip individual download failures */ }
+        }
+      } catch { /* files endpoint not available for this course */ }
     }
 
     progress(90, "Saving to Study Circle…");
