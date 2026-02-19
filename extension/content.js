@@ -225,7 +225,11 @@
         const seenIds       = new Set();
 
         // ── Source 1: module file items — resolve download URL via files API ──
-        for (const mod of rawModules) {
+        // Only scan early/orientation modules — syllabi live there, not in weekly
+        // lecture modules. Scanning all modules = too many API calls per course.
+        const SYLLABUS_MOD_RE = /syllab|orient|welcome|getting.started|course.info|overview/i;
+        const earlyMods = rawModules.filter((m, i) => i === 0 || SYLLABUS_MOD_RE.test(m.name ?? ""));
+        for (const mod of earlyMods) {
           for (const item of (mod.items ?? [])) {
             if (item.type !== "File" || !item.content_id) continue;
             if (seenIds.has(item.content_id)) continue;
@@ -239,7 +243,7 @@
                 }
               } catch { /* skip */ }
             } else {
-              // No name match — save for peek phase
+              // No name match — save for peek phase (early modules only)
               peekCandidates.push({ title: item.title, content_id: item.content_id });
             }
           }
