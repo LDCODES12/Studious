@@ -51,7 +51,7 @@
   );
 
   const courses = rawCourses
-    .filter((c) => c.name && !c.access_restricted_by_date && !c.restrict_enrollments_to_course_dates)
+    .filter((c) => c.name && !c.access_restricted_by_date)
     .map((c) => ({
       id: c.id,
       name: c.name,
