@@ -2,176 +2,100 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Study Circle</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <div class="container">
+<div class="container">
 
-    <!-- Header -->
-    <header>
-      <div class="logo-row">
-        <div class="logo-icon">SC</div>
-        <div class="logo-text">
-          <span class="logo-name">Study Circle</span>
-          <span class="logo-sub">Canvas Sync</span>
-        </div>
-        <button class="gear-btn" id="gearBtn" title="Settings">&#9881;</button>
+  <!-- Header -->
+  <header class="header">
+    <div class="logo-row">
+      <div class="logo-icon">SC</div>
+      <div class="logo-text">
+        <span class="logo-name">Study Circle</span>
+        <span class="logo-sub">Canvas Sync</span>
       </div>
-    </header>
+      <button class="gear-btn" id="gearBtn" title="Settings">&#9881;</button>
+    </div>
+  </header>
 
-    <!-- ═══════════════════════════════════════════════ -->
-    <!--  SETUP VIEW — shown when not configured        -->
-    <!-- ═══════════════════════════════════════════════ -->
-    <section id="setupView">
-      <div class="setup-card">
-        <p class="setup-title">Almost ready</p>
-        <div class="setup-checklist">
-          <div class="setup-check" id="checkCanvas">
-            <span class="check-dot"></span>
-            <span class="check-label" id="checkCanvasLabel">Canvas URL</span>
-          </div>
-          <div class="setup-check" id="checkSC">
-            <span class="check-dot"></span>
-            <span class="check-label" id="checkSCLabel">Study Circle URL</span>
-          </div>
-          <div class="setup-check" id="checkToken">
-            <span class="check-dot"></span>
-            <span class="check-label" id="checkTokenLabel">API Token</span>
-          </div>
-        </div>
-        <button class="btn-secondary full-width" id="rescanBtn">
-          <span id="rescanIcon">⟳</span> Detect from open tabs
-        </button>
-      </div>
+  <!-- Status area — populated by JS (checklist or connected dots) -->
+  <div id="statusArea"></div>
 
-      <!-- Manual Canvas URL entry (only if Canvas not detected) -->
-      <div class="field" id="canvasField" hidden>
-        <label class="field-label" for="canvasUrlSetup">Your Canvas URL</label>
-        <div class="field-row-inline">
-          <input
-            type="text"
-            id="canvasUrlSetup"
-            class="field-input"
-            placeholder="canvas.cornell.edu"
-            spellcheck="false"
-            autocomplete="off"
-          />
-          <button class="btn-secondary" id="saveCanvasBtn">Save</button>
-        </div>
-        <span class="field-hint">Enter your school's Canvas domain</span>
-      </div>
-    </section>
+  <!-- Sync button — always present, disabled until configured -->
+  <button id="syncBtn" class="btn-primary" disabled>Sync Now</button>
+  <p id="lastSync" class="last-sync"></p>
 
-    <!-- ═══════════════════════════════════════════════ -->
-    <!--  READY VIEW — shown when fully configured      -->
-    <!-- ═══════════════════════════════════════════════ -->
-    <section id="readyView" hidden>
-
-      <!-- Status pills -->
-      <div class="status-section">
-        <div class="status-row">
-          <span class="status-label">Canvas</span>
-          <span class="status-value ok" id="canvasStatus">—</span>
-        </div>
-        <div class="status-row">
-          <span class="status-label">Study Circle</span>
-          <span class="status-value ok" id="scStatus">—</span>
-        </div>
-      </div>
-
-      <!-- Sync button -->
-      <div class="action-section">
-        <button id="syncBtn" class="btn-primary">Sync Now</button>
-        <p class="last-sync" id="lastSync"></p>
-      </div>
-
-      <!-- Progress bar -->
-      <section class="progress-section" id="progressSection" hidden>
-        <div class="progress-bar-track">
-          <div class="progress-bar-fill" id="progressFill"></div>
-        </div>
-        <p class="progress-label" id="progressLabel">Starting sync…</p>
-      </section>
-
-      <!-- Result card -->
-      <section class="result-section" id="resultSection" hidden>
-        <div class="result-grid">
-          <div class="result-item">
-            <span class="result-num" id="rCourses">0</span>
-            <span class="result-lbl">courses</span>
-          </div>
-          <div class="result-item">
-            <span class="result-num" id="rAssignments">0</span>
-            <span class="result-lbl">assignments</span>
-          </div>
-          <div class="result-item">
-            <span class="result-num" id="rModules">0</span>
-            <span class="result-lbl">modules</span>
-          </div>
-        </div>
-        <p class="result-note" id="resultNote"></p>
-      </section>
-
-      <!-- Error card -->
-      <section class="error-section" id="errorSection" hidden>
-        <p class="error-text" id="errorText"></p>
-      </section>
-
-    </section>
-
-    <!-- ═══════════════════════════════════════════════ -->
-    <!--  SETTINGS PANEL — slide-in overlay             -->
-    <!-- ═══════════════════════════════════════════════ -->
-    <section class="settings-panel" id="settingsPanel" hidden>
-      <div class="settings-header">
-        <span class="settings-title">Settings</span>
-        <button class="close-btn" id="closeSettings">✕</button>
-      </div>
-
-      <div class="field">
-        <label class="field-label" for="canvasUrl">Canvas URL</label>
-        <input type="text" id="canvasUrl" class="field-input" placeholder="canvas.cornell.edu" spellcheck="false" autocomplete="off" />
-        <span class="field-hint">Your school's Canvas domain (no https://)</span>
-      </div>
-
-      <div class="field">
-        <label class="field-label" for="scUrl">Study Circle URL</label>
-        <input type="text" id="scUrl" class="field-input" placeholder="your-app.vercel.app" spellcheck="false" autocomplete="off" />
-        <span class="field-hint">Your deployed app domain (no https://)</span>
-      </div>
-
-      <div class="field" id="tokenField">
-        <label class="field-label" for="apiToken">API Token</label>
-        <input type="password" id="apiToken" class="field-input" placeholder="Paste token from Study Circle → Settings" autocomplete="off" />
-        <span class="field-hint">Generate in Study Circle → Settings</span>
-      </div>
-      <div class="token-set-row" id="tokenSetRow" hidden>
-        <span class="token-set-label">✓ Token connected</span>
-        <button class="btn-text" id="replaceTokenBtn">Replace</button>
-      </div>
-
-      <div class="field-row-toggle">
-        <div>
-          <label class="field-label">Daily auto-sync</label>
-          <span class="field-hint">Sync once per day when Canvas is open</span>
-        </div>
-        <label class="toggle">
-          <input type="checkbox" id="autoSync" />
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-
-      <div class="settings-footer">
-        <button id="saveSettings" class="btn-primary btn-sm">Save</button>
-        <span class="save-confirm" id="saveConfirm" hidden>Saved!</span>
-        <button id="revokeBtn" class="btn-danger-link" hidden>Disconnect</button>
-      </div>
-    </section>
-
+  <!-- Progress -->
+  <div id="progressSection" hidden>
+    <div class="progress-bar-track"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <p class="progress-label" id="progressLabel"></p>
   </div>
 
-  <script src="popup.js"></script>
+  <!-- Result -->
+  <div id="resultSection" hidden>
+    <div class="result-grid">
+      <div class="result-item"><span class="result-num" id="rCourses">0</span><span class="result-lbl">courses</span></div>
+      <div class="result-item"><span class="result-num" id="rAssignments">0</span><span class="result-lbl">assignments</span></div>
+      <div class="result-item"><span class="result-num" id="rModules">0</span><span class="result-lbl">modules</span></div>
+    </div>
+    <p class="result-note" id="resultNote"></p>
+  </div>
+
+  <!-- Error -->
+  <div id="errorSection" hidden>
+    <p class="error-text" id="errorText"></p>
+  </div>
+
+  <!-- Settings overlay -->
+  <section class="settings-panel" id="settingsPanel" hidden>
+    <div class="settings-header">
+      <span class="settings-title">Settings</span>
+      <button class="close-btn" id="closeSettings">✕</button>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Canvas URL</label>
+      <input type="text" id="canvasUrl" class="field-input" placeholder="canvas.cornell.edu" spellcheck="false" autocomplete="off" />
+      <span class="field-hint">Your school's Canvas domain (no https://)</span>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Study Circle URL</label>
+      <input type="text" id="scUrl" class="field-input" placeholder="your-app.vercel.app" spellcheck="false" autocomplete="off" />
+      <span class="field-hint">Your deployed app domain (no https://)</span>
+    </div>
+
+    <div class="field" id="tokenField">
+      <label class="field-label">API Token</label>
+      <input type="password" id="apiToken" class="field-input" placeholder="Paste token from Study Circle → Settings" autocomplete="off" />
+      <span class="field-hint">Generate in Study Circle → Settings</span>
+    </div>
+    <div id="tokenSetRow" hidden>
+      <span class="token-set-label">✓ Token connected</span>
+      <button class="btn-text" id="replaceTokenBtn">Replace</button>
+    </div>
+
+    <div class="field-row-toggle">
+      <div>
+        <label class="field-label">Daily auto-sync</label>
+        <span class="field-hint">Sync once a day when Canvas is open</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="autoSync" />
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <div class="settings-footer">
+      <button id="saveSettings" class="btn-primary btn-sm">Save</button>
+      <span id="saveConfirm" hidden class="save-confirm">Saved!</span>
+      <button id="revokeBtn" hidden class="btn-danger-link">Disconnect</button>
+    </div>
+  </section>
+
+</div>
+<script src="popup.js"></script>
 </body>
 </html>

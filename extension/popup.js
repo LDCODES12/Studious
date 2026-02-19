@@ -1,10 +1,5 @@
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const setupView       = document.getElementById("setupView");
-const readyView       = document.getElementById("readyView");
-const settingsPanel   = document.getElementById("settingsPanel");
-
-const canvasStatus    = document.getElementById("canvasStatus");
-const scStatus        = document.getElementById("scStatus");
+const statusArea      = document.getElementById("statusArea");
 const syncBtn         = document.getElementById("syncBtn");
 const lastSyncEl      = document.getElementById("lastSync");
 const progressSection = document.getElementById("progressSection");
@@ -19,30 +14,87 @@ const errorSection    = document.getElementById("errorSection");
 const errorText       = document.getElementById("errorText");
 
 const gearBtn         = document.getElementById("gearBtn");
+const settingsPanel   = document.getElementById("settingsPanel");
 const closeSettings   = document.getElementById("closeSettings");
-const rescanBtn       = document.getElementById("rescanBtn");
-const canvasField     = document.getElementById("canvasField");
-const canvasUrlSetup  = document.getElementById("canvasUrlSetup");
-const saveCanvasBtn   = document.getElementById("saveCanvasBtn");
-
 const canvasUrlInput  = document.getElementById("canvasUrl");
 const scUrlInput      = document.getElementById("scUrl");
 const apiTokenInput   = document.getElementById("apiToken");
+const tokenField      = document.getElementById("tokenField");
+const tokenSetRow     = document.getElementById("tokenSetRow");
+const replaceTokenBtn = document.getElementById("replaceTokenBtn");
 const autoSyncInput   = document.getElementById("autoSync");
 const saveSettings    = document.getElementById("saveSettings");
 const saveConfirm     = document.getElementById("saveConfirm");
 const revokeBtn       = document.getElementById("revokeBtn");
-const tokenField      = document.getElementById("tokenField");
-const tokenSetRow     = document.getElementById("tokenSetRow");
-const replaceTokenBtn = document.getElementById("replaceTokenBtn");
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
+/**
+ * The single source of truth. Reads storage, updates every element.
+ * No hidden sections to flip — just updates statusArea HTML and syncBtn state.
+ */
+async function render() {
+  const data = await chrome.storage.local.get([
+    "canvasUrl", "scUrl", "apiToken", "autoSync", "lastSync", "lastResult", "lastError",
+  ]);
+
+  const { canvasUrl, scUrl, apiToken } = data;
+  const ready = !!(canvasUrl && scUrl && apiToken);
+
+  // ── Status area ──────────────────────────────────────────────────────────
+  if (ready) {
+    statusArea.innerHTML = `
+      <div class="status-section">
+        <div class="status-row">
+          <span class="status-label">Canvas</span>
+          <span class="status-value ok">${canvasUrl}</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Study Circle</span>
+          <span class="status-value ok">${scUrl}</span>
+        </div>
+      </div>`;
+  } else {
+    const check = (val, label, hint) =>
+      `<div class="setup-check ${val ? "done" : ""}">
+        <span class="check-dot"></span>
+        <span class="check-label">${val ? label + ": " + val : hint}</span>
+      </div>`;
+    statusArea.innerHTML = `
+      <div class="setup-card">
+        <p class="setup-title">Almost ready</p>
+        <div class="setup-checklist">
+          ${check(canvasUrl, "Canvas", "Canvas URL — open ⚙ Settings")}
+          ${check(scUrl,     "Study Circle", "Study Circle URL — open ⚙ Settings")}
+          ${check(apiToken ? "set" : "", "Token", "API Token — Study Circle → Settings → Generate Token")}
+        </div>
+        <button class="btn-secondary full-width" id="rescanBtn">⟳ Detect from open tabs</button>
+      </div>`;
+
+    // Re-attach rescan listener (innerHTML replaces the node)
+    document.getElementById("rescanBtn").addEventListener("click", rescan);
+  }
+
+  // ── Sync button ──────────────────────────────────────────────────────────
+  syncBtn.disabled = !ready;
+
+  // ── Last sync / results ──────────────────────────────────────────────────
+  if (data.lastSync) lastSyncEl.textContent = "Last synced: " + timeAgo(data.lastSync);
+  if (data.lastError)       showError(data.lastError);
+  else if (data.lastResult) showResult(data.lastResult);
+
+  // ── Settings panel fields ────────────────────────────────────────────────
+  canvasUrlInput.value  = canvasUrl || "";
+  scUrlInput.value      = scUrl    || "";
+  apiTokenInput.value   = "";
+  tokenField.style.display    = apiToken ? "none" : "";
+  tokenSetRow.style.display   = apiToken ? "flex" : "none";
+  autoSyncInput.checked       = !!data.autoSync;
+  revokeBtn.hidden            = !apiToken;
+}
 
 // ── Auto-detection ────────────────────────────────────────────────────────────
 
-/**
- * Scan all open tabs for the Study Circle bridge element.
- * The Settings page renders <div id="sc-extension-bridge" data-token="..." data-scurl="...">
- * when a token is generated — reads it without any user action.
- */
 async function detectStudyCircle() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
@@ -53,125 +105,49 @@ async function detectStudyCircle() {
         func: () => {
           const el = document.getElementById("sc-extension-bridge");
           if (!el) return null;
-          return {
-            token: el.getAttribute("data-token"),
-            scUrl: el.getAttribute("data-scurl") || window.location.origin,
-          };
+          return { token: el.dataset.token, scUrl: el.dataset.scurl || window.location.origin };
         },
       });
       if (result?.token) {
         const scUrl = result.scUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
         await chrome.storage.local.set({ apiToken: result.token, scUrl });
-        return { token: result.token, scUrl };
+        return true;
       }
-    } catch {
-      // Tab not scriptable (chrome:// pages etc) — skip silently
-    }
+    } catch { /* skip non-scriptable tabs */ }
   }
-  return null;
+  return false;
 }
 
-/** Detect Canvas URL from the active tab hostname */
 async function detectCanvasUrl() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url) return null;
+  if (!tab?.url) return false;
   try {
     const { hostname } = new URL(tab.url);
     if (hostname.includes("canvas") || hostname.includes("instructure")) {
       await chrome.storage.local.set({ canvasUrl: hostname });
-      return hostname;
+      return true;
     }
   } catch { /* ignore */ }
-  return null;
+  return false;
 }
 
-// ── Core view logic ───────────────────────────────────────────────────────────
-
-/** Read storage + optionally run auto-detect, then show the right view */
-async function init({ autoDetect = true } = {}) {
-  const stored = await chrome.storage.local.get([
-    "canvasUrl", "scUrl", "apiToken", "autoSync",
-    "lastSync", "lastResult", "lastError",
-  ]);
-
-  let { canvasUrl, scUrl, apiToken } = stored;
-
-  if (autoDetect) {
-    if (!canvasUrl) {
-      canvasUrl = await detectCanvasUrl();
-    }
-    if (!scUrl || !apiToken) {
-      const detected = await detectStudyCircle();
-      if (detected) {
-        scUrl    = detected.scUrl;
-        apiToken = detected.token;
-      }
-    }
-  }
-
-  // Populate settings panel (always, so it's current when opened)
-  canvasUrlInput.value = canvasUrl || "";
-  scUrlInput.value     = scUrl    || "";
-  // Show token status row if token exists; show input field only if no token
-  apiTokenInput.value = "";
-  if (apiToken) {
-    tokenField.hidden   = true;
-    tokenSetRow.hidden  = false;
-  } else {
-    tokenField.hidden   = false;
-    tokenSetRow.hidden  = true;
-  }
-  autoSyncInput.checked = !!stored.autoSync;
-  revokeBtn.hidden      = !apiToken;
-
-  const fullyConfigured = !!(canvasUrl && scUrl && apiToken);
-
-  if (fullyConfigured) {
-    setupView.hidden = true;
-    readyView.hidden = false;
-
-    canvasStatus.textContent = canvasUrl;
-    scStatus.textContent     = scUrl;
-
-    if (stored.lastSync) lastSyncEl.textContent = "Last synced: " + timeAgo(stored.lastSync);
-    if (stored.lastError)       showError(stored.lastError);
-    else if (stored.lastResult) showResult(stored.lastResult);
-  } else {
-    setupView.hidden = false;
-    readyView.hidden = true;
-    canvasField.hidden = !!canvasUrl;
-
-    // Checklist — show exactly what's missing
-    const checkCanvas = document.getElementById("checkCanvas");
-    const checkSC     = document.getElementById("checkSC");
-    const checkToken  = document.getElementById("checkToken");
-
-    checkCanvas.className = "setup-check" + (canvasUrl ? " done" : "");
-    document.getElementById("checkCanvasLabel").textContent =
-      canvasUrl ? "Canvas: " + canvasUrl : "Canvas URL — enter below or open Canvas tab first";
-
-    checkSC.className = "setup-check" + (scUrl ? " done" : "");
-    document.getElementById("checkSCLabel").textContent =
-      scUrl ? "Study Circle: " + scUrl : "Study Circle URL — open the gear menu ⚙";
-
-    checkToken.className = "setup-check" + (apiToken ? " done" : "");
-    document.getElementById("checkTokenLabel").textContent =
-      apiToken ? "Token connected" : "API Token — go to Study Circle → Settings → Generate Token";
-  }
-
-  // Restore syncing state
-  const { syncRunning } = await chrome.storage.session.get(["syncRunning"]).catch(() => ({}));
-  if (syncRunning && fullyConfigured) setSyncing(true);
+async function rescan() {
+  const btn = document.getElementById("rescanBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
+  await detectCanvasUrl();
+  await detectStudyCircle();
+  await render();
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────────
 
-gearBtn.addEventListener("click", () => {
-  settingsPanel.hidden = false;
-});
+gearBtn.addEventListener("click",     () => { settingsPanel.hidden = false; });
+closeSettings.addEventListener("click", () => { settingsPanel.hidden = true; });
 
-closeSettings.addEventListener("click", () => {
-  settingsPanel.hidden = true;
+replaceTokenBtn.addEventListener("click", () => {
+  tokenSetRow.style.display = "none";
+  tokenField.style.display  = "";
+  apiTokenInput.focus();
 });
 
 saveSettings.addEventListener("click", async () => {
@@ -180,66 +156,29 @@ saveSettings.addEventListener("click", async () => {
   const newToken  = apiTokenInput.value.trim();
   const autoSync  = autoSyncInput.checked;
 
+  // Only set keys that have values — never overwrite with empty string
   const update = { autoSync };
   if (canvasUrl) update.canvasUrl = canvasUrl;
   if (scUrl)     update.scUrl     = scUrl;
-  if (newToken)  update.apiToken  = newToken; // only update if something was typed
+  if (newToken)  update.apiToken  = newToken;
 
   await chrome.storage.local.set(update);
-
   await chrome.alarms.clear("autoSync");
   if (autoSync) chrome.alarms.create("autoSync", { periodInMinutes: 1440 });
 
-  // Read back exactly what's now in storage — don't trust local vars
-  const saved = await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken"]);
-
-  saveConfirm.hidden = false;
-  setTimeout(() => { saveConfirm.hidden = true; }, 2000);
   settingsPanel.hidden = true;
+  saveConfirm.hidden   = false;
+  setTimeout(() => { saveConfirm.hidden = true; }, 2000);
 
-  if (saved.canvasUrl && saved.scUrl && saved.apiToken) {
-    // All three present — go straight to ready view
-    setupView.hidden = true;
-    readyView.hidden = false;
-    canvasStatus.textContent = saved.canvasUrl;
-    scStatus.textContent     = saved.scUrl;
-  } else {
-    // Something still missing — show setup with checklist
-    await init({ autoDetect: false });
-  }
-});
-
-replaceTokenBtn.addEventListener("click", () => {
-  tokenSetRow.hidden = true;
-  tokenField.hidden  = false;
-  apiTokenInput.focus();
+  await render();
 });
 
 revokeBtn.addEventListener("click", async () => {
-  if (!confirm("Disconnect the extension? You can reconnect by regenerating a token.")) return;
+  if (!confirm("Disconnect? You can reconnect by generating a new token.")) return;
   await chrome.storage.local.remove(["apiToken", "scUrl"]);
   settingsPanel.hidden = true;
-  await init({ autoDetect: false });
+  await render();
 });
-
-// ── Re-scan button (setup view) ───────────────────────────────────────────────
-
-rescanBtn.addEventListener("click", async () => {
-  rescanBtn.disabled    = true;
-  rescanBtn.textContent = "Scanning…";
-  await init({ autoDetect: true });
-  rescanBtn.disabled    = false;
-  rescanBtn.innerHTML   = "<span>⟳</span> Detect from open tabs";
-});
-
-// Manual Canvas URL (setup view)
-saveCanvasBtn.addEventListener("click", async () => {
-  const val = canvasUrlSetup.value.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
-  if (!val) return;
-  await chrome.storage.local.set({ canvasUrl: val });
-  await init({ autoDetect: false });
-});
-canvasUrlSetup.addEventListener("keydown", (e) => { if (e.key === "Enter") saveCanvasBtn.click(); });
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
@@ -253,8 +192,6 @@ syncBtn.addEventListener("click", () => {
     }
   });
 });
-
-// ── Messages from background ──────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "SYNC_PROGRESS") {
@@ -277,13 +214,10 @@ chrome.runtime.onMessage.addListener((msg) => {
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 function setSyncing(active) {
-  syncBtn.disabled      = active;
-  syncBtn.textContent   = active ? "Syncing…" : "Sync Now";
+  syncBtn.disabled       = active;
+  syncBtn.textContent    = active ? "Syncing…" : "Sync Now";
   progressSection.hidden = !active;
-  if (active) {
-    progressFill.style.width  = "5%";
-    progressLabel.textContent = "Connecting to Canvas…";
-  }
+  if (active) { progressFill.style.width = "5%"; progressLabel.textContent = "Connecting to Canvas…"; }
 }
 
 function hideResults() {
@@ -319,4 +253,4 @@ function timeAgo(ts) {
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-init();
+render();
