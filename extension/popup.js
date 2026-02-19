@@ -348,11 +348,33 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
+let _syncWatchdog = null;
+
 function setSyncing(active) {
   syncBtn.disabled       = active;
   syncBtn.textContent    = active ? "Syncing…" : "Sync Now";
   progressSection.hidden = !active;
-  if (active) { progressFill.style.width = "5%"; progressLabel.textContent = "Connecting to Canvas…"; }
+  if (active) {
+    progressFill.style.width = "5%";
+    progressLabel.textContent = "Connecting to Canvas…";
+    // Watchdog: if still syncing after 90s, check live stats to detect silent completion
+    clearTimeout(_syncWatchdog);
+    _syncWatchdog = setTimeout(async () => {
+      const session = await chrome.storage.session.get(["syncRunning"]);
+      if (!session.syncRunning) {
+        setSyncing(false);
+        refreshLiveStats();
+      } else {
+        // Still running — update label so user knows it's not frozen
+        if (!progressSection.hidden) {
+          progressLabel.textContent = "Still working… the server is processing your syllabi";
+        }
+      }
+    }, 90_000);
+  } else {
+    clearTimeout(_syncWatchdog);
+    _syncWatchdog = null;
+  }
 }
 
 function hideResults() {

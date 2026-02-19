@@ -117,6 +117,16 @@ async function handleCanvasData(payload) {
   try {
     const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
 
+    // Let user know AI analysis is running — this phase takes 20-40s with syllabus parsing
+    const courseCount = payload.courses?.length ?? 0;
+    broadcastToPopup({
+      type: "SYNC_PROGRESS",
+      percent: 93,
+      label: courseCount > 0
+        ? `AI is reading ${courseCount} syllab${courseCount !== 1 ? "i" : "us"}… (may take ~30s)`
+        : "Saving to Study Circle…",
+    });
+
     const res = await fetch(`https://${scUrl}/api/canvas/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
