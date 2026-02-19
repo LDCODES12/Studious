@@ -133,10 +133,14 @@
         <span class="field-hint">Your deployed app domain (no https://)</span>
       </div>
 
-      <div class="field">
+      <div class="field" id="tokenField">
         <label class="field-label" for="apiToken">API Token</label>
-        <input type="password" id="apiToken" class="field-input" placeholder="Auto-detected from Settings page" autocomplete="off" />
+        <input type="password" id="apiToken" class="field-input" placeholder="Paste token from Study Circle → Settings" autocomplete="off" />
         <span class="field-hint">Generate in Study Circle → Settings</span>
+      </div>
+      <div class="token-set-row" id="tokenSetRow" hidden>
+        <span class="token-set-label">✓ Token connected</span>
+        <button class="btn-text" id="replaceTokenBtn">Replace</button>
       </div>
 
       <div class="field-row-toggle">

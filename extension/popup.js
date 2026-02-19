@@ -32,6 +32,9 @@ const autoSyncInput   = document.getElementById("autoSync");
 const saveSettings    = document.getElementById("saveSettings");
 const saveConfirm     = document.getElementById("saveConfirm");
 const revokeBtn       = document.getElementById("revokeBtn");
+const tokenField      = document.getElementById("tokenField");
+const tokenSetRow     = document.getElementById("tokenSetRow");
+const replaceTokenBtn = document.getElementById("replaceTokenBtn");
 
 // ── Auto-detection ────────────────────────────────────────────────────────────
 
@@ -109,9 +112,15 @@ async function init({ autoDetect = true } = {}) {
   // Populate settings panel (always, so it's current when opened)
   canvasUrlInput.value = canvasUrl || "";
   scUrlInput.value     = scUrl    || "";
-  // Never pre-fill the token field — leave blank, show status instead
-  apiTokenInput.value  = "";
-  apiTokenInput.placeholder = apiToken ? "Leave blank to keep current token" : "Paste token from Study Circle → Settings";
+  // Show token status row if token exists; show input field only if no token
+  apiTokenInput.value = "";
+  if (apiToken) {
+    tokenField.hidden   = true;
+    tokenSetRow.hidden  = false;
+  } else {
+    tokenField.hidden   = false;
+    tokenSetRow.hidden  = true;
+  }
   autoSyncInput.checked = !!stored.autoSync;
   revokeBtn.hidden      = !apiToken;
 
@@ -171,6 +180,12 @@ saveSettings.addEventListener("click", async () => {
   // Close panel and refresh view — skip auto-detect since user just set manually
   settingsPanel.hidden = true;
   await init({ autoDetect: false });
+});
+
+replaceTokenBtn.addEventListener("click", () => {
+  tokenSetRow.hidden = true;
+  tokenField.hidden  = false;
+  apiTokenInput.focus();
 });
 
 revokeBtn.addEventListener("click", async () => {
