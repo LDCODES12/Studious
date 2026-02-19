@@ -141,8 +141,8 @@ async function rescan() {
 
 // ── Settings panel ────────────────────────────────────────────────────────────
 
-gearBtn.addEventListener("click",     () => { settingsPanel.hidden = false; });
-closeSettings.addEventListener("click", () => { settingsPanel.hidden = true; });
+gearBtn.addEventListener("click",     () => { settingsPanel.style.display = "flex"; });
+closeSettings.addEventListener("click", () => { settingsPanel.style.display = "none"; });
 
 replaceTokenBtn.addEventListener("click", () => {
   tokenSetRow.style.display = "none";
@@ -166,7 +166,7 @@ saveSettings.addEventListener("click", async () => {
   await chrome.alarms.clear("autoSync");
   if (autoSync) chrome.alarms.create("autoSync", { periodInMinutes: 1440 });
 
-  settingsPanel.hidden = true;
+  settingsPanel.style.display = "none";
   saveConfirm.hidden   = false;
   setTimeout(() => { saveConfirm.hidden = true; }, 2000);
 
@@ -176,7 +176,7 @@ saveSettings.addEventListener("click", async () => {
 revokeBtn.addEventListener("click", async () => {
   if (!confirm("Disconnect? You can reconnect by generating a new token.")) return;
   await chrome.storage.local.remove(["apiToken", "scUrl"]);
-  settingsPanel.hidden = true;
+  settingsPanel.style.display = "none";
   await render();
 });
 
