@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { parseSyllabusTopics } from "@/lib/parse-syllabus";
+import { parseSyllabusTopics, type ParsedTopic } from "@/lib/parse-syllabus";
 import crypto from "crypto";
 
 export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
@@ -100,6 +100,34 @@ function scheduleScore(text: string): number {
   // Linear normalisation: a 10k-char policy page with the same hit count as a
   // 1k-char schedule table correctly scores 10x lower.
   return raw / (text.length / 500);
+}
+
+/**
+ * Detect the structural format of a text blob so the AI knows how to parse it.
+ * Returns a short description that is prepended to the AI prompt as [Source: ...].
+ */
+function detectSourceFormat(text: string): string {
+  const lines = text.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return "short text";
+  const tabLines = lines.filter((l) => l.includes("\t")).length;
+  if (tabLines / lines.length > 0.25) return "tab-separated table";
+  const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
+  const shortLineRatio = lines.filter((l) => l.length < 120).length / lines.length;
+  if (avgLen < 90 && shortLineRatio > 0.65 && lines.length > 4)
+    return "structured schedule (one entry per line)";
+  const bulletRatio =
+    lines.filter((l) => /^[-•*·]\s/.test(l.trim())).length / lines.length;
+  if (bulletRatio > 0.25) return "bulleted list";
+  return "paragraph text";
+}
+
+/** Returns true if an AI-returned topic has at least one piece of content. */
+function isContentfulTopic(t: ParsedTopic): boolean {
+  return (
+    (Array.isArray(t.topics) && t.topics.length > 0) ||
+    (Array.isArray(t.readings) && t.readings.length > 0) ||
+    (typeof t.notes === "string" && t.notes.trim().length > 0)
+  );
 }
 
 /** Strip HTML tags and decode common entities to plain text.
@@ -396,18 +424,30 @@ export async function POST(request: NextRequest) {
       }
 
       try {
-        // Truncate to ~12k chars — enough for a full semester syllabus
-        const rawTopics = await parseSyllabusTopics(syllabusText.slice(0, 12_000));
+        // Build a format hint for the AI based on the winning source
+        const bestFormat = detectSourceFormat(syllabusText);
+        const bestHint   = `${best.label}, format: ${bestFormat}`;
 
-        // Drop weeks that have nothing to show — empty topics, empty readings,
-        // and no notes. These are placeholder rows the AI emits when it finds
-        // date markers but no actual schedule content (e.g. Calc 3 policy pages).
-        const topics = rawTopics.filter((t) => {
-          const hasTopics = Array.isArray(t.topics) && t.topics.length > 0;
-          const hasReadings = Array.isArray(t.readings) && t.readings.length > 0;
-          const hasNotes = typeof t.notes === "string" && t.notes.trim().length > 0;
-          return hasTopics || hasReadings || hasNotes;
-        });
+        // First attempt — best scoring source
+        let rawTopics = await parseSyllabusTopics(syllabusText.slice(0, 12_000), bestHint);
+        let topics    = rawTopics.filter(isContentfulTopic);
+        let usedLabel = bestLabel;
+
+        // Retry with next-best source if first returned nothing useful.
+        // Typical trigger: best source was a policy-heavy HTML body; second
+        // source is the actual PDF syllabus that the score missed.
+        if (topics.length === 0 && candidates.length > 1) {
+          const alt       = candidates[1];
+          const altFormat = detectSourceFormat(alt.text);
+          const altHint   = `${alt.label}, format: ${altFormat}`;
+          const altRaw    = await parseSyllabusTopics(alt.text.slice(0, 12_000), altHint);
+          const altTopics = altRaw.filter(isContentfulTopic);
+          if (altTopics.length > 0) {
+            rawTopics  = altRaw;
+            topics     = altTopics;
+            usedLabel  = `${alt.label}(retry,score=${alt.score.toFixed(3)},${alt.text.length}c)`;
+          }
+        }
 
         if (topics.length === 0) return;
 
@@ -434,7 +474,7 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(`${c.name}: best=${bestLabel} → ai-ran(${topics.length} weeks)`);
+        debugRows.push(`${c.name}: used=${usedLabel} → ai-ran(${topics.length} weeks)`);
       } catch (err) {
         debugRows.push(`${c.name}: best=${bestLabel} → ai-error:${err}`);
       }

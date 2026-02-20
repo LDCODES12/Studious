@@ -68,7 +68,14 @@ export interface ParsedTopic {
   courseName: string;
 }
 
-export async function parseSyllabusTopics(text: string): Promise<ParsedTopic[]> {
+/**
+ * @param text   Syllabus text (pre-extracted, max ~12k chars)
+ * @param hint   Optional source description e.g. "pdf-table" or "html-list".
+ *               Passed as a one-line prefix so the AI knows what format to expect.
+ */
+export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
+  const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
+
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     response_format: { type: "json_object" },
@@ -86,6 +93,12 @@ A real schedule looks like:
 
 Course policies text (return empty for this):
 - "Attendance Policy: ...", "Grading: 40% exams...", "Late work: -10% per day..."
+
+SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing the format.
+- "structured schedule (one entry per line)" → each line is likely one week/lecture row; parse carefully
+- "tab-separated table" → columns are tab-separated; first column is usually week/date, others are topic/readings
+- "html-list" → bullet or numbered list items are individual schedule entries
+- "paragraph text" → schedule may be embedded in prose; look harder for patterns
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly
@@ -116,7 +129,7 @@ OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include E
 
 If you cannot find an explicit schedule, return {"weeks": []}.`,
       },
-      { role: "user", content: text },
+      { role: "user", content: userContent },
     ],
   }, { timeout: 25_000 });
 
