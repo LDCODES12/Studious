@@ -546,7 +546,9 @@ export async function POST(request: NextRequest) {
     })
   );
 
-  console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
+  // Log each course as a separate entry so Vercel doesn't truncate multi-line output
+  console.log("[canvas-import] syllabus summary:");
+  for (const row of debugRows) console.log(row);
 
   return NextResponse.json({
     ok: true,
