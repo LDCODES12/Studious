@@ -29,11 +29,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
 
 // ── Message listener ──────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, _sender, _sendResponse) => {
   if (msg.type !== "PARSE_PDF") return false;
 
   const { url, messageId } = msg;
 
+  // Reply via a separate sendMessage (not sendResponse), so we do NOT return
+  // true here — returning true would tell Chrome to keep the channel open
+  // waiting for sendResponse(), which we never call, causing an uncaught
+  // "message channel closed" rejection.
   extractTextFromUrl(url)
     .then((text) => {
       chrome.runtime.sendMessage({ type: "PDF_PARSED", messageId, text });
@@ -43,7 +47,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       chrome.runtime.sendMessage({ type: "PDF_PARSED", messageId, text: "" });
     });
 
-  return true;
+  return false;
 });
 
 // ── PDF text extraction ───────────────────────────────────────────────────────
