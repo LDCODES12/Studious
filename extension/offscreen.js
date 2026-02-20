@@ -73,26 +73,101 @@ async function extractTextFromUrl(url) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-
-    // Group text items by their Y position so table rows and schedule lines
-    // are preserved as separate lines rather than merged into one long string.
-    // pdfjs item.transform[5] is the Y coordinate (increases bottom-to-top).
-    const lineMap = new Map();
-    for (const item of content.items) {
-      if (!("str" in item) || !item.str) continue;
-      const y = Math.round(item.transform[5]);
-      lineMap.set(y, (lineMap.get(y) ?? "") + item.str);
-    }
-    // Sort descending (top of page first) then join with newlines
-    const pageText = [...lineMap.entries()]
-      .sort((a, b) => b[0] - a[0])
-      .map(([, text]) => text.trim())
-      .filter(Boolean)
-      .join("\n");
-    pages.push(pageText);
+    pages.push(extractPageText(content.items));
   }
 
   const text = pages.join("\n\n").trim();
   console.log("[offscreen] extracted", text.length, "chars");
+
+  // Warn if text yield is suspiciously low for a multi-page PDF —
+  // this usually means a scanned/image PDF with no text layer.
+  if (pdf.numPages > 2 && text.length < 300) {
+    console.warn("[offscreen] low text yield — PDF may be scanned/image-only:", text.length, "chars for", pdf.numPages, "pages");
+  }
+
   return text;
+}
+
+/**
+ * PDF Worker — extract text from one page's items with layout awareness.
+ *
+ * Two-column detection:
+ *   Many syllabi are typeset in two columns. pdfjs returns items in stream
+ *   order which can interleave left and right columns, producing garbled text.
+ *   We detect a two-column layout by looking for a clear horizontal gap in
+ *   the X-position distribution, then process each column separately so the
+ *   left column text always precedes the right column text.
+ *
+ * Single-column / table layout:
+ *   Items are grouped by their rounded Y coordinate so table rows and schedule
+ *   lines stay as separate lines rather than being merged into one long string.
+ */
+function extractPageText(items) {
+  // Filter to real text items only
+  const textItems = items.filter((it) => "str" in it && it.str.trim().length > 0);
+  if (textItems.length === 0) return "";
+
+  // ── Column detection ────────────────────────────────────────────────────────
+  // Collect left-edge X positions, sort them, and look for the biggest gap.
+  // pdfjs item.transform = [scaleX, skewX, skewY, scaleY, translateX, translateY]
+  const xs = textItems.map((it) => it.transform[4]).sort((a, b) => a - b);
+  const xRange = xs[xs.length - 1] - xs[0];
+
+  let columnBoundary = null; // X coordinate separating left from right column
+
+  if (xRange > 180 && textItems.length > 20) {
+    // Find the largest gap between consecutive sorted X values
+    let maxGap = 0;
+    let gapAt  = -1;
+    for (let i = 1; i < xs.length; i++) {
+      const gap = xs[i] - xs[i - 1];
+      if (gap > maxGap) { maxGap = gap; gapAt = i; }
+    }
+
+    // Only treat as two-column if:
+    //   • the gap is at least 15% of the total width (avoids small tab indents)
+    //   • the gap splits items roughly in half (each column ≥ 25% of total)
+    if (maxGap / xRange > 0.15 && gapAt > textItems.length * 0.25 && gapAt < textItems.length * 0.75) {
+      columnBoundary = (xs[gapAt - 1] + xs[gapAt]) / 2;
+      console.log("[offscreen] two-column layout detected, boundary X ≈", columnBoundary.toFixed(1));
+    }
+  }
+
+  // ── Line assembly ───────────────────────────────────────────────────────────
+  if (columnBoundary !== null) {
+    // Process left column then right column independently; each uses Y-grouping.
+    const left  = textItems.filter((it) => it.transform[4] <= columnBoundary);
+    const right = textItems.filter((it) => it.transform[4] >  columnBoundary);
+    return [assembleLines(left), assembleLines(right)].filter(Boolean).join("\n");
+  }
+
+  return assembleLines(textItems);
+}
+
+/**
+ * Group text items by their Y coordinate (rounded to nearest integer) and
+ * join items on the same line in left-to-right order.
+ * Returns lines sorted top-to-bottom (descending Y = top of page first).
+ */
+function assembleLines(items) {
+  // Map: roundedY → { text accumulated left-to-right, minX for ordering }
+  const lineMap = new Map();
+  for (const item of items) {
+    const y = Math.round(item.transform[5]);
+    const x = item.transform[4];
+    if (!lineMap.has(y)) lineMap.set(y, { parts: [], minX: x });
+    const entry = lineMap.get(y);
+    entry.parts.push({ x, str: item.str });
+    if (x < entry.minX) entry.minX = x;
+  }
+
+  return [...lineMap.entries()]
+    .sort((a, b) => b[0] - a[0])               // descending Y = top first
+    .map(([, entry]) => {
+      // Sort parts left-to-right within each line
+      entry.parts.sort((a, b) => a.x - b.x);
+      return entry.parts.map((p) => p.str).join("").trim();
+    })
+    .filter(Boolean)
+    .join("\n");
 }

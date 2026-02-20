@@ -68,6 +68,142 @@ export interface ParsedTopic {
   courseName: string;
 }
 
+// ─── Role 4 — Sanitizer ────────────────────────────────────────────────────────
+//
+// Code-only cleanup pass that runs immediately after AI extraction.
+// Removes policy-contaminated content, fixes week numbering, sorts by date.
+// Free (no API call) — always runs.
+
+/** Policy-only week labels — weeks whose label matches AND have no topics/readings are dropped. */
+const POLICY_LABEL_RX =
+  /^(grading|attendance\s+polic|academic\s+integrity|course\s+polic|syllabus\s+(overview|review)|late\s+(work|submission)\s+polic|extra\s+credit\s+polic|office\s+hours\s+polic|contact\s+info)/i;
+
+/** Topic/reading strings that are course-admin text, not academic content. */
+const POLICY_TOPIC_RX =
+  /\b(attendance\s+polic|plagiarism\s+polic|academic\s+(dishonesty|integrity)\s+polic|late\s+(work|submission|assignment)\s+polic|grading\s+polic|extra\s+credit\s+polic|point[s]?\s+possible\s*:)\b/i;
+
+/**
+ * Cleans an AI-extracted schedule in place:
+ * 1. Strips policy-language strings from topics/readings arrays
+ * 2. Drops weeks where the label is purely administrative with no real content
+ * 3. Sorts by weekNumber, then renumbers 1…N to close any gaps
+ */
+export function sanitizeSchedule(weeks: ParsedTopic[]): ParsedTopic[] {
+  return weeks
+    // 1. Strip policy strings from topic/reading arrays within each week
+    .map((w) => ({
+      ...w,
+      topics: w.topics.filter((t) => !POLICY_TOPIC_RX.test(t)),
+      readings: w.readings.filter((r) => !POLICY_TOPIC_RX.test(r)),
+    }))
+    // 2. Drop weeks whose label sounds like admin-only AND have no real content
+    .filter((w) => {
+      if (
+        POLICY_LABEL_RX.test(w.weekLabel.trim()) &&
+        w.topics.length === 0 &&
+        w.readings.length === 0 &&
+        !w.notes
+      ) {
+        return false;
+      }
+      return true;
+    })
+    // 3. Sort ascending by weekNumber
+    .sort((a, b) => a.weekNumber - b.weekNumber)
+    // 4. Renumber sequentially to close gaps (e.g. 1,2,4,5 → 1,2,3,4)
+    .map((w, i) => ({ ...w, weekNumber: i + 1 }));
+}
+
+// ─── Role 5 — Auditor ─────────────────────────────────────────────────────────
+//
+// AI second-pass that receives both the extracted JSON and the original source
+// text. Corrects errors the Sanitizer can't catch: wrong week labels, misread
+// table structure, out-of-order dates, hallucinated topics.
+//
+// Triggered only when the result looks suspicious (partial, contaminated, or
+// date-sequence broken) — typically costs ~$0.001 per course when it fires.
+
+/**
+ * Returns true when the extracted schedule has signs of problems that
+ * warrant a second AI review pass.
+ */
+export function needsAudit(weeks: ParsedTopic[]): boolean {
+  if (weeks.length < 8) return true; // suspiciously few weeks
+
+  const emptyWeeks = weeks.filter(
+    (w) => w.topics.length === 0 && w.readings.length === 0 && !w.notes
+  ).length;
+  if (emptyWeeks / weeks.length > 0.25) return true; // >25% empty rows
+
+  // Check for non-monotonic startDates (AI hallucinated or reordered dates)
+  const dates = weeks
+    .filter((w) => w.startDate && /^\d{4}-\d{2}-\d{2}$/.test(w.startDate))
+    .map((w) => w.startDate!);
+  if (dates.length > 2) {
+    for (let i = 1; i < dates.length; i++) {
+      if (dates[i] < dates[i - 1]) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Sends the extracted weeks + source snippet to GPT-4o-mini for a quality
+ * review. The model corrects week labels, removes hallucinated or policy
+ * topics, fixes date ordering, and drops empty weeks.
+ *
+ * Falls back to the input weeks if the AI call fails or returns nothing useful.
+ */
+export async function auditSchedule(
+  weeks: ParsedTopic[],
+  sourceText: string
+): Promise<ParsedTopic[]> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are a schedule quality auditor. You will receive:
+1. EXTRACTED SCHEDULE — a JSON array of weekly schedule entries (possibly with errors)
+2. ORIGINAL SOURCE — the first 3000 characters of the raw syllabus text
+
+Your job is to fix the extracted schedule:
+- Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
+- Fix vague weekLabels like "Regular Class" or "TBD" — use actual topic names from the source if you can find them.
+- Remove weeks that have no real topics or readings after cleanup.
+- Ensure weekNumbers are sequential with no gaps — renumber if needed.
+- Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
+- Do NOT invent topics that aren't in the source. Only fix, never fabricate.
+
+Return JSON: { "weeks": [...] } using the exact same field structure. Return only the corrected array — no explanations, no extra fields.`,
+      },
+      {
+        role: "user",
+        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE (first 3000 chars):\n${sourceText.slice(0, 3000)}`,
+      },
+    ],
+  }, { timeout: 25_000 });
+
+  const raw = response.choices[0]?.message?.content;
+  if (!raw) return weeks;
+
+  try {
+    const parsed = JSON.parse(raw);
+    const audited: ParsedTopic[] = parsed.weeks ?? [];
+    // Accept only if the audit produced at least half as many weeks (avoid catastrophic drops)
+    if (Array.isArray(audited) && audited.length >= Math.max(1, weeks.length / 2)) {
+      return audited;
+    }
+  } catch {
+    // JSON parse failed — return unmodified
+  }
+  return weeks;
+}
+
+// ─── Role 3 — Extractor ───────────────────────────────────────────────────────
+
 /**
  * @param text   Syllabus text (pre-extracted, max ~12k chars)
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".

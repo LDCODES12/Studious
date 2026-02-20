@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { parseSyllabusTopics, type ParsedTopic } from "@/lib/parse-syllabus";
+import {
+  parseSyllabusTopics,
+  sanitizeSchedule,
+  auditSchedule,
+  needsAudit,
+  type ParsedTopic,
+} from "@/lib/parse-syllabus";
 import crypto from "crypto";
 
 export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
@@ -428,9 +434,10 @@ export async function POST(request: NextRequest) {
         const bestFormat = detectSourceFormat(syllabusText);
         const bestHint   = `${best.label}, format: ${bestFormat}`;
 
+        // ── Role 3: Extractor ─────────────────────────────────────────────
         // First attempt — best scoring source
         let rawTopics = await parseSyllabusTopics(syllabusText.slice(0, 12_000), bestHint);
-        let topics    = rawTopics.filter(isContentfulTopic);
+        let topics    = sanitizeSchedule(rawTopics).filter(isContentfulTopic);
         let usedLabel = bestLabel;
 
         // Retry with next-best source if first returned nothing useful.
@@ -441,15 +448,25 @@ export async function POST(request: NextRequest) {
           const altFormat = detectSourceFormat(alt.text);
           const altHint   = `${alt.label}, format: ${altFormat}`;
           const altRaw    = await parseSyllabusTopics(alt.text.slice(0, 12_000), altHint);
-          const altTopics = altRaw.filter(isContentfulTopic);
+          const altTopics = sanitizeSchedule(altRaw).filter(isContentfulTopic);
           if (altTopics.length > 0) {
-            rawTopics  = altRaw;
             topics     = altTopics;
             usedLabel  = `${alt.label}(retry,score=${alt.score.toFixed(3)},${alt.text.length}c)`;
           }
         }
 
         if (topics.length === 0) return;
+
+        // ── Role 5: Auditor ───────────────────────────────────────────────
+        // Second AI pass — only fires when the result looks partial or messy.
+        // Corrects week labels, removes hallucinated topics, fixes date order.
+        if (needsAudit(topics)) {
+          const audited = await auditSchedule(topics, syllabusText);
+          if (audited.length > 0) {
+            topics    = audited;
+            usedLabel = usedLabel + "+audited";
+          }
+        }
 
         // Delete module-based topics (those sourced from Canvas modules)
         // and replace with the AI-parsed weekly schedule.
