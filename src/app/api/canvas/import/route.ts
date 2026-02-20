@@ -78,6 +78,28 @@ function toDateOnly(iso: string): string {
   return iso.slice(0, 10);
 }
 
+/**
+ * Score a text blob for schedule-content density.
+ * Higher = more likely to contain a real week-by-week schedule.
+ * Used to pick the best source when multiple are available.
+ */
+function scheduleScore(text: string): number {
+  if (!text || text.length < 50) return 0;
+  const t = text.toLowerCase();
+  // Strong indicators: explicit week/lecture markers with numbers
+  const weekHits   = (t.match(/\b(week|lecture|class|session|module)\s*\d+/g) ?? []).length;
+  // Medium: date patterns (Jan 13, 1/13, 01/13)
+  const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
+  // Medium: topic indicators
+  const topicHits  = (t.match(/\b(introduction|overview|chapter|ch\.\s*\d|topic[s]?:|reading[s]?:)/g) ?? []).length;
+  // Penalty: heavy policy language — indicates admin-only content
+  const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
+
+  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 - policyHits * 1;
+  // Normalise by sqrt(length) so a long policy doc doesn't beat a short schedule
+  return raw / Math.sqrt(text.length);
+}
+
 /** Strip HTML tags and decode common entities to plain text. */
 function htmlToText(html: string): string {
   return html
@@ -305,19 +327,26 @@ export async function POST(request: NextRequest) {
       // If we already parsed this course's syllabus, don't overwrite
       const shouldRunAI = existingAiTopics === 0;
 
-      // ── b) Build best available syllabus text ─────────────────────────────
-      let syllabusText = c.syllabusBody ? htmlToText(c.syllabusBody) : "";
-
-      // ── c) Process pre-extracted PDF texts ────────────────────────────────
-      // The extension extracted this text client-side via pdfjs-dist —
-      // no parsing needed here, just use the text directly.
+      // ── b+c) Pick best source by schedule-content density ─────────────────
+      // Collect all candidate texts, score each, use the highest-scoring one.
+      // "Longest text" is a poor proxy — a 10k-char policy page scores lower
+      // than a 3k-char week-by-week schedule table.
       const syllabusTexts = c.syllabusTexts ?? [];
+
+      type ScoredSource = { text: string; score: number; label: string };
+      const candidates: ScoredSource[] = [];
+
+      if (c.syllabusBody) {
+        const bodyText = htmlToText(c.syllabusBody);
+        if (bodyText.length >= 100) {
+          candidates.push({ text: bodyText, score: scheduleScore(bodyText), label: "html-body" });
+        }
+      }
+
       for (const st of syllabusTexts) {
         const pdfText = st.text.trim();
-
-        // Prefer the longest text source (PDF often has more detail than HTML body)
-        if (pdfText.length > syllabusText.length) {
-          syllabusText = pdfText;
+        if (pdfText.length >= 100) {
+          candidates.push({ text: pdfText, score: scheduleScore(pdfText), label: st.fileName });
         }
 
         // Save as CourseMaterial (visible in the Materials tab)
@@ -341,13 +370,19 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // Pick highest-scoring candidate; fall back to longest if all score 0
+      candidates.sort((a, b) => b.score !== a.score ? b.score - a.score : b.text.length - a.text.length);
+      const best = candidates[0];
+      const syllabusText = best?.text ?? "";
+      const bestLabel = best ? `${best.label}(score=${best.score.toFixed(3)},${best.text.length}c)` : "none";
+
       // ── d) AI topic extraction ─────────────────────────────────────────────
       const aiStatus = !shouldRunAI ? "skip:has-ai-topics"
         : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length})`
         : `run(${syllabusText.length})`;
 
       if (!shouldRunAI || syllabusText.length < 500) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => `${f.fileName}(${f.text.length}c)`).join(", ")}] → ${aiStatus}`);
+        debugRows.push(`${c.name}: best=${bestLabel} → ${aiStatus}`);
         return;
       }
 
@@ -390,9 +425,9 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => `${f.fileName}(${f.text.length}c)`).join(", ")}] → ai-ran(${topics.length} weeks)`);
+        debugRows.push(`${c.name}: best=${bestLabel} → ai-ran(${topics.length} weeks)`);
       } catch (err) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => `${f.fileName}(${f.text.length}c)`).join(", ")}] → ai-error:${err}`);
+        debugRows.push(`${c.name}: best=${bestLabel} → ai-error:${err}`);
       }
     })
   );
