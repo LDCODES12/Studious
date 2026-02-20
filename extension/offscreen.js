@@ -71,9 +71,14 @@ async function extractTextFromUrl(url) {
 
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    pages.push(extractPageText(content.items));
+    try {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(extractPageText(content.items));
+    } catch (pageErr) {
+      // Some PDFs have corrupt or null entries in their page tree — skip and continue.
+      console.warn(`[offscreen] page ${i}/${pdf.numPages} failed:`, pageErr.message);
+    }
   }
 
   const text = pages.join("\n\n").trim();
