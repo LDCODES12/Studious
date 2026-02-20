@@ -2,41 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { parseSyllabusTopics } from "@/lib/parse-syllabus";
 import crypto from "crypto";
-import { Worker } from "worker_threads";
-
-/**
- * Run pdf-parse in a worker thread so CPU-heavy font processing can't
- * block the main event loop (which would prevent setTimeout from firing).
- */
-function parsePdfInWorker(buf: Buffer, timeoutMs = 8_000): Promise<string> {
-  return new Promise((resolve) => {
-    const workerCode = `
-const { parentPort, workerData } = require('worker_threads');
-const pdfParse = require('pdf-parse');
-const buf = Buffer.from(workerData.buf);
-pdfParse(buf, { max: 15 })
-  .then(r  => parentPort.postMessage(r.text || ''))
-  .catch(() => parentPort.postMessage(''));
-`;
-    let done = false;
-    const worker = new Worker(workerCode, { eval: true, workerData: { buf } });
-    const timer = setTimeout(() => {
-      if (!done) { done = true; worker.terminate(); resolve(""); }
-    }, timeoutMs);
-    worker.on("message", (text: string) => {
-      if (!done) { done = true; clearTimeout(timer); resolve(text); }
-    });
-    worker.on("error", () => {
-      if (!done) { done = true; clearTimeout(timer); resolve(""); }
-    });
-  });
-}
 
 // ─── Types mirroring what the extension sends ────────────────────────────────
 
-interface SyllabusFile {
+/**
+ * The extension extracts PDF text client-side (via pdfjs-dist in an offscreen
+ * document) and sends us plain text — no base64, no server-side PDF work.
+ */
+interface SyllabusText {
   fileName: string;
-  base64: string;
+  text: string;
 }
 
 interface CanvasCourse {
@@ -47,8 +22,8 @@ interface CanvasCourse {
   instructor: string | null;
   /** HTML from Canvas's built-in syllabus page, or null */
   syllabusBody?: string | null;
-  /** Syllabus PDFs downloaded by the extension (base64-encoded) */
-  syllabusFiles?: SyllabusFile[];
+  /** Pre-extracted syllabus text from PDFs (offscreen doc ran pdfjs-dist) */
+  syllabusTexts?: SyllabusText[];
 }
 
 interface CanvasAssignment {
@@ -299,13 +274,16 @@ export async function POST(request: NextRequest) {
 
   // 7. AI syllabus processing — run all courses in parallel for speed
   //    For each course that provided syllabus content:
-  //      a) Extract text from HTML body and/or PDF files
-  //      b) Save syllabus PDFs as CourseMaterial records
+  //      a) Build best available syllabus text from HTML body + pre-extracted PDF texts
+  //      b) Save PDF-sourced materials as CourseMaterial records
   //      c) Run parseSyllabusTopics() if we have substantial text
   //      d) If AI returns a schedule, replace module-based topics with it
   //
   //    Skip courses that already have AI-parsed topics (canvasModuleId = null)
   //    so subsequent syncs are fast and don't overwrite user-annotated progress.
+  //
+  //    PDF text extraction is done entirely by the extension (pdfjs-dist in an
+  //    offscreen document) — we receive plain text, no binary data, no pdf-parse.
 
   let aiTopicsCreated = 0;
   let syllabusFilesImported = 0;
@@ -328,40 +306,37 @@ export async function POST(request: NextRequest) {
       // ── b) Build best available syllabus text ─────────────────────────────
       let syllabusText = c.syllabusBody ? htmlToText(c.syllabusBody) : "";
 
-      // ── c) Process PDF files ───────────────────────────────────────────────
-      const syllabusFiles = c.syllabusFiles ?? [];
-      for (const sf of syllabusFiles) {
-        try {
-          const buf = Buffer.from(sf.base64, "base64");
-          // Run pdf-parse in a worker thread so CPU-heavy font processing
-          // can't block the main event loop. Times out after 8s.
-          const pdfText = (await parsePdfInWorker(buf)).trim();
+      // ── c) Process pre-extracted PDF texts ────────────────────────────────
+      // The extension extracted this text client-side via pdfjs-dist —
+      // no parsing needed here, just use the text directly.
+      const syllabusTexts = c.syllabusTexts ?? [];
+      for (const st of syllabusTexts) {
+        const pdfText = st.text.trim();
 
-          // Prefer PDF text if it's more complete than the HTML body
-          if (pdfText.length > syllabusText.length) {
-            syllabusText = pdfText;
-          }
+        // Prefer the longest text source (PDF often has more detail than HTML body)
+        if (pdfText.length > syllabusText.length) {
+          syllabusText = pdfText;
+        }
 
-          // Save as CourseMaterial (visible in the Materials tab)
-          const existing = await db.courseMaterial.findFirst({
-            where: { courseId: scCourseId, fileName: sf.fileName },
-            select: { id: true },
+        // Save as CourseMaterial (visible in the Materials tab)
+        const existing = await db.courseMaterial.findFirst({
+          where: { courseId: scCourseId, fileName: st.fileName },
+          select: { id: true },
+        });
+        if (!existing) {
+          await db.courseMaterial.create({
+            data: {
+              courseId: scCourseId,
+              fileName: st.fileName,
+              detectedType: "syllabus",
+              summary: "Syllabus automatically imported from Canvas.",
+              relatedTopics: [],
+              rawText: pdfText.slice(0, 10_000),
+              storedForAI: false,
+            },
           });
-          if (!existing) {
-            await db.courseMaterial.create({
-              data: {
-                courseId: scCourseId,
-                fileName: sf.fileName,
-                detectedType: "syllabus",
-                summary: "Syllabus automatically imported from Canvas.",
-                relatedTopics: [],
-                rawText: pdfText.slice(0, 10_000),
-                storedForAI: false,
-              },
-            });
-            syllabusFilesImported++;
-          }
-        } catch { /* skip if PDF parsing fails */ }
+          syllabusFilesImported++;
+        }
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
@@ -370,7 +345,7 @@ export async function POST(request: NextRequest) {
         : `run(${syllabusText.length})`;
 
       if (!shouldRunAI || syllabusText.length < 500) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ${aiStatus}`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => f.fileName).join(", ")}] → ${aiStatus}`);
         return;
       }
 
@@ -401,9 +376,9 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ai-ran(${topics.length} weeks)`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => f.fileName).join(", ")}] → ai-ran(${topics.length} weeks)`);
       } catch (err) {
-        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusFiles.map((f) => f.fileName).join(", ")}] → ai-error:${err}`);
+        debugRows.push(`${c.name}: body=${c.syllabusBody?.length ?? 0} pdfs=[${syllabusTexts.map((f) => f.fileName).join(", ")}] → ai-error:${err}`);
       }
     })
   );

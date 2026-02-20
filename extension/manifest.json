@@ -7,7 +7,8 @@
     "storage",
     "scripting",
     "tabs",
-    "alarms"
+    "alarms",
+    "offscreen"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -27,5 +28,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/pdf.worker.min.mjs"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

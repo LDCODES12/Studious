@@ -5,10 +5,15 @@
  *   Phase 1: clear window.__sc_selectedIds → inject content.js → receives CANVAS_COURSES
  *            → sends COURSE_SELECTION to popup for user to pick
  *   Phase 2: popup sends SYNC_SELECTED → set window.__sc_selectedIds → re-inject content.js
- *            → receives CANVAS_DATA → POST to Study Circle
+ *            → receives CANVAS_DATA → extract PDF text via offscreen doc → POST to Study Circle
  *
  * Phase info is passed via window.__sc_selectedIds (set by inline executeScript),
  * not chrome.storage.session, to avoid MV3 service worker dormancy timing issues.
+ *
+ * PDF extraction: content.js sends PDF URLs (not binary data). We create a
+ * Chrome Offscreen Document that runs pdfjs-dist to fetch + extract text from
+ * each URL, then we include the extracted text in the payload sent to the server.
+ * The server does zero PDF processing — it receives plain text only.
  */
 
 // ── Alarm for auto-sync ───────────────────────────────────────────────────────
@@ -63,6 +68,60 @@ async function getCanvasTabId() {
   return tab.id;
 }
 
+// ── Offscreen document management ────────────────────────────────────────────
+
+const OFFSCREEN_URL = chrome.runtime.getURL("offscreen.html");
+
+/**
+ * Create the offscreen document if it doesn't already exist.
+ * The document persists until closeOffscreen() is called.
+ */
+async function ensureOffscreen() {
+  const existing = await chrome.runtime.getContexts({
+    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
+    documentUrls: [OFFSCREEN_URL],
+  });
+  if (existing.length > 0) return;
+  await chrome.offscreen.createDocument({
+    url: OFFSCREEN_URL,
+    reasons: [chrome.offscreen.Reason.BLOBS],
+    justification: "Extract text from Canvas syllabus PDFs using pdfjs-dist",
+  });
+}
+
+/** Close the offscreen document when we no longer need it. */
+async function closeOffscreen() {
+  try {
+    await chrome.offscreen.closeDocument();
+  } catch { /* already closed or never opened */ }
+}
+
+/**
+ * Ask the offscreen document to fetch `url` and extract its text via pdfjs.
+ * Returns empty string on any error or if it exceeds the 20s per-file timeout.
+ *
+ * Each call gets a unique messageId so concurrent calls don't cross-wire.
+ */
+function parsePdfViaOffscreen(url, messageId) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve("");
+    }, 20_000);
+
+    function listener(msg) {
+      if (msg.type !== "PDF_PARSED" || msg.messageId !== messageId) return;
+      chrome.runtime.onMessage.removeListener(listener);
+      clearTimeout(timer);
+      resolve(msg.text ?? "");
+    }
+
+    chrome.runtime.onMessage.addListener(listener);
+    // Send to the offscreen document (it's the only listener for PARSE_PDF)
+    chrome.runtime.sendMessage({ type: "PARSE_PDF", url, messageId });
+  });
+}
+
 // ── Phase 1: fetch course list ────────────────────────────────────────────────
 async function startPhase1() {
   await chrome.storage.session.set({ syncRunning: true });
@@ -112,12 +171,55 @@ async function startPhase2(selectedIds) {
   }
 }
 
-// ── Handle full Canvas payload → POST to Study Circle ─────────────────────────
+// ── Handle full Canvas payload → extract PDFs → POST to Study Circle ──────────
 async function handleCanvasData(payload) {
   try {
     const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
 
-    // Let user know AI analysis is running — this phase takes 20-40s with syllabus parsing
+    // ── Step 1: Extract text from all PDF URLs via the offscreen document ─────
+    // Count total PDFs across all courses so we can show accurate progress.
+    const totalPdfs = payload.courses.reduce(
+      (sum, c) => sum + (c.syllabusFileUrls?.length ?? 0), 0
+    );
+
+    if (totalPdfs > 0) {
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 88,
+        label: `Extracting text from ${totalPdfs} syllabus PDF${totalPdfs !== 1 ? "s" : ""}…`,
+      });
+
+      await ensureOffscreen();
+
+      // Process all courses in parallel; within each course, process files
+      // sequentially to avoid flooding the offscreen doc with concurrent messages.
+      await Promise.all(
+        payload.courses.map(async (course) => {
+          const fileUrls = course.syllabusFileUrls ?? [];
+          const syllabusTexts = [];
+
+          for (const { fileName, url } of fileUrls) {
+            const messageId = crypto.randomUUID();
+            const text = await parsePdfViaOffscreen(url, messageId);
+            syllabusTexts.push({ fileName, text });
+          }
+
+          // Replace syllabusFileUrls with syllabusTexts in place
+          course.syllabusTexts  = syllabusTexts;
+          delete course.syllabusFileUrls;
+        })
+      );
+
+      await closeOffscreen();
+    } else {
+      // No PDFs — still clean up the field so the server type is consistent
+      for (const course of payload.courses) {
+        course.syllabusTexts = [];
+        delete course.syllabusFileUrls;
+      }
+    }
+
+    // ── Step 2: Let user know AI analysis is starting ─────────────────────────
     const courseCount = payload.courses?.length ?? 0;
     broadcastToPopup({
       type: "SYNC_PROGRESS",
@@ -127,6 +229,7 @@ async function handleCanvasData(payload) {
         : "Saving to Study Circle…",
     });
 
+    // ── Step 3: POST the enriched payload to Study Circle ────────────────────
     const res = await fetch(`https://${scUrl}/api/canvas/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
@@ -144,6 +247,7 @@ async function handleCanvasData(payload) {
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {
+    await closeOffscreen();
     await chrome.storage.session.set({ syncRunning: false });
     handleError(err.message ?? String(err));
   }

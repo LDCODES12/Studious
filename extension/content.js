@@ -13,10 +13,11 @@
  *   - Assignments (with due dates)
  *   - Canvas modules (fallback topic structure)
  *   - syllabus_body HTML (Canvas's built-in syllabus page)
- *   - Syllabus PDF files (auto-detected by name, downloaded if < 3 MB)
+ *   - Syllabus PDF URLs (auto-detected by name + peek; URLs sent to background
+ *     which routes them through an offscreen document for text extraction)
  *
- * The import API uses syllabus content to run AI topic extraction,
- * producing a proper weekly schedule rather than just module names.
+ * PDF text extraction is handled entirely in the browser via pdfjs-dist
+ * running in an offscreen document — the server receives plain text, not binary.
  */
 
 (async function canvasSync() {
@@ -43,17 +44,6 @@
   function stripHtml(html) {
     if (!html) return null;
     return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
-  }
-
-  /** Convert an ArrayBuffer to a base64 string (safe for large files). */
-  function bufferToBase64(buf) {
-    const bytes = new Uint8Array(buf);
-    let binary = "";
-    // 1 KB chunks — safe for call stack regardless of file size
-    for (let i = 0; i < bytes.byteLength; i += 1024) {
-      binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 1024, bytes.byteLength)));
-    }
-    return btoa(binary);
   }
 
   /**
@@ -145,8 +135,8 @@
         syllabusBody: (c.syllabus_body && c.syllabus_body.trim().length > 100)
           ? c.syllabus_body
           : null,
-        // Will be populated below
-        syllabusFiles: [],
+        // Populated below: { fileName, url } entries for the offscreen doc to parse
+        syllabusFileUrls: [],
       }));
 
     const payload = { courses, assignments: [], modules: [] };
@@ -213,14 +203,17 @@
         }
       } catch { /* pages endpoint not available */ }
 
-      // ── Syllabus PDF files ─────────────────────────────────────────────────
+      // ── Syllabus PDF URLs ──────────────────────────────────────────────────
+      // We collect download URLs here; the offscreen document (background.js)
+      // fetches + text-extracts them via pdfjs-dist — no base64, no server PDF work.
+      //
       // content_details.url is the Canvas API info endpoint, NOT a download URL.
       // Instead use content_id → GET /api/v1/files/:id to get the real download URL.
       // Fallback: course files endpoint (often restricted for students).
       // Strategy: name-match first, then peek inside unmatched ones. Cap at 3.
       {
         const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)/i;
-        const toDownload    = []; // { name, url }
+        const toFetch       = []; // { name, url } — URLs to send for text extraction
         const peekCandidates = []; // { title, content_id } — resolve later if needed
         const seenIds       = new Set();
 
@@ -239,7 +232,7 @@
               try {
                 const [fileInfo] = await fetchAll(`${BASE}/files/${item.content_id}`);
                 if (fileInfo?.url && (fileInfo.size ?? 0) < 5_000_000) {
-                  toDownload.push({ name: fileInfo.display_name ?? item.title, url: fileInfo.url });
+                  toFetch.push({ name: fileInfo.display_name ?? item.title, url: fileInfo.url });
                 }
               } catch { /* skip */ }
             } else {
@@ -259,7 +252,7 @@
             if (seenIds.has(f.id)) continue;
             seenIds.add(f.id);
             if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) {
-              toDownload.push({ name: f.display_name, url: f.url });
+              toFetch.push({ name: f.display_name, url: f.url });
             } else {
               peekCandidates.push({ title: f.display_name, url: f.url });
             }
@@ -267,9 +260,9 @@
         } catch { /* files endpoint restricted */ }
 
         // ── Peek inside unmatched candidates if still under limit ────────────
-        if (toDownload.length < 3) {
+        if (toFetch.length < 3) {
           for (const candidate of peekCandidates) {
-            if (toDownload.length >= 3) break;
+            if (toFetch.length >= 3) break;
             try {
               // Resolve download URL if we only have content_id
               let url = candidate.url;
@@ -280,20 +273,17 @@
                 url = fileInfo.url;
               }
               if (url && await peekIsSyllabus(url)) {
-                toDownload.push({ name: candidate.title, url });
+                toFetch.push({ name: candidate.title, url });
               }
             } catch { /* skip */ }
           }
         }
 
-        // ── Download the selected files ──────────────────────────────────────
-        for (const { name, url } of toDownload.slice(0, 3)) {
-          try {
-            const fileRes = await fetch(url, { credentials: "include" });
-            if (!fileRes.ok) continue;
-            const buf = await fileRes.arrayBuffer();
-            course.syllabusFiles.push({ fileName: name, base64: bufferToBase64(buf) });
-          } catch { /* skip individual download failures */ }
+        // ── Collect URLs for offscreen document to fetch + extract ───────────
+        // The actual downloading and PDF parsing is done by the offscreen document
+        // in background.js — we just pass the pre-signed URLs along.
+        for (const { name, url } of toFetch.slice(0, 3)) {
+          course.syllabusFileUrls.push({ fileName: name, url });
         }
       }
     }

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",
@@ -20,7 +21,6 @@
     "next": "16.1.6",
     "next-auth": "^5.0.0-beta.30",
     "openai": "^6.22.0",
-    "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^5.4.624",
     "prisma": "^6.19.2",
     "radix-ui": "^1.4.3",
@@ -32,7 +32,6 @@
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
-    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

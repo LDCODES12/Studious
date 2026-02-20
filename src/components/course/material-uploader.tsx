@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { extractTextFromPDF } from "@/lib/extract-pdf-text";
 
 export interface UploadedMaterial {
   id: string;
@@ -20,20 +21,23 @@ interface MaterialUploaderProps {
 
 export function MaterialUploader({ courseId, onUploadComplete }: MaterialUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState<"idle" | "extracting" | "analyzing">("idle");
   const [error, setError] = useState<string | null>(null);
 
   const handleFile = async (file: File) => {
-    setUploading(true);
+    setStatus("extracting");
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
+      // Extract text client-side using pdfjs-dist — no server-side PDF work needed
+      const text = await extractTextFromPDF(file);
+
+      setStatus("analyzing");
 
       const res = await fetch(`/api/courses/${courseId}/materials`, {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, text }),
       });
 
       if (!res.ok) {
@@ -46,10 +50,15 @@ export function MaterialUploader({ courseId, onUploadComplete }: MaterialUploade
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
-      setUploading(false);
+      setStatus("idle");
       if (inputRef.current) inputRef.current.value = "";
     }
   };
+
+  const label =
+    status === "extracting" ? "Extracting…"
+    : status === "analyzing" ? "Analyzing…"
+    : "Upload PDF";
 
   return (
     <div className="flex flex-col items-end gap-1">
@@ -65,10 +74,10 @@ export function MaterialUploader({ courseId, onUploadComplete }: MaterialUploade
       />
       <button
         onClick={() => inputRef.current?.click()}
-        disabled={uploading}
+        disabled={status !== "idle"}
         className="rounded-md border border-border px-3 py-1.5 text-[13px] font-medium transition-colors hover:bg-accent disabled:opacity-50"
       >
-        {uploading ? "Analyzing..." : "Upload PDF"}
+        {label}
       </button>
       {error && <p className="text-[12px] text-red-600">{error}</p>}
     </div>

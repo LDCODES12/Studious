@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
-import pdfParse from "pdf-parse";
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -24,19 +23,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const formData = await request.formData();
-  const file = formData.get("file") as File | null;
-  if (!file) {
-    return NextResponse.json({ error: "No file provided" }, { status: 400 });
-  }
+  // Text is extracted client-side by the uploader using pdfjs-dist —
+  // the server receives plain text, no binary PDF processing needed.
+  const body = await request.json();
+  const { fileName, text } = body as { fileName?: string; text?: string };
 
-  const buffer = Buffer.from(await file.arrayBuffer());
-  let text = "";
-  try {
-    const pdfData = await pdfParse(buffer);
-    text = pdfData.text;
-  } catch {
-    return NextResponse.json({ error: "Failed to extract PDF text" }, { status: 400 });
+  if (!fileName || typeof text !== "string") {
+    return NextResponse.json(
+      { error: "fileName and text are required" },
+      { status: 400 }
+    );
   }
 
   const topicLabels = course.topics.map((t) => t.weekLabel);
@@ -47,7 +43,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const material = await db.courseMaterial.create({
     data: {
       courseId,
-      fileName: file.name,
+      fileName,
       detectedType: analysis.detectedType,
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
