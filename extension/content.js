@@ -232,6 +232,9 @@ function extractScheduleSection(html) {
             const bodyHtml = pageData?.body?.trim();
             if (bodyHtml && bodyHtml.length > 200) {
               course.syllabusBody = (course.syllabusBody ?? "") + "\n" + bodyHtml;
+              // Also update _rawSyllabusBody so Source 0 can find PDF links
+              // that are embedded in Canvas Pages (not just in syllabus_body).
+              course._rawSyllabusBody = (course._rawSyllabusBody ?? "") + "\n" + bodyHtml;
             }
           } catch { /* skip */ }
         }
@@ -284,7 +287,9 @@ function extractScheduleSection(html) {
                     console.log("[content] Source 0 found PDF:", name, ct);
                     toFetch.push({ name, url: fileInfo.url });
                   }
-                } catch { /* restricted — skip */ }
+                } catch (err) {
+                  console.warn("[content] Source 0: file API failed for fileId", fileId, err?.message ?? err);
+                }
               } else if (/\.pdf(\?|$)/i.test(href) && !seenIds.has(href)) {
                 // Direct external PDF link
                 seenIds.add(href);
@@ -307,13 +312,28 @@ function extractScheduleSection(html) {
             if (seenIds.has(item.content_id)) continue;
             seenIds.add(item.content_id);
             if (SYLLABUS_NAME_RE.test(item.title ?? "")) {
-              // Name match — fetch the real download URL now
+              // Name match — fetch the real download URL.
+              // Try the course-scoped endpoint first (more permissive for students),
+              // then fall back to the global endpoint.
               try {
-                const [fileInfo] = await fetchAll(`${BASE}/files/${item.content_id}`);
-                if (fileInfo?.url && (fileInfo.size ?? 0) < 5_000_000) {
-                  toFetch.push({ name: fileInfo.display_name ?? item.title, url: fileInfo.url });
+                let fileInfo;
+                try {
+                  [fileInfo] = await fetchAll(`${BASE}/courses/${course.id}/files/${item.content_id}`);
+                } catch {
+                  [fileInfo] = await fetchAll(`${BASE}/files/${item.content_id}`);
                 }
-              } catch { /* skip */ }
+                const ct1 = fileInfo?.["content-type"] ?? "";
+                const isPdf1 = ct1.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
+                if (fileInfo?.url && isPdf1 && (fileInfo.size ?? 0) < 5_000_000) {
+                  const name1 = fileInfo.display_name ?? item.title;
+                  console.log("[content] Source 1 found PDF:", name1, ct1);
+                  toFetch.push({ name: name1, url: fileInfo.url });
+                } else if (!fileInfo?.url) {
+                  console.warn("[content] Source 1: file API returned no URL for", item.title, item.content_id);
+                }
+              } catch (err) {
+                console.warn("[content] Source 1: file API failed for", item.title, item.content_id, err?.message ?? err);
+              }
             } else {
               // No name match — save for peek phase (early modules only)
               peekCandidates.push({ title: item.title, content_id: item.content_id });

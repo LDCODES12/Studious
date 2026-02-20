@@ -127,13 +127,42 @@ function detectSourceFormat(text: string): string {
   return "paragraph text";
 }
 
-/** Returns true if an AI-returned topic has at least one piece of content. */
+/** Returns true if an AI-returned topic has at least one piece of content.
+ *  Also accepts date-only entries (seminar meeting dates) that have a valid
+ *  ISO startDate even when topics/readings/notes are empty — those are real
+ *  calendar markers worth keeping. */
 function isContentfulTopic(t: ParsedTopic): boolean {
-  return (
-    (Array.isArray(t.topics) && t.topics.length > 0) ||
-    (Array.isArray(t.readings) && t.readings.length > 0) ||
-    (typeof t.notes === "string" && t.notes.trim().length > 0)
-  );
+  if (Array.isArray(t.topics) && t.topics.length > 0) return true;
+  if (Array.isArray(t.readings) && t.readings.length > 0) return true;
+  if (typeof t.notes === "string" && t.notes.trim().length > 0) return true;
+  // Accept date-only sessions (e.g. seminars that only list meeting dates)
+  return typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate);
+}
+
+/**
+ * For long texts, pick the 12k-char window most likely to contain the
+ * weekly schedule rather than always slicing from the front.
+ *
+ * Many syllabi open with a multi-page policy preamble (grading, attendance,
+ * late work, academic integrity) before the actual week-by-week table — a
+ * 40k-char PDF can have its schedule starting at char 15k or later.
+ *
+ * We evaluate 4 evenly-spaced windows (0%, 33%, 66%, 100% from the end)
+ * and return the one with the highest scheduleScore. If the text fits in
+ * maxLen already, the full text is returned unchanged.
+ */
+function bestWindow(text: string, maxLen = 12_000): string {
+  if (text.length <= maxLen) return text;
+  const end = text.length - maxLen;
+  const offsets = [0, Math.floor(end / 3), Math.floor(end * 2 / 3), end];
+  let best = "";
+  let bestScore = -Infinity;
+  for (const offset of offsets) {
+    const slice = text.slice(offset, offset + maxLen);
+    const s = scheduleScore(slice);
+    if (s > bestScore) { bestScore = s; best = slice; }
+  }
+  return best;
 }
 
 /** Strip HTML tags and decode common entities to plain text.
@@ -451,7 +480,7 @@ export async function POST(request: NextRequest) {
           const src    = candidates[ci];
           const fmt    = detectSourceFormat(src.text);
           const hint   = `${src.label}, format: ${fmt}`;
-          const raw    = await parseSyllabusTopics(src.text.slice(0, 12_000), hint);
+          const raw    = await parseSyllabusTopics(bestWindow(src.text), hint);
           const result = sanitizeSchedule(raw).filter(isContentfulTopic);
           if (result.length > 0) {
             topics     = result;

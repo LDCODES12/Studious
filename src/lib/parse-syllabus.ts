@@ -248,6 +248,7 @@ WHAT TO EXTRACT:
 - All readings: textbook chapters with numbers, papers, articles — include page ranges and chapter titles when listed
 - Lab or recitation topics if different from lecture content
 - The start date for each week if you can determine it from dates in the schedule
+- Class meeting dates even when NO topic names are listed (e.g. a seminar that only provides meeting dates) — include these sessions with notes = "No topics listed — class meeting date" so the date survives as a calendar marker. Set weekLabel to something like "Seminar Session 1", "Meeting 1", etc.
 
 WHAT NOT TO EXTRACT:
 - Graded items with due dates (homework, quizzes, exams, projects) — those are handled separately
@@ -256,11 +257,11 @@ WHAT NOT TO EXTRACT:
 
 OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include EVERY week — do not truncate. Each week must have:
 - weekNumber: integer starting at 1
-- weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class").
+- weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class"). For date-only sessions use descriptive labels like "Seminar Session 1".
 - startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
 - topics: array of ALL topics/concepts for this week
 - readings: array of ALL readings (chapter numbers, titles, page ranges, paper names)
-- notes: optional — only for truly special notes like "No class — Spring Break"
+- notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
 - courseName: exact course name/code from the syllabus header
 
 If you cannot find an explicit schedule, return {"weeks": []}.`,
