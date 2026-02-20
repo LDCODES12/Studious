@@ -366,6 +366,14 @@ function extractScheduleSection(html) {
         for (const { name, url } of toFetch.slice(0, 3)) {
           course.syllabusFileUrls.push({ fileName: name, url });
         }
+
+        // ── Per-course Scout diagnostic ───────────────────────────────────
+        console.log(
+          `[scout] ${course.name}:`,
+          `syllabusBody=${course.syllabusBody?.length ?? 0}c`,
+          `| rawBody=${course._rawSyllabusBody?.length ?? 0}c`,
+          `| PDFs queued=[${course.syllabusFileUrls.map((f) => `"${f.fileName}"`).join(", ") || "none"}]`
+        );
       }
     }
 

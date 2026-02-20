@@ -200,7 +200,14 @@ async function handleCanvasData(payload) {
 
           for (const { fileName, url } of fileUrls) {
             const messageId = crypto.randomUUID();
+            const t0   = Date.now();
             const text = await parsePdfViaOffscreen(url, messageId);
+            const ms   = Date.now() - t0;
+            if (text.length > 0) {
+              console.log(`[worker] ${course.name} | "${fileName}": ${text.length}c in ${ms}ms`);
+            } else {
+              console.warn(`[worker] ${course.name} | "${fileName}": 0 chars after ${ms}ms — timed out or empty PDF`);
+            }
             syllabusTexts.push({ fileName, text });
           }
 

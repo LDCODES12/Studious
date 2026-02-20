@@ -419,20 +419,24 @@ export async function POST(request: NextRequest) {
       const syllabusText = best?.text ?? "";
       const bestLabel = best ? `${best.label}(score=${best.score.toFixed(3)},${best.text.length}c)` : "none";
 
+      // Full candidate list for diagnostics (all sources, not just the winner)
+      const candidatesSummary = candidates.length === 0
+        ? "none"
+        : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
+
       // ── d) AI topic extraction ─────────────────────────────────────────────
       const aiStatus = !shouldRunAI ? "skip:has-ai-topics"
         : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length})`
         : `run(${syllabusText.length})`;
 
       if (!shouldRunAI || syllabusText.length < 500) {
-        debugRows.push(`${c.name}: best=${bestLabel} → ${aiStatus}`);
+        debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  → ${aiStatus}`);
         return;
       }
 
       try {
         // Build a format hint for the AI based on the winning source
         const bestFormat = detectSourceFormat(syllabusText);
-        const bestHint   = `${best.label}, format: ${bestFormat}`;
 
         // ── Role 3: Extractor ─────────────────────────────────────────────
         // Try each candidate source in descending score order until one
@@ -441,6 +445,7 @@ export async function POST(request: NextRequest) {
         // nothing and the actual schedule is in a lower-ranked PDF.
         let topics: ReturnType<typeof sanitizeSchedule> = [];
         let usedLabel = bestLabel;
+        let usedFormat = bestFormat;
 
         for (let ci = 0; ci < candidates.length; ci++) {
           const src    = candidates[ci];
@@ -449,24 +454,30 @@ export async function POST(request: NextRequest) {
           const raw    = await parseSyllabusTopics(src.text.slice(0, 12_000), hint);
           const result = sanitizeSchedule(raw).filter(isContentfulTopic);
           if (result.length > 0) {
-            topics    = result;
-            usedLabel = ci === 0
+            topics     = result;
+            usedFormat = fmt;
+            usedLabel  = ci === 0
               ? bestLabel
               : `${src.label}(retry${ci},score=${src.score.toFixed(3)},${src.text.length}c)`;
             break;
           }
         }
 
-        if (topics.length === 0) return;
+        if (topics.length === 0) {
+          debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  format: ${bestFormat}\n  → extractor: 0 contentful weeks from all ${candidates.length} source(s)`);
+          return;
+        }
 
         // ── Role 5: Auditor ───────────────────────────────────────────────
         // Second AI pass — only fires when the result looks partial or messy.
         // Corrects week labels, removes hallucinated topics, fixes date order.
-        if (needsAudit(topics)) {
+        const preAuditCount = topics.length;
+        const auditFired = needsAudit(topics);
+        if (auditFired) {
           const audited = await auditSchedule(topics, syllabusText);
           if (audited.length > 0) {
             topics    = audited;
-            usedLabel = usedLabel + "+audited";
+            usedLabel = usedLabel + `+audited(${preAuditCount}→${audited.length})`;
           }
         }
 
@@ -495,9 +506,13 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(`${c.name}: used=${usedLabel} → ai-ran(${topics.length} weeks)`);
+        debugRows.push(
+          `${c.name}:\n  candidates: ${candidatesSummary}\n  used: ${usedLabel} [${usedFormat}]` +
+          (auditFired ? `` : ` (audit skipped)`) +
+          `\n  → ${topics.length} weeks saved`
+        );
       } catch (err) {
-        debugRows.push(`${c.name}: best=${bestLabel} → ai-error:${err}`);
+        debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  → ai-error: ${err}`);
       }
     })
   );
