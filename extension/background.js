@@ -107,7 +107,7 @@ function parsePdfViaOffscreen(url, messageId) {
     const timer = setTimeout(() => {
       chrome.runtime.onMessage.removeListener(listener);
       resolve("");
-    }, 20_000);
+    }, 30_000);
 
     function listener(msg) {
       if (msg.type !== "PDF_PARSED" || msg.messageId !== messageId) return;

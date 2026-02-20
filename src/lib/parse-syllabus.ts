@@ -49,7 +49,7 @@ Return a JSON object with an "events" array. Each event must have:
         content: text,
       },
     ],
-  }, { timeout: 25_000 });
+  }, { timeout: 45_000 });
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];
@@ -184,7 +184,7 @@ Return JSON: { "weeks": [...] } using the exact same field structure. Return onl
         content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE (first 6000 chars):\n${sourceText.slice(0, 6000)}`,
       },
     ],
-  }, { timeout: 25_000 });
+  }, { timeout: 45_000 });
 
   const raw = response.choices[0]?.message?.content;
   if (!raw) return weeks;
@@ -267,7 +267,7 @@ If you cannot find an explicit schedule, return {"weeks": []}.`,
       },
       { role: "user", content: userContent },
     ],
-  }, { timeout: 25_000 });
+  }, { timeout: 45_000 });
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];

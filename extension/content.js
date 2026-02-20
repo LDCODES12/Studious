@@ -273,9 +273,15 @@ function extractScheduleSection(html) {
                 seenIds.add(fileId);
                 try {
                   const [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
-                  if (fileInfo?.url && fileInfo["content-type"] === "application/pdf"
-                      && (fileInfo.size ?? 0) < 5_000_000) {
+                  // Canvas returns various content-type values for PDFs:
+                  // "application/pdf", "application/pdf; charset=binary",
+                  // "application/octet-stream", or sometimes nothing.
+                  // Fall back to checking the filename extension.
+                  const ct = fileInfo?.["content-type"] ?? "";
+                  const isPdf = ct.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
+                  if (fileInfo?.url && isPdf && (fileInfo.size ?? 0) < 5_000_000) {
                     const name = fileInfo.display_name ?? a.textContent?.trim() ?? "syllabus.pdf";
+                    console.log("[content] Source 0 found PDF:", name, ct);
                     toFetch.push({ name, url: fileInfo.url });
                   }
                 } catch { /* restricted — skip */ }
@@ -341,7 +347,9 @@ function extractScheduleSection(html) {
               let url = candidate.url;
               if (!url && candidate.content_id) {
                 const [fileInfo] = await fetchAll(`${BASE}/files/${candidate.content_id}`);
-                if (!fileInfo?.url || fileInfo["content-type"] !== "application/pdf") continue;
+                const ct2 = fileInfo?.["content-type"] ?? "";
+                const isPdf2 = ct2.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
+                if (!fileInfo?.url || !isPdf2) continue;
                 if ((fileInfo.size ?? 0) > 5_000_000) continue;
                 url = fileInfo.url;
               }
