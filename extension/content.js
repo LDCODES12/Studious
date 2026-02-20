@@ -162,10 +162,13 @@ function extractScheduleSection(html) {
         courseCode: c.course_code ?? null,
         term: c.term?.name ?? null,
         instructor: c.teachers?.[0]?.display_name ?? null,
-        // Syllabus HTML — extract the schedule section if present, otherwise
-        // keep the full body. Many Canvas pages have a clear "Week-by-Week
-        // Schedule" or "Course Schedule" heading followed by the actual content.
+        // Syllabus HTML sent to the server — extract just the schedule section
+        // when possible so the AI receives focused signal, not a policy dump.
         syllabusBody: extractScheduleSection(c.syllabus_body),
+        // Keep the FULL original HTML locally for PDF link discovery (Source 0).
+        // PDF links are often in a "Useful Links" section that gets stripped by
+        // extractScheduleSection. Never sent to the server.
+        _rawSyllabusBody: c.syllabus_body ?? null,
         // Populated below: { fileName, url } entries for the offscreen doc to parse
         syllabusFileUrls: [],
       }));
@@ -252,9 +255,13 @@ function extractScheduleSection(html) {
         // Professors often link directly to their PDF syllabus from the Canvas
         // syllabus page (e.g. "Math 2130 Syllabus (Spring 2026).pdf ↓").
         // These never appear in the Files API — only in the HTML body.
-        if (course.syllabusBody) {
+        // IMPORTANT: scan _rawSyllabusBody (full original HTML), NOT syllabusBody
+        // (which may be just the extracted schedule section and could be missing
+        // the "Useful Links" or header area where PDF links often live).
+        const htmlToScan = course._rawSyllabusBody ?? course.syllabusBody;
+        if (htmlToScan) {
           try {
-            const doc = new DOMParser().parseFromString(course.syllabusBody, "text/html");
+            const doc = new DOMParser().parseFromString(htmlToScan, "text/html");
             for (const a of doc.querySelectorAll("a[href]")) {
               const href = a.href; // absolute URL (DOMParser resolves relative to page)
               if (!href) continue;
@@ -353,6 +360,9 @@ function extractScheduleSection(html) {
         }
       }
     }
+
+    // Strip local-only fields before sending to server
+    for (const c of courses) delete c._rawSyllabusBody;
 
     progress(90, "Saving to Study Circle…");
     chrome.runtime.sendMessage({ type: "CANVAS_DATA", payload });

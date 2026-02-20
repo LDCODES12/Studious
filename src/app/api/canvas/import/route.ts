@@ -96,14 +96,21 @@ function scheduleScore(text: string): number {
   const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
 
   const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 - policyHits * 1;
-  // Normalise by sqrt(length) so a long policy doc doesn't beat a short schedule
-  return raw / Math.sqrt(text.length);
+  // Normalise per 500 chars of text — measures schedule density, not absolute count.
+  // Linear normalisation: a 10k-char policy page with the same hit count as a
+  // 1k-char schedule table correctly scores 10x lower.
+  return raw / (text.length / 500);
 }
 
-/** Strip HTML tags and decode common entities to plain text. */
+/** Strip HTML tags and decode common entities to plain text.
+ *  Block-level elements (tr, li, p, headings, div) become newlines so
+ *  table rows and list items survive as separate lines for the AI.
+ */
 function htmlToText(html: string): string {
   return html
-    .replace(/<[^>]+>/g, " ")
+    // Block elements → newline so table rows/list items stay as lines
+    .replace(/<\/?(tr|li|p|br|h[1-6]|div|section|thead|tbody)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")     // remaining inline tags → space
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -111,7 +118,9 @@ function htmlToText(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
     .replace(/&#\d+;/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t]+/g, " ")      // collapse horizontal whitespace only
+    .replace(/\n[ \t]+/g, "\n")   // trim leading spaces on each line
+    .replace(/\n{3,}/g, "\n\n")   // max two blank lines
     .trim();
 }
 
