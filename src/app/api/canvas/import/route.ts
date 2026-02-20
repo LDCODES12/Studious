@@ -546,11 +546,8 @@ export async function POST(request: NextRequest) {
     })
   );
 
-  // Log every line as its own console.log so Vercel shows the full summary
-  console.log("[canvas-import] syllabus summary:");
-  for (const row of debugRows) {
-    for (const line of row.split("\n")) console.log(line);
-  }
+  // Single log entry — read with `vercel logs -x --query "canvas/import"` to see full output
+  console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
 
   return NextResponse.json({
     ok: true,
