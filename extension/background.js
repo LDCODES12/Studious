@@ -225,7 +225,7 @@ async function handleCanvasData(payload) {
       type: "SYNC_PROGRESS",
       percent: 93,
       label: courseCount > 0
-        ? `AI is reading ${courseCount} syllab${courseCount !== 1 ? "i" : "us"}… (may take ~30s)`
+        ? `AI is reading ${courseCount} syllab${courseCount !== 1 ? "i" : "us"}… (may take ~60s)`
         : "Saving to Study Circle…",
     });
 

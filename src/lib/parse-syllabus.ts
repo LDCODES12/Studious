@@ -49,7 +49,7 @@ Return a JSON object with an "events" array. Each event must have:
         content: text,
       },
     ],
-  });
+  }, { timeout: 25_000 });
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];
@@ -128,7 +128,7 @@ export function sanitizeSchedule(weeks: ParsedTopic[]): ParsedTopic[] {
  * warrant a second AI review pass.
  */
 export function needsAudit(weeks: ParsedTopic[]): boolean {
-  if (weeks.length < 8) return true; // suspiciously few weeks
+  if (weeks.length < 5) return true; // suspiciously few weeks (< 5 catches failures without over-auditing short intensive courses)
 
   const emptyWeeks = weeks.filter(
     (w) => w.topics.length === 0 && w.readings.length === 0 && !w.notes
@@ -167,7 +167,7 @@ export async function auditSchedule(
         role: "system",
         content: `You are a schedule quality auditor. You will receive:
 1. EXTRACTED SCHEDULE — a JSON array of weekly schedule entries (possibly with errors)
-2. ORIGINAL SOURCE — the first 3000 characters of the raw syllabus text
+2. ORIGINAL SOURCE — the first 6000 characters of the raw syllabus text
 
 Your job is to fix the extracted schedule:
 - Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
@@ -181,7 +181,7 @@ Return JSON: { "weeks": [...] } using the exact same field structure. Return onl
       },
       {
         role: "user",
-        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE (first 3000 chars):\n${sourceText.slice(0, 3000)}`,
+        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE (first 6000 chars):\n${sourceText.slice(0, 6000)}`,
       },
     ],
   }, { timeout: 25_000 });
