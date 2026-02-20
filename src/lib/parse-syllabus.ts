@@ -256,7 +256,7 @@ WHAT NOT TO EXTRACT:
 
 OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include EVERY week — do not truncate. Each week must have:
 - weekNumber: integer starting at 1
-- weekLabel: 3-7 word description of the main theme (e.g. "Dynamic Programming and Memoization")
+- weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class").
 - startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
 - topics: array of ALL topics/concepts for this week
 - readings: array of ALL readings (chapter numbers, titles, page ranges, paper names)
@@ -271,6 +271,10 @@ If you cannot find an explicit schedule, return {"weeks": []}.`,
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];
-  const parsed = JSON.parse(content);
-  return parsed.weeks ?? [];
+  try {
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed.weeks) ? parsed.weeks : [];
+  } catch {
+    return [];
+  }
 }

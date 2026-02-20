@@ -435,23 +435,25 @@ export async function POST(request: NextRequest) {
         const bestHint   = `${best.label}, format: ${bestFormat}`;
 
         // ── Role 3: Extractor ─────────────────────────────────────────────
-        // First attempt — best scoring source
-        let rawTopics = await parseSyllabusTopics(syllabusText.slice(0, 12_000), bestHint);
-        let topics    = sanitizeSchedule(rawTopics).filter(isContentfulTopic);
+        // Try each candidate source in descending score order until one
+        // returns a contentful schedule. This handles the common case where
+        // the top-scored source (e.g. HTML body with policy text) returns
+        // nothing and the actual schedule is in a lower-ranked PDF.
+        let topics: ReturnType<typeof sanitizeSchedule> = [];
         let usedLabel = bestLabel;
 
-        // Retry with next-best source if first returned nothing useful.
-        // Typical trigger: best source was a policy-heavy HTML body; second
-        // source is the actual PDF syllabus that the score missed.
-        if (topics.length === 0 && candidates.length > 1) {
-          const alt       = candidates[1];
-          const altFormat = detectSourceFormat(alt.text);
-          const altHint   = `${alt.label}, format: ${altFormat}`;
-          const altRaw    = await parseSyllabusTopics(alt.text.slice(0, 12_000), altHint);
-          const altTopics = sanitizeSchedule(altRaw).filter(isContentfulTopic);
-          if (altTopics.length > 0) {
-            topics     = altTopics;
-            usedLabel  = `${alt.label}(retry,score=${alt.score.toFixed(3)},${alt.text.length}c)`;
+        for (let ci = 0; ci < candidates.length; ci++) {
+          const src    = candidates[ci];
+          const fmt    = detectSourceFormat(src.text);
+          const hint   = `${src.label}, format: ${fmt}`;
+          const raw    = await parseSyllabusTopics(src.text.slice(0, 12_000), hint);
+          const result = sanitizeSchedule(raw).filter(isContentfulTopic);
+          if (result.length > 0) {
+            topics    = result;
+            usedLabel = ci === 0
+              ? bestLabel
+              : `${src.label}(retry${ci},score=${src.score.toFixed(3)},${src.text.length}c)`;
+            break;
           }
         }
 
@@ -477,11 +479,13 @@ export async function POST(request: NextRequest) {
         });
 
         await db.courseTopic.createMany({
-          data: topics.map((t) => ({
+          data: topics.map((t, i) => ({
             courseId: scCourseId,
-            weekNumber: t.weekNumber,
-            weekLabel: t.weekLabel,
-            startDate: typeof t.startDate === "string" ? t.startDate : null,
+            // Coerce AI output types — model occasionally returns string "1" instead of int 1
+            weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
+            weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
+            // Only keep valid ISO date strings; reject anything malformed
+            startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
             topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
             readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
             // Guard against AI returning [] instead of null/string for notes

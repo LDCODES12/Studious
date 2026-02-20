@@ -148,25 +148,41 @@ function extractPageText(items) {
  * Group text items by their Y coordinate (rounded to nearest integer) and
  * join items on the same line in left-to-right order.
  * Returns lines sorted top-to-bottom (descending Y = top of page first).
+ *
+ * Column-gap detection within a row:
+ *   pdfjs gives us item.width (advance width in PDF user units, ≈ points at 72dpi).
+ *   When consecutive items on the same line have a gap larger than ~15pt we insert
+ *   a tab so schedule table columns ("Week 1 | Jan 13 | Introduction to Calculus")
+ *   survive as tab-separated values rather than one undivided blob. detectSourceFormat()
+ *   then correctly classifies the output as "tab-separated table" and the AI prompt
+ *   hint tells the Extractor exactly how to parse it.
  */
 function assembleLines(items) {
-  // Map: roundedY → { text accumulated left-to-right, minX for ordering }
   const lineMap = new Map();
   for (const item of items) {
     const y = Math.round(item.transform[5]);
     const x = item.transform[4];
-    if (!lineMap.has(y)) lineMap.set(y, { parts: [], minX: x });
-    const entry = lineMap.get(y);
-    entry.parts.push({ x, str: item.str });
-    if (x < entry.minX) entry.minX = x;
+    if (!lineMap.has(y)) lineMap.set(y, { parts: [] });
+    // Store x, str, and advance width for gap detection
+    lineMap.get(y).parts.push({ x, str: item.str, w: item.width ?? 0 });
   }
 
   return [...lineMap.entries()]
     .sort((a, b) => b[0] - a[0])               // descending Y = top first
     .map(([, entry]) => {
-      // Sort parts left-to-right within each line
-      entry.parts.sort((a, b) => a.x - b.x);
-      return entry.parts.map((p) => p.str).join("").trim();
+      const parts = entry.parts.sort((a, b) => a.x - b.x);
+      if (parts.length === 0) return "";
+      let line = parts[0].str;
+      for (let i = 1; i < parts.length; i++) {
+        const prev = parts[i - 1];
+        // Gap between end of previous item and start of current item (in PDF points)
+        const gap = parts[i].x - (prev.x + prev.w);
+        // > 15pt gap indicates a table column boundary, not just word spacing.
+        // Normal word spacing at 12pt is ~3pt; table gutters are typically 20-80pt.
+        line += gap > 15 ? "\t" : "";
+        line += parts[i].str;
+      }
+      return line.trim();
     })
     .filter(Boolean)
     .join("\n");
