@@ -118,7 +118,7 @@ If you cannot find an explicit schedule, return {"weeks": []}.`,
       },
       { role: "user", content: text },
     ],
-  });
+  }, { timeout: 25_000 });
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];

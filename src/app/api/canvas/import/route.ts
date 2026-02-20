@@ -3,6 +3,8 @@ import { db } from "@/lib/db";
 import { parseSyllabusTopics } from "@/lib/parse-syllabus";
 import crypto from "crypto";
 
+export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
+
 // ─── Types mirroring what the extension sends ────────────────────────────────
 
 /**
