@@ -73,9 +73,22 @@ async function extractTextFromUrl(url) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item) => ("str" in item ? item.str : ""))
-      .join(" ");
+
+    // Group text items by their Y position so table rows and schedule lines
+    // are preserved as separate lines rather than merged into one long string.
+    // pdfjs item.transform[5] is the Y coordinate (increases bottom-to-top).
+    const lineMap = new Map();
+    for (const item of content.items) {
+      if (!("str" in item) || !item.str) continue;
+      const y = Math.round(item.transform[5]);
+      lineMap.set(y, (lineMap.get(y) ?? "") + item.str);
+    }
+    // Sort descending (top of page first) then join with newlines
+    const pageText = [...lineMap.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([, text]) => text.trim())
+      .filter(Boolean)
+      .join("\n");
     pages.push(pageText);
   }
 

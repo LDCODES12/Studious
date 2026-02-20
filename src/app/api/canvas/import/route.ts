@@ -353,7 +353,18 @@ export async function POST(request: NextRequest) {
 
       try {
         // Truncate to ~12k chars — enough for a full semester syllabus
-        const topics = await parseSyllabusTopics(syllabusText.slice(0, 12_000));
+        const rawTopics = await parseSyllabusTopics(syllabusText.slice(0, 12_000));
+
+        // Drop weeks that have nothing to show — empty topics, empty readings,
+        // and no notes. These are placeholder rows the AI emits when it finds
+        // date markers but no actual schedule content (e.g. Calc 3 policy pages).
+        const topics = rawTopics.filter((t) => {
+          const hasTopics = Array.isArray(t.topics) && t.topics.length > 0;
+          const hasReadings = Array.isArray(t.readings) && t.readings.length > 0;
+          const hasNotes = typeof t.notes === "string" && t.notes.trim().length > 0;
+          return hasTopics || hasReadings || hasNotes;
+        });
+
         if (topics.length === 0) return;
 
         // Delete module-based topics (those sourced from Canvas modules)
