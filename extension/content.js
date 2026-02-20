@@ -20,6 +20,37 @@
  * running in an offscreen document — the server receives plain text, not binary.
  */
 
+/**
+ * Given a Canvas syllabus_body HTML string, try to extract just the section
+ * that contains the weekly schedule. If we find a heading like
+ * "Week-by-Week Schedule" or "Course Schedule", return the HTML from that
+ * heading to the end of the document. Otherwise return the full HTML.
+ * Returns null if the input is empty/short.
+ */
+function extractScheduleSection(html) {
+  if (!html || html.trim().length < 100) return null;
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const SCHEDULE_RE = /week.{0,15}(schedule|topic|lecture|class)|course\s+(schedule|outline|calendar)|lecture\s+schedule/i;
+    const headings = doc.querySelectorAll("h1,h2,h3,h4,h5,h6");
+    for (const h of headings) {
+      if (SCHEDULE_RE.test(h.textContent ?? "")) {
+        // Collect all sibling/following content after this heading
+        const parts = [h.outerHTML];
+        let el = h.nextElementSibling;
+        while (el) {
+          parts.push(el.outerHTML);
+          el = el.nextElementSibling;
+        }
+        const section = parts.join("\n");
+        // Return just the schedule section — smaller, more focused for AI
+        if (section.length > 200) return section;
+      }
+    }
+  } catch { /* DOMParser unavailable */ }
+  return html.trim().length > 100 ? html : null;
+}
+
 (async function canvasSync() {
   const BASE = window.location.origin + "/api/v1";
 
@@ -131,10 +162,10 @@
         courseCode: c.course_code ?? null,
         term: c.term?.name ?? null,
         instructor: c.teachers?.[0]?.display_name ?? null,
-        // Syllabus HTML — may be null, empty, or rich HTML with the full schedule
-        syllabusBody: (c.syllabus_body && c.syllabus_body.trim().length > 100)
-          ? c.syllabus_body
-          : null,
+        // Syllabus HTML — extract the schedule section if present, otherwise
+        // keep the full body. Many Canvas pages have a clear "Week-by-Week
+        // Schedule" or "Course Schedule" heading followed by the actual content.
+        syllabusBody: extractScheduleSection(c.syllabus_body),
         // Populated below: { fileName, url } entries for the offscreen doc to parse
         syllabusFileUrls: [],
       }));
@@ -216,6 +247,41 @@
         const toFetch       = []; // { name, url } — URLs to send for text extraction
         const peekCandidates = []; // { title, content_id } — resolve later if needed
         const seenIds       = new Set();
+
+        // ── Source 0: PDF links embedded in the syllabus HTML body ───────────
+        // Professors often link directly to their PDF syllabus from the Canvas
+        // syllabus page (e.g. "Math 2130 Syllabus (Spring 2026).pdf ↓").
+        // These never appear in the Files API — only in the HTML body.
+        if (course.syllabusBody) {
+          try {
+            const doc = new DOMParser().parseFromString(course.syllabusBody, "text/html");
+            for (const a of doc.querySelectorAll("a[href]")) {
+              const href = a.href; // absolute URL (DOMParser resolves relative to page)
+              if (!href) continue;
+              // Canvas inline file: /courses/:id/files/:fileId[/download]
+              const canvasMatch = href.match(/\/courses\/\d+\/files\/(\d+)/);
+              if (canvasMatch) {
+                const fileId = canvasMatch[1];
+                if (seenIds.has(fileId)) continue;
+                seenIds.add(fileId);
+                try {
+                  const [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
+                  if (fileInfo?.url && fileInfo["content-type"] === "application/pdf"
+                      && (fileInfo.size ?? 0) < 5_000_000) {
+                    const name = fileInfo.display_name ?? a.textContent?.trim() ?? "syllabus.pdf";
+                    toFetch.push({ name, url: fileInfo.url });
+                  }
+                } catch { /* restricted — skip */ }
+              } else if (/\.pdf(\?|$)/i.test(href) && !seenIds.has(href)) {
+                // Direct external PDF link
+                seenIds.add(href);
+                const name = a.textContent?.trim() || "syllabus.pdf";
+                toFetch.push({ name, url: href });
+              }
+              if (toFetch.length >= 3) break;
+            }
+          } catch { /* DOMParser failure — skip */ }
+        }
 
         // ── Source 1: module file items — resolve download URL via files API ──
         // Only scan early/orientation modules — syllabi live there, not in weekly
