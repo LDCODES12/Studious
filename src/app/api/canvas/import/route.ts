@@ -367,10 +367,11 @@ export async function POST(request: NextRequest) {
             courseId: scCourseId,
             weekNumber: t.weekNumber,
             weekLabel: t.weekLabel,
-            startDate: t.startDate ?? null,
-            topics: t.topics,
-            readings: t.readings,
-            notes: t.notes ?? null,
+            startDate: typeof t.startDate === "string" ? t.startDate : null,
+            topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
+            readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
+            // Guard against AI returning [] instead of null/string for notes
+            notes: typeof t.notes === "string" ? t.notes : null,
             canvasModuleId: null, // marks this as AI-sourced (not from a Canvas module)
           })),
         });

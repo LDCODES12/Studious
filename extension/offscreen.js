@@ -5,18 +5,29 @@
  * and Worker support). Background.js sends PARSE_PDF messages; we fetch the
  * PDF URL, extract all text with pdfjs-dist, and reply with PDF_PARSED.
  *
- * This mirrors the pattern used in src/lib/extract-pdf-text.ts (web app),
- * adapted for the extension context (worker URL via chrome.runtime.getURL).
+ * Key subtlety: pdfjs calls `new Worker(url)` without `{ type: "module" }`,
+ * but pdf.worker.min.mjs is an ES module. We patch the global Worker
+ * constructor before importing pdfjs so all worker creation uses module mode.
  */
+
+// ── Patch Worker constructor BEFORE pdfjs initialises ────────────────────────
+// pdfjs-dist v5 ships only ES module builds; the worker file (.mjs) must be
+// loaded as a module worker. pdfjs internally calls `new Worker(url)` without
+// type:"module", so we intercept and force it here.
+const _OriginalWorker = globalThis.Worker;
+globalThis.Worker = class extends _OriginalWorker {
+  constructor(url, options) {
+    super(url, { ...(options ?? {}), type: "module" });
+  }
+};
 
 import * as pdfjsLib from "./lib/pdf.min.mjs";
 
-// Point pdfjs at the bundled worker file inside the extension package.
-// chrome.runtime.getURL gives the full chrome-extension://id/... URL which
-// pdfjs uses to spawn a dedicated Web Worker — genuinely non-blocking.
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
   "lib/pdf.worker.min.mjs"
 );
+
+// ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type !== "PARSE_PDF") return false;
@@ -27,13 +38,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     .then((text) => {
       chrome.runtime.sendMessage({ type: "PDF_PARSED", messageId, text });
     })
-    .catch(() => {
+    .catch((err) => {
+      console.error("[offscreen] extraction failed:", err);
       chrome.runtime.sendMessage({ type: "PDF_PARSED", messageId, text: "" });
     });
 
-  // Return true to indicate we will respond asynchronously.
   return true;
 });
+
+// ── PDF text extraction ───────────────────────────────────────────────────────
 
 /**
  * Fetch a PDF from `url` and extract its full text using pdfjs-dist.
@@ -41,10 +54,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
  */
 async function extractTextFromUrl(url) {
   const response = await fetch(url);
-  if (!response.ok) return "";
+  if (!response.ok) {
+    console.warn("[offscreen] fetch failed:", response.status, url);
+    return "";
+  }
 
   const arrayBuffer = await response.arrayBuffer();
+  console.log("[offscreen] fetched", arrayBuffer.byteLength, "bytes from", url.slice(0, 80));
+
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  console.log("[offscreen] PDF pages:", pdf.numPages);
 
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -56,5 +75,7 @@ async function extractTextFromUrl(url) {
     pages.push(pageText);
   }
 
-  return pages.join("\n\n").trim();
+  const text = pages.join("\n\n").trim();
+  console.log("[offscreen] extracted", text.length, "chars");
+  return text;
 }
