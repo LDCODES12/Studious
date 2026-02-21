@@ -178,9 +178,18 @@ function extractScheduleSection(html) {
         currentScore: c.enrollments?.[0]?.computed_current_score ?? c.enrollments?.[0]?.grades?.current_score ?? null,
         // Populated below: { fileName, url } entries for the offscreen doc to parse
         syllabusFileUrls: [],
+        // Populated below: all PDF metadata from non-orientation modules
+        materialCandidates: [],
+        // Populated below: PDFs to actually download (1 auto/module + requested)
+        materialFileUrls: [],
       }));
 
     const payload = { courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
+
+    // Read extension config once — used in Source 3 to fetch requested candidates
+    const { scUrl: extScUrl = null, apiToken: extApiToken = null } = await new Promise((resolve) => {
+      chrome.storage.local.get(["scUrl", "apiToken"], resolve);
+    });
     const total   = courses.length;
 
     for (let i = 0; i < courses.length; i++) {
@@ -454,16 +463,38 @@ function extractScheduleSection(html) {
         }
 
         // ── Source 3: course materials from ALL non-orientation modules ───────
-        // Scan every module that isn't a welcome/orientation module for PDF files.
-        // These become CourseMaterial records (problem sets, lecture notes, etc.)
-        // — they do NOT go through the syllabus topic extraction pipeline.
-        // Limit: 10 materials per course. Skip files already queued as syllabi.
-        course.materialFileUrls = [];
-        const MATERIAL_LIMIT = 10;
+        // Strategy:
+        //   1. Collect ALL PDF file metadata (fileName, moduleName, contentId)
+        //      across every non-orientation module → materialCandidates.
+        //      Sent to canvas/import which upserts them into CanvasMaterialCandidate.
+        //   2. Auto-download: first valid PDF per module (≤10 MB) → materialFileUrls.
+        //   3. Requested: candidates the student clicked "Add" on are fetched too.
+        //      We call GET /api/canvas/materials/pending?canvasCourseId=X to get
+        //      the contentIds the user has requested since last sync.
         const materialSeenIds = new Set();
 
+        // Step 1: fetch requested candidate contentIds from our API
+        const requestedContentIds = new Set();
+        if (extScUrl && extApiToken) {
+          try {
+            const pendingRes = await fetch(
+              `https://${extScUrl}/api/canvas/materials/pending?canvasCourseId=${course.id}`,
+              { headers: { Authorization: `Bearer ${extApiToken}` } }
+            );
+            if (pendingRes.ok) {
+              const pendingData = await pendingRes.json();
+              for (const item of (pendingData.candidates ?? [])) {
+                requestedContentIds.add(String(item.contentId));
+              }
+              if (requestedContentIds.size > 0) {
+                console.log(`[scout] ${course.name} | requested candidates: ${requestedContentIds.size}`);
+              }
+            }
+          } catch { /* API not reachable — skip */ }
+        }
+
+        // Step 2: scan all non-orientation modules
         for (const mod of rawModules) {
-          if (course.materialFileUrls.length >= MATERIAL_LIMIT) break;
           // Skip orientation/syllabus modules — Source 1 already covered these
           if (SYLLABUS_MOD_RE.test(mod.name ?? "")) continue;
 
@@ -471,24 +502,45 @@ function extractScheduleSection(html) {
             (it) => it.type === "File" && it.content_id
           );
 
+          let moduleAutoAdded = false;
+
           for (const item of items) {
-            if (course.materialFileUrls.length >= MATERIAL_LIMIT) break;
             const cid = String(item.content_id);
             if (seenIds.has(cid) || materialSeenIds.has(cid)) continue;
             materialSeenIds.add(cid);
 
-            try {
-              const [fileInfo] = await fetchAll(`${BASE}/files/${cid}`);
-              const ct = fileInfo?.["content-type"] ?? "";
-              const name = fileInfo?.display_name ?? item.title ?? "file.pdf";
-              const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
-              // Skip very large files (> 10 MB) — probably textbooks
-              const isReasonableSize = (fileInfo?.size ?? 0) < 10_000_000 && (fileInfo?.size ?? 0) > 0;
-              if (fileInfo?.url && isPdf && isReasonableSize) {
-                course.materialFileUrls.push({ fileName: name, url: fileInfo.url });
-                console.log(`[scout] ${course.name} | material: "${name}" (${Math.round((fileInfo.size ?? 0) / 1024)}KB)`);
-              }
-            } catch { /* skip */ }
+            const candidateFileName = item.title ?? "file.pdf";
+            // Only track PDF files as candidates
+            if (!candidateFileName.toLowerCase().endsWith(".pdf")) continue;
+
+            // Add to candidates list — no API call needed here
+            course.materialCandidates.push({
+              fileName: candidateFileName,
+              moduleName: mod.name ?? "Unknown Module",
+              contentId: cid,
+            });
+
+            const isRequested = requestedContentIds.has(cid);
+            const isAutoSelect = !moduleAutoAdded; // first PDF in this module
+
+            if (isAutoSelect || isRequested) {
+              try {
+                const [fileInfo] = await fetchAll(`${BASE}/files/${cid}`);
+                const ct = fileInfo?.["content-type"] ?? "";
+                const name = fileInfo?.display_name ?? candidateFileName;
+                const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
+                const size = fileInfo?.size ?? 0;
+                if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000) {
+                  course.materialFileUrls.push({ fileName: name, url: fileInfo.url });
+                  if (isAutoSelect) moduleAutoAdded = true;
+                  console.log(`[scout] ${course.name} | ${isRequested ? "requested" : "auto"}: "${name}" (${Math.round(size / 1024)}KB)`);
+                } else if (isAutoSelect) {
+                  // File resolved but not a valid PDF — still mark as auto-attempted
+                  // so we don't try the next item in the same module
+                  moduleAutoAdded = true;
+                }
+              } catch { /* skip */ }
+            }
           }
         }
 
@@ -498,7 +550,8 @@ function extractScheduleSection(html) {
           `syllabusBody=${course.syllabusBody?.length ?? 0}c`,
           `| rawBody=${course._rawSyllabusBody?.length ?? 0}c`,
           `| syllabusPDFs=[${course.syllabusFileUrls.map((f) => `"${f.fileName}"`).join(", ") || "none"}]`,
-          `| materialPDFs=${course.materialFileUrls.length}`
+          `| candidates=${course.materialCandidates.length}`,
+          `| materialDownloads=${course.materialFileUrls.length}`
         );
       }
     }

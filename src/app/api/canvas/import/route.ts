@@ -26,6 +26,12 @@ interface SyllabusText {
   text: string;
 }
 
+interface MaterialCandidate {
+  fileName: string;
+  moduleName: string;
+  contentId: string;
+}
+
 interface CanvasCourse {
   id: number;
   name: string;
@@ -46,6 +52,8 @@ interface CanvasCourse {
   syllabusTexts?: SyllabusText[];
   /** Pre-extracted text from non-syllabus course materials (problem sets, lecture notes, etc.) */
   materialTexts?: SyllabusText[];
+  /** All PDF file metadata from non-orientation modules — stored as candidates for student selection */
+  materialCandidates?: MaterialCandidate[];
 }
 
 interface CanvasAssignment {
@@ -643,6 +651,8 @@ export async function POST(request: NextRequest) {
       // These are NOT used for syllabus topic extraction — only for the
       // Materials tab display and quiz generation.
       const materialTexts = c.materialTexts ?? [];
+      const importedFileNames = new Set<string>();
+
       if (materialTexts.length > 0) {
         const courseTopicLabels = await db.courseTopic.findMany({
           where: { courseId: scCourseId },
@@ -658,7 +668,10 @@ export async function POST(request: NextRequest) {
             where: { courseId: scCourseId, fileName: mt.fileName },
             select: { id: true },
           });
-          if (existingMat) continue; // already imported — idempotent
+          if (existingMat) {
+            importedFileNames.add(mt.fileName);
+            continue; // already imported — idempotent
+          }
 
           try {
             const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
@@ -674,9 +687,40 @@ export async function POST(request: NextRequest) {
                 storedForAI,
               },
             });
+            importedFileNames.add(mt.fileName);
           } catch {
             // Don't fail the whole import if one material analysis errors
           }
+        }
+      }
+
+      // ── b3) Material candidates — upsert all, then prune imported ones ────
+      // Candidates are all PDF metadata from non-orientation modules. They let
+      // students see and request files without downloading everything up front.
+      const materialCandidates = c.materialCandidates ?? [];
+      if (materialCandidates.length > 0) {
+        for (const candidate of materialCandidates) {
+          await db.canvasMaterialCandidate.upsert({
+            where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
+            update: { fileName: candidate.fileName, moduleName: candidate.moduleName },
+            create: {
+              courseId: scCourseId,
+              fileName: candidate.fileName,
+              moduleName: candidate.moduleName,
+              contentId: candidate.contentId,
+              requested: false,
+            },
+          });
+        }
+
+        // Remove candidates that were just imported as full CourseMaterial records
+        if (importedFileNames.size > 0) {
+          await db.canvasMaterialCandidate.deleteMany({
+            where: {
+              courseId: scCourseId,
+              fileName: { in: Array.from(importedFileNames) },
+            },
+          });
         }
       }
 

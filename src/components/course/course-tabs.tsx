@@ -88,10 +88,18 @@ interface Announcement {
   postedAt: string;
 }
 
+interface MaterialCandidate {
+  id: string;
+  fileName: string;
+  moduleName: string;
+  requested: boolean;
+}
+
 interface CourseTabsProps {
   assignments: Assignment[];
   topics: CourseTopic[];
   materials: CourseMaterial[];
+  materialCandidates?: MaterialCandidate[];
   assignmentGroups: AssignmentGroupData[];
   currentGrade: string | null;
   currentScore: number | null;
@@ -396,6 +404,7 @@ export function CourseTabs({
   assignments,
   topics: initialTopics,
   materials: initialMaterials,
+  materialCandidates: initialCandidates = [],
   assignmentGroups,
   currentGrade,
   currentScore,
@@ -442,6 +451,8 @@ export function CourseTabs({
 
   const [materials, setMaterials] = useState<CourseMaterial[]>(initialMaterials);
   const [topics, setTopics] = useState<CourseTopic[]>(initialTopics);
+  const [candidates, setCandidates] = useState<MaterialCandidate[]>(initialCandidates);
+  const [requestingIds, setRequestingIds] = useState<Set<string>>(new Set());
   const [calendarStatuses, setCalendarStatuses] = useState<
     Map<string, "synced" | "missing" | "loading">
   >(new Map());
@@ -504,6 +515,28 @@ export function CourseTabs({
     setTopics((prev) =>
       prev.map((t) => (t.id === topicId ? { ...t, completedTopics: completed } : t))
     );
+  };
+
+  const handleToggleCandidate = async (candidateId: string, requested: boolean) => {
+    setRequestingIds((prev) => new Set(prev).add(candidateId));
+    try {
+      const res = await fetch(`/api/courses/${courseId}/materials/candidates/${candidateId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requested }),
+      });
+      if (res.ok) {
+        setCandidates((prev) =>
+          prev.map((c) => (c.id === candidateId ? { ...c, requested } : c))
+        );
+      }
+    } finally {
+      setRequestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(candidateId);
+        return next;
+      });
+    }
   };
 
   const sectionProps = {
@@ -610,22 +643,87 @@ export function CourseTabs({
 
       {/* ── Materials Tab ── */}
       <TabsContent value="materials">
-        <div className="space-y-4">
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-[13px] text-muted-foreground">
-              Upload course PDFs — AI will classify and map them to your content timeline.
-            </p>
-            <MaterialUploader courseId={courseId} onUploadComplete={handleUploadComplete} />
-          </div>
-          {materials.length === 0 ? (
-            <div className="rounded-lg border border-border bg-card px-6 py-10 text-center">
-              <p className="text-[13px] text-muted-foreground">No files uploaded yet.</p>
+        <div className="space-y-6">
+          {/* Uploaded materials */}
+          <div className="space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <p className="text-[13px] text-muted-foreground">
+                Upload course PDFs — AI will classify and map them to your content timeline.
+              </p>
+              <MaterialUploader courseId={courseId} onUploadComplete={handleUploadComplete} />
             </div>
-          ) : (
+            {materials.length === 0 ? (
+              <div className="rounded-lg border border-border bg-card px-6 py-10 text-center">
+                <p className="text-[13px] text-muted-foreground">No files uploaded yet.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {materials.map((m) => (
+                  <MaterialCard key={m.id} material={m} />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* From Canvas — candidates grouped by module */}
+          {candidates.length > 0 && (
             <div className="space-y-3">
-              {materials.map((m) => (
-                <MaterialCard key={m.id} material={m} />
-              ))}
+              <div>
+                <p className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  From Canvas
+                </p>
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
+                  Files available on Canvas. Click Add to import on your next sync.
+                </p>
+              </div>
+              {/* Group by module */}
+              {(() => {
+                const byModule = candidates.reduce<Record<string, MaterialCandidate[]>>(
+                  (acc, c) => {
+                    (acc[c.moduleName] ??= []).push(c);
+                    return acc;
+                  },
+                  {}
+                );
+                return Object.entries(byModule).map(([moduleName, items]) => (
+                  <div key={moduleName} className="rounded-lg border border-border bg-card">
+                    <div className="border-b border-border px-4 py-2">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {moduleName}
+                      </p>
+                    </div>
+                    <div className="divide-y divide-border">
+                      {items.map((c) => (
+                        <div key={c.id} className="flex items-center gap-3 px-4 py-2.5">
+                          <span className="min-w-0 flex-1 truncate text-[13px]">{c.fileName}</span>
+                          {c.requested ? (
+                            <div className="flex shrink-0 items-center gap-2">
+                              <span className="text-[11px] text-amber-600">
+                                Queued for next sync
+                              </span>
+                              <button
+                                onClick={() => handleToggleCandidate(c.id, false)}
+                                disabled={requestingIds.has(c.id)}
+                                className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleToggleCandidate(c.id, true)}
+                              disabled={requestingIds.has(c.id)}
+                              className="shrink-0 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium hover:bg-accent disabled:opacity-50"
+                            >
+                              {requestingIds.has(c.id) ? "..." : "Add"}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ));
+              })()}
             </div>
           )}
         </div>

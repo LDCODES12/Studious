@@ -18,7 +18,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
   const cookieStore = await cookies();
   const googleConnected = !!cookieStore.get("google_tokens");
 
-  const [course, courseTasks] = await Promise.all([db.course.findFirst({
+  const [course, courseTasks, materialCandidates] = await Promise.all([db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
     include: {
       assignments: { orderBy: { dueDate: "asc" } },
@@ -46,6 +46,10 @@ export default async function CoursePage({ params }: CoursePageProps) {
     orderBy: { dueDate: "asc" },
     take: 5,
     select: { id: true, title: true, dueDate: true, priority: true, source: true },
+  }), db.canvasMaterialCandidate.findMany({
+    where: { courseId },
+    select: { id: true, fileName: true, moduleName: true, requested: true },
+    orderBy: [{ moduleName: "asc" }, { fileName: "asc" }],
   })]);
 
   if (!course) notFound();
@@ -105,6 +109,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
             applyGroupWeights={course.applyGroupWeights}
             topics={course.topics}
             materials={materials}
+            materialCandidates={materialCandidates}
             courseId={course.id}
             googleConnected={googleConnected}
           />

@@ -80,6 +80,7 @@ model Course {
   assignmentGroups AssignmentGroup[]
   topics         CourseTopic[]
   materials      CourseMaterial[]
+  materialCandidates CanvasMaterialCandidate[]
   quizzes        Quiz[]
   announcements  Announcement[]
   tasks          Task[]
@@ -201,6 +202,19 @@ model Task {
   @@index([userId, completed])
   @@index([userId, dueDate])
   @@unique([assignmentId, sourceType])
+}
+
+model CanvasMaterialCandidate {
+  id         String   @id @default(cuid())
+  courseId   String
+  fileName   String
+  moduleName String
+  contentId  String   // Canvas file content_id — resolved to download URL at sync time
+  requested  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  course     Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, contentId])
 }
 
 model Announcement {
