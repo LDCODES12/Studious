@@ -27,7 +27,12 @@ export default async function CoursePage({ params }: CoursePageProps) {
         include: {
           assignments: {
             orderBy: { dueDate: "asc" },
-            select: { id: true, title: true, score: true, pointsPossible: true, status: true, dueDate: true },
+            select: {
+              id: true, title: true, score: true, pointsPossible: true,
+              status: true, dueDate: true,
+              excused: true, omitFromFinalGrade: true, canvasAssignmentId: true,
+              missing: true, late: true,
+            },
           },
         },
       },
@@ -39,7 +44,20 @@ export default async function CoursePage({ params }: CoursePageProps) {
 
   if (!course) notFound();
 
-  // Serialize Date fields for client components
+  // Serialize for client components
+  const assignments = course.assignments.map((a) => ({
+    id: a.id,
+    title: a.title,
+    dueDate: a.dueDate,
+    status: a.status,
+    type: a.type,
+    googleEventId: a.googleEventId,
+    courseId: a.courseId,
+    score: a.score,
+    pointsPossible: a.pointsPossible,
+    canvasUrl: a.canvasUrl,
+  }));
+
   const materials = course.materials.map((m) => ({
     id: m.id,
     courseId: m.courseId,
@@ -65,11 +83,12 @@ export default async function CoursePage({ params }: CoursePageProps) {
       <div className="grid grid-cols-3 gap-7">
         <div className="col-span-2">
           <CourseTabs
-            assignments={course.assignments}
+            assignments={assignments}
             assignmentGroups={course.assignmentGroups}
             currentGrade={course.currentGrade}
             currentScore={course.currentScore}
             gradingScheme={course.gradingScheme as { name: string; value: number }[] | null}
+            applyGroupWeights={course.applyGroupWeights}
             topics={course.topics}
             materials={materials}
             courseId={course.id}
@@ -79,7 +98,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
         <div className="col-span-1">
           <CourseSidebar
             course={course}
-            assignments={course.assignments}
+            assignments={assignments}
             announcements={announcements}
           />
         </div>
