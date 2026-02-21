@@ -111,7 +111,7 @@ export function CourseSidebar({
                 <p className="text-[13px] font-medium leading-snug">{ann.title}</p>
                 {ann.body && (
                   <p className="mt-1 line-clamp-2 text-[12px] text-muted-foreground">
-                    {ann.body}
+                    {ann.body.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')}
                   </p>
                 )}
                 <p className="mt-1 text-[11px] text-muted-foreground/60">

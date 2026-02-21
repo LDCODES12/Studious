@@ -527,7 +527,6 @@ export function CourseTabs({
       <TabsContent value="overview">
         <CourseOverview
           assignments={assignments}
-          announcements={announcements}
           currentGrade={currentGrade}
           currentScore={currentScore}
           applyGroupWeights={applyGroupWeights}

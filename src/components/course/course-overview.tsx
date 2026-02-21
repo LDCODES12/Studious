@@ -25,13 +25,6 @@ interface OverviewAssignment {
   canvasUrl: string | null;
 }
 
-interface OverviewAnnouncement {
-  id: string;
-  title: string;
-  body: string;
-  postedAt: string;
-}
-
 interface OverviewTask {
   id: string;
   title: string;
@@ -42,7 +35,6 @@ interface OverviewTask {
 
 interface CourseOverviewProps {
   assignments: OverviewAssignment[];
-  announcements: OverviewAnnouncement[];
   currentGrade: string | null;
   currentScore: number | null;
   applyGroupWeights: boolean;
@@ -62,7 +54,6 @@ function timeUntil(dueDate: string): string {
 
 export function CourseOverview({
   assignments,
-  announcements,
   currentGrade,
   currentScore,
   applyGroupWeights,
@@ -207,28 +198,6 @@ export function CourseOverview({
                 </div>
               );
             })}
-          </div>
-        </div>
-      )}
-
-      {/* ── Announcements ── */}
-      {announcements.length > 0 && (
-        <div>
-          <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Announcements
-          </p>
-          <div className="space-y-2">
-            {announcements.slice(0, 3).map((ann) => (
-              <div key={ann.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
-                <p className="text-[13px] font-medium leading-snug">{ann.title}</p>
-                {ann.body && (
-                  <p className="mt-1 line-clamp-2 text-[12px] text-muted-foreground">{ann.body}</p>
-                )}
-                <p className="mt-1 text-[11px] text-muted-foreground/60">
-                  {format(parseISO(ann.postedAt), "MMM d, yyyy")}
-                </p>
-              </div>
-            ))}
           </div>
         </div>
       )}

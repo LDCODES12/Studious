@@ -514,6 +514,19 @@ export async function POST(request: NextRequest) {
   // 8. Upsert announcements
   let newAnnouncements = 0;
 
+  function decodeAnnouncementBody(body: string | null): string {
+    return (body ?? "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#\d+;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   for (const ann of announcements) {
     const scCourseId = courseIdMap.get(ann.courseId);
     if (!scCourseId || !ann.postedAt) continue;
@@ -528,7 +541,7 @@ export async function POST(request: NextRequest) {
         where: { id: existing.id },
         data: {
           title: ann.title,
-          body: ann.body ?? "",
+          body: decodeAnnouncementBody(ann.body),
           postedAt: ann.postedAt,
         },
       });
@@ -538,7 +551,7 @@ export async function POST(request: NextRequest) {
           courseId: scCourseId,
           canvasId: ann.canvasId,
           title: ann.title,
-          body: ann.body ?? "",
+          body: decodeAnnouncementBody(ann.body),
           postedAt: ann.postedAt,
         },
       });
