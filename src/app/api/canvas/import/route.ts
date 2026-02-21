@@ -28,6 +28,12 @@ interface CanvasCourse {
   courseCode: string | null;
   term: string | null;
   instructor: string | null;
+  /** Letter grade from Canvas enrollment (e.g. "A-") */
+  currentGrade?: string | null;
+  /** Numeric score from Canvas enrollment (e.g. 91.4) */
+  currentScore?: number | null;
+  /** Grading standard cutoffs: [{ name: "A", value: 0.94 }, ...] */
+  gradingScheme?: { name: string; value: number }[] | null;
   /** HTML from Canvas's built-in syllabus page, or null */
   syllabusBody?: string | null;
   /** Pre-extracted syllabus text from PDFs (offscreen doc ran pdfjs-dist) */
@@ -43,6 +49,14 @@ interface CanvasAssignment {
   submissionType: string;
   htmlUrl: string | null;
   pointsPossible: number | null;
+  /** Canvas submission status: "not_started" | "submitted" | "graded" */
+  submissionStatus?: string | null;
+  /** Student's score from Canvas submission */
+  score?: number | null;
+  /** ISO datetime when student submitted */
+  submittedAt?: string | null;
+  /** Canvas assignment_group_id */
+  assignmentGroupId?: number | null;
 }
 
 interface CanvasModule {
@@ -54,10 +68,30 @@ interface CanvasModule {
   readings: string[]; // file/url item titles
 }
 
+interface CanvasAnnouncement {
+  courseId: number;
+  canvasId: string;
+  title: string;
+  body: string | null;
+  postedAt: string | null;
+}
+
+interface CanvasAssignmentGroup {
+  courseId: number;
+  canvasGroupId: string;
+  name: string;
+  weight: number;
+  position: number;
+  dropLowest: number;
+  dropHighest: number;
+}
+
 interface ImportPayload {
   courses: CanvasCourse[];
   assignments: CanvasAssignment[];
   modules: CanvasModule[];
+  announcements?: CanvasAnnouncement[];
+  assignmentGroups?: CanvasAssignmentGroup[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -221,7 +255,7 @@ export async function POST(request: NextRequest) {
 
   // 2. Parse payload
   const payload: ImportPayload = await request.json();
-  const { courses = [], assignments = [], modules = [] } = payload;
+  const { courses = [], assignments = [], modules = [], announcements = [], assignmentGroups: rawGroups = [] } = payload;
 
   // 3. Load existing courses for color + fuzzy matching
   const existingCourses = await db.course.findMany({
@@ -258,6 +292,9 @@ export async function POST(request: NextRequest) {
           instructor: c.instructor ?? undefined,
           term: c.term ?? undefined,
           shortName: c.courseCode ?? undefined,
+          currentGrade: c.currentGrade ?? undefined,
+          currentScore: c.currentScore ?? undefined,
+          gradingScheme: c.gradingScheme ?? undefined,
         },
       });
       courseIdMap.set(c.id, existing.id);
@@ -274,6 +311,9 @@ export async function POST(request: NextRequest) {
           instructor: c.instructor ?? null,
           term: c.term ?? null,
           color,
+          currentGrade: c.currentGrade ?? null,
+          currentScore: c.currentScore ?? null,
+          gradingScheme: c.gradingScheme ?? undefined,
         },
       });
       existingCourses.push({ id: created.id, name: created.name, color, canvasCourseId: canvasId });
@@ -282,7 +322,52 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 5. Upsert assignments
+  // 5. Upsert assignment groups
+  let newGroups = 0;
+  let updatedGroups = 0;
+  // Maps "scCourseId:canvasGroupId" → SC AssignmentGroup ID
+  const groupIdMap = new Map<string, string>();
+
+  for (const g of rawGroups) {
+    const scCourseId = courseIdMap.get(g.courseId);
+    if (!scCourseId) continue;
+
+    const existing = await db.assignmentGroup.findUnique({
+      where: { courseId_canvasGroupId: { courseId: scCourseId, canvasGroupId: g.canvasGroupId } },
+      select: { id: true },
+    });
+
+    if (existing) {
+      await db.assignmentGroup.update({
+        where: { id: existing.id },
+        data: {
+          name: g.name,
+          weight: g.weight,
+          position: g.position,
+          dropLowest: g.dropLowest,
+          dropHighest: g.dropHighest,
+        },
+      });
+      groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, existing.id);
+      updatedGroups++;
+    } else {
+      const created = await db.assignmentGroup.create({
+        data: {
+          courseId: scCourseId,
+          canvasGroupId: g.canvasGroupId,
+          name: g.name,
+          weight: g.weight,
+          position: g.position,
+          dropLowest: g.dropLowest,
+          dropHighest: g.dropHighest,
+        },
+      });
+      groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, created.id);
+      newGroups++;
+    }
+  }
+
+  // 6. Upsert assignments
   let newAssignments = 0;
   let updatedAssignments = 0;
 
@@ -303,10 +388,30 @@ export async function POST(request: NextRequest) {
       select: { id: true },
     });
 
+    // Map Canvas submission status to our status field
+    const status = a.submissionStatus && a.submissionStatus !== "not_started"
+      ? a.submissionStatus
+      : undefined; // don't overwrite manual status changes with "not_started"
+
+    // Link to assignment group if available
+    const scGroupId = a.assignmentGroupId
+      ? groupIdMap.get(`${scCourseId}:${String(a.assignmentGroupId)}`)
+      : undefined;
+
     if (existing) {
       await db.assignment.update({
         where: { id: existing.id },
-        data: { title: a.title, dueDate, description, canvasUrl: a.htmlUrl, pointsPossible: a.pointsPossible },
+        data: {
+          title: a.title,
+          dueDate,
+          description,
+          canvasUrl: a.htmlUrl,
+          pointsPossible: a.pointsPossible,
+          ...(status ? { status } : {}),
+          score: a.score ?? null,
+          submittedAt: a.submittedAt ?? null,
+          assignmentGroupId: scGroupId ?? null,
+        },
       });
       updatedAssignments++;
     } else {
@@ -320,13 +425,17 @@ export async function POST(request: NextRequest) {
           description,
           canvasUrl: a.htmlUrl ?? null,
           pointsPossible: a.pointsPossible ?? null,
+          status: status ?? "not_started",
+          score: a.score ?? null,
+          submittedAt: a.submittedAt ?? null,
+          assignmentGroupId: scGroupId ?? null,
         },
       });
       newAssignments++;
     }
   }
 
-  // 6. Upsert modules as CourseTopic (fallback — may be replaced by AI below)
+  // 7. Upsert modules as CourseTopic (fallback — may be replaced by AI below)
   let newModules = 0;
   let updatedModules = 0;
 
@@ -368,7 +477,42 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 7. AI syllabus processing — run all courses in parallel for speed
+  // 8. Upsert announcements
+  let newAnnouncements = 0;
+
+  for (const ann of announcements) {
+    const scCourseId = courseIdMap.get(ann.courseId);
+    if (!scCourseId || !ann.postedAt) continue;
+
+    const existing = await db.announcement.findFirst({
+      where: { courseId: scCourseId, canvasId: ann.canvasId },
+      select: { id: true },
+    });
+
+    if (existing) {
+      await db.announcement.update({
+        where: { id: existing.id },
+        data: {
+          title: ann.title,
+          body: ann.body ?? "",
+          postedAt: ann.postedAt,
+        },
+      });
+    } else {
+      await db.announcement.create({
+        data: {
+          courseId: scCourseId,
+          canvasId: ann.canvasId,
+          title: ann.title,
+          body: ann.body ?? "",
+          postedAt: ann.postedAt,
+        },
+      });
+      newAnnouncements++;
+    }
+  }
+
+  // 9. AI syllabus processing — run all courses in parallel for speed
   //    For each course that provided syllabus content:
   //      a) Build best available syllabus text from HTML body + pre-extracted PDF texts
   //      b) Save PDF-sourced materials as CourseMaterial records
@@ -554,7 +698,9 @@ export async function POST(request: NextRequest) {
     summary: {
       courses: { new: newCourses, updated: updatedCourses },
       assignments: { new: newAssignments, updated: updatedAssignments },
+      assignmentGroups: { new: newGroups, updated: updatedGroups },
       modules: { new: newModules, updated: updatedModules },
+      announcements: { new: newAnnouncements },
       syllabus: { aiWeeks: aiTopicsCreated, filesImported: syllabusFilesImported },
     },
   });

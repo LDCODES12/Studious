@@ -22,8 +22,18 @@ export default async function CoursePage({ params }: CoursePageProps) {
     where: { id: courseId, userId: session.user.id },
     include: {
       assignments: { orderBy: { dueDate: "asc" } },
+      assignmentGroups: {
+        orderBy: { position: "asc" },
+        include: {
+          assignments: {
+            orderBy: { dueDate: "asc" },
+            select: { id: true, title: true, score: true, pointsPossible: true, status: true, dueDate: true },
+          },
+        },
+      },
       topics: { orderBy: { weekNumber: "asc" } },
       materials: { orderBy: { uploadedAt: "desc" } },
+      announcements: { orderBy: { postedAt: "desc" }, take: 10 },
     },
   });
 
@@ -41,6 +51,13 @@ export default async function CoursePage({ params }: CoursePageProps) {
     uploadedAt: m.uploadedAt.toISOString(),
   }));
 
+  const announcements = course.announcements.map((a) => ({
+    id: a.id,
+    title: a.title,
+    body: a.body,
+    postedAt: a.postedAt,
+  }));
+
   return (
     <div className="mx-auto max-w-[1200px] space-y-7">
       <CourseHeader course={course} courseId={course.id} />
@@ -49,6 +66,10 @@ export default async function CoursePage({ params }: CoursePageProps) {
         <div className="col-span-2">
           <CourseTabs
             assignments={course.assignments}
+            assignmentGroups={course.assignmentGroups}
+            currentGrade={course.currentGrade}
+            currentScore={course.currentScore}
+            gradingScheme={course.gradingScheme as { name: string; value: number }[] | null}
             topics={course.topics}
             materials={materials}
             courseId={course.id}
@@ -56,7 +77,11 @@ export default async function CoursePage({ params }: CoursePageProps) {
           />
         </div>
         <div className="col-span-1">
-          <CourseSidebar course={course} assignments={course.assignments} />
+          <CourseSidebar
+            course={course}
+            assignments={course.assignments}
+            announcements={announcements}
+          />
         </div>
       </div>
     </div>

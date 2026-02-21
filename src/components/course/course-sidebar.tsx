@@ -1,3 +1,4 @@
+import { format, parseISO } from "date-fns";
 import { courseColors } from "@/lib/constants";
 
 interface Course {
@@ -5,18 +6,29 @@ interface Course {
   instructor: string | null;
   schedule: string | null;
   location: string | null;
+  currentGrade: string | null;
+  currentScore: number | null;
 }
 
 interface Assignment {
   status: string;
 }
 
+interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  postedAt: string;
+}
+
 export function CourseSidebar({
   course,
   assignments,
+  announcements = [],
 }: {
   course: Course;
   assignments: Assignment[];
+  announcements?: Announcement[];
 }) {
   const colors = courseColors[course.color];
   const total = assignments.length;
@@ -27,6 +39,23 @@ export function CourseSidebar({
 
   return (
     <div className="space-y-6">
+      {/* Grade */}
+      {(course.currentGrade || course.currentScore != null) && (
+        <div>
+          <p className="text-[12px] text-muted-foreground">Current Grade</p>
+          <div className="mt-2 flex items-baseline gap-2">
+            {course.currentGrade && (
+              <span className="text-2xl font-semibold">{course.currentGrade}</span>
+            )}
+            {course.currentScore != null && (
+              <span className="text-[14px] tabular-nums text-muted-foreground">
+                {course.currentScore.toFixed(1)}%
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Progress */}
       <div>
         <p className="text-[12px] text-muted-foreground">Progress</p>
@@ -68,6 +97,31 @@ export function CourseSidebar({
           )}
         </div>
       </div>
+
+      {/* Announcements */}
+      {announcements.length > 0 && (
+        <div>
+          <p className="text-[12px] text-muted-foreground">Announcements</p>
+          <div className="mt-2 space-y-2">
+            {announcements.slice(0, 5).map((ann) => (
+              <div
+                key={ann.id}
+                className="rounded-lg border border-border bg-card px-3 py-2"
+              >
+                <p className="text-[13px] font-medium leading-snug">{ann.title}</p>
+                {ann.body && (
+                  <p className="mt-1 line-clamp-2 text-[12px] text-muted-foreground">
+                    {ann.body}
+                  </p>
+                )}
+                <p className="mt-1 text-[11px] text-muted-foreground/60">
+                  {format(parseISO(ann.postedAt), "MMM d, yyyy")}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

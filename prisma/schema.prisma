@@ -68,12 +68,17 @@ model Course {
   schedule       String?
   location       String?
   canvasCourseId String?          // Canvas course ID for upsert sync
+  currentGrade   String?          // Letter grade from Canvas (e.g. "A-")
+  currentScore   Float?           // Numeric score from Canvas (e.g. 91.4)
+  gradingScheme  Json?            // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard
   createdAt      DateTime         @default(now())
   user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments    Assignment[]
+  assignmentGroups AssignmentGroup[]
   topics         CourseTopic[]
   materials      CourseMaterial[]
   quizzes        Quiz[]
+  announcements  Announcement[]
 }
 
 model CourseTopic {
@@ -123,18 +128,48 @@ model QuizQuestion {
   quiz         Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
 }
 
+model AssignmentGroup {
+  id              String       @id @default(cuid())
+  courseId         String
+  canvasGroupId   String       // Canvas assignment_group ID for upsert
+  name            String       // e.g. "Exams", "Homework"
+  weight          Float        // 0-100 (0 for all groups if unweighted/points-based)
+  position        Int          // display order
+  dropLowest      Int          @default(0)
+  dropHighest     Int          @default(0)
+  course          Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  assignments     Assignment[]
+
+  @@unique([courseId, canvasGroupId])
+}
+
 model Assignment {
-  id                 String   @id @default(cuid())
+  id                 String            @id @default(cuid())
   courseId           String
   title              String
   type               String
   dueDate            String
   description        String?
-  status             String   @default("not_started")
+  status             String            @default("not_started")
+  score              Float?            // Student's score from Canvas submission
+  submittedAt        String?           // ISO datetime when student submitted
   googleEventId      String?
-  canvasAssignmentId String?  // Canvas assignment ID for upsert sync
-  canvasUrl          String?  // Direct link to Canvas assignment
-  pointsPossible     Float?   // Points possible from Canvas
-  createdAt          DateTime @default(now())
-  course             Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  canvasAssignmentId String?           // Canvas assignment ID for upsert sync
+  canvasUrl          String?           // Direct link to Canvas assignment
+  pointsPossible     Float?            // Points possible from Canvas
+  assignmentGroupId  String?           // FK to AssignmentGroup
+  createdAt          DateTime          @default(now())
+  course             Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  assignmentGroup    AssignmentGroup?  @relation(fields: [assignmentGroupId], references: [id])
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  courseId  String
+  canvasId  String   // Canvas discussion_topic ID for upsert sync
+  title     String
+  body      String   // Plain text, stripped from HTML
+  postedAt  String   // ISO datetime
+  createdAt DateTime @default(now())
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }

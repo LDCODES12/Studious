@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MaterialCard } from "./material-card";
 import { MaterialUploader, type UploadedMaterial } from "./material-uploader";
 import { QuizSection } from "./quiz-section";
+import { GradeBreakdown } from "./grade-breakdown";
 
 interface Assignment {
   id: string;
@@ -17,6 +18,9 @@ interface Assignment {
   type: string;
   googleEventId: string | null;
   courseId: string;
+  score: number | null;
+  pointsPossible: number | null;
+  canvasUrl: string | null;
 }
 
 interface CourseTopic {
@@ -40,10 +44,31 @@ interface CourseMaterial {
   uploadedAt: string;
 }
 
+interface AssignmentGroupData {
+  id: string;
+  name: string;
+  weight: number;
+  position: number;
+  dropLowest: number;
+  dropHighest: number;
+  assignments: {
+    id: string;
+    title: string;
+    score: number | null;
+    pointsPossible: number | null;
+    status: string;
+    dueDate: string;
+  }[];
+}
+
 interface CourseTabsProps {
   assignments: Assignment[];
   topics: CourseTopic[];
   materials: CourseMaterial[];
+  assignmentGroups: AssignmentGroupData[];
+  currentGrade: string | null;
+  currentScore: number | null;
+  gradingScheme: { name: string; value: number }[] | null;
   courseId: string;
   googleConnected: boolean;
 }
@@ -51,8 +76,13 @@ interface CourseTabsProps {
 const statusDot: Record<string, string> = {
   not_started: "bg-gray-300",
   in_progress: "bg-blue-500",
-  submitted: "bg-green-500",
+  submitted: "bg-blue-500",
   graded: "bg-green-500",
+};
+
+const statusBadge: Record<string, { label: string; className: string }> = {
+  submitted: { label: "Submitted", className: "bg-blue-50 text-blue-600" },
+  graded: { label: "Graded", className: "bg-green-50 text-green-600" },
 };
 
 function WeekTopicSection({
@@ -190,6 +220,10 @@ export function CourseTabs({
   assignments,
   topics: initialTopics,
   materials: initialMaterials,
+  assignmentGroups,
+  currentGrade,
+  currentScore,
+  gradingScheme,
   courseId,
   googleConnected,
 }: CourseTabsProps) {
@@ -268,6 +302,7 @@ export function CourseTabs({
     <Tabs defaultValue="assignments">
       <TabsList className="mb-4">
         <TabsTrigger value="assignments">Deadlines</TabsTrigger>
+        <TabsTrigger value="grades">Grades</TabsTrigger>
         <TabsTrigger value="content">Content</TabsTrigger>
         <TabsTrigger value="materials">Materials</TabsTrigger>
         <TabsTrigger value="quiz">Quiz</TabsTrigger>
@@ -296,7 +331,32 @@ export function CourseTabs({
                       statusDot[a.status] ?? "bg-gray-300"
                     }`}
                   />
-                  <span className="min-w-0 flex-1 truncate text-[13px]">{a.title}</span>
+                  <span className="min-w-0 flex-1 truncate text-[13px]">
+                    {a.canvasUrl ? (
+                      <a
+                        href={a.canvasUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:underline"
+                      >
+                        {a.title}
+                      </a>
+                    ) : (
+                      a.title
+                    )}
+                  </span>
+                  {statusBadge[a.status] && (
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                        statusBadge[a.status].className
+                      )}
+                    >
+                      {a.status === "graded" && a.score != null && a.pointsPossible
+                        ? `${a.score}/${a.pointsPossible}`
+                        : statusBadge[a.status].label}
+                    </span>
+                  )}
                   <span className="shrink-0 text-[12px] capitalize text-muted-foreground">
                     {a.type.replace(/_/g, " ")}
                   </span>
@@ -326,6 +386,16 @@ export function CourseTabs({
             })}
           </div>
         )}
+      </TabsContent>
+
+      {/* ── Grades Tab ── */}
+      <TabsContent value="grades">
+        <GradeBreakdown
+          assignmentGroups={assignmentGroups}
+          currentGrade={currentGrade}
+          currentScore={currentScore}
+          gradingScheme={gradingScheme}
+        />
       </TabsContent>
 
       {/* ── Content Tab ── */}

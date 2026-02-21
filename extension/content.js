@@ -148,10 +148,12 @@ function extractScheduleSection(html) {
 
     progress(10, "Fetching your courses…");
 
-    // Include syllabus_body in the bulk course fetch — one call, no extra round-trips
+    // Include syllabus_body + enrollment grades in the bulk course fetch.
+    // include[]=enrollments is required for total_scores to populate.
     const rawCourses = await fetchAll(
       `${BASE}/courses?enrollment_type=student&enrollment_state=active` +
-      `&include[]=teachers&include[]=term&include[]=syllabus_body&per_page=100`
+      `&include[]=teachers&include[]=term&include[]=syllabus_body` +
+      `&include[]=enrollments&include[]=total_scores&per_page=100`
     );
 
     const courses = rawCourses
@@ -169,11 +171,14 @@ function extractScheduleSection(html) {
         // PDF links are often in a "Useful Links" section that gets stripped by
         // extractScheduleSection. Never sent to the server.
         _rawSyllabusBody: c.syllabus_body ?? null,
+        // Enrollment grades — from include[]=total_scores
+        currentGrade: c.enrollments?.[0]?.computed_current_grade ?? c.enrollments?.[0]?.grades?.current_grade ?? null,
+        currentScore: c.enrollments?.[0]?.computed_current_score ?? c.enrollments?.[0]?.grades?.current_score ?? null,
         // Populated below: { fileName, url } entries for the offscreen doc to parse
         syllabusFileUrls: [],
       }));
 
-    const payload = { courses, assignments: [], modules: [] };
+    const payload = { courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
     const total   = courses.length;
 
     for (let i = 0; i < courses.length; i++) {
@@ -188,6 +193,12 @@ function extractScheduleSection(html) {
         );
         for (const a of rawAssignments) {
           if (!a.due_at) continue;
+          // Map Canvas submission workflow_state → our status field
+          const ws = a.submission?.workflow_state;
+          const submissionStatus =
+            ws === "graded" ? "graded"
+            : ws === "submitted" || ws === "pending_review" ? "submitted"
+            : "not_started";
           payload.assignments.push({
             id: a.id,
             courseId: course.id,
@@ -197,6 +208,10 @@ function extractScheduleSection(html) {
             submissionType: a.submission_types?.[0] ?? "assignment",
             htmlUrl: a.html_url ?? null,
             pointsPossible: a.points_possible ?? null,
+            submissionStatus,
+            score: a.submission?.score ?? null,
+            submittedAt: a.submission?.submitted_at ?? null,
+            assignmentGroupId: a.assignment_group_id ?? null,
           });
         }
       } catch { /* restricted — skip */ }
@@ -239,6 +254,51 @@ function extractScheduleSection(html) {
           } catch { /* skip */ }
         }
       } catch { /* pages endpoint not available */ }
+
+      // ── Announcements ──────────────────────────────────────────────────────
+      try {
+        const rawAnnouncements = await fetchAll(
+          `${BASE}/courses/${course.id}/discussion_topics?only_announcements=true&per_page=10&order_by=recent_activity`
+        );
+        for (const ann of rawAnnouncements.slice(0, 10)) {
+          if (!ann.title) continue;
+          payload.announcements.push({
+            courseId: course.id,
+            canvasId: String(ann.id),
+            title: ann.title,
+            body: stripHtml(ann.message),
+            postedAt: ann.posted_at ?? ann.created_at ?? null,
+          });
+        }
+      } catch { /* announcements restricted or disabled */ }
+
+      // ── Assignment Groups (grading categories with weights) ────────────────
+      try {
+        const rawGroups = await fetchAll(
+          `${BASE}/courses/${course.id}/assignment_groups?per_page=100`
+        );
+        for (const g of rawGroups) {
+          payload.assignmentGroups.push({
+            courseId: course.id,
+            canvasGroupId: String(g.id),
+            name: g.name,
+            weight: g.group_weight ?? 0,
+            position: g.position ?? 0,
+            dropLowest: g.rules?.drop_lowest ?? 0,
+            dropHighest: g.rules?.drop_highest ?? 0,
+          });
+        }
+      } catch { /* assignment groups restricted */ }
+
+      // ── Grading Standard (letter grade cutoff table) ───────────────────────
+      try {
+        const [courseDetail] = await fetchAll(
+          `${BASE}/courses/${course.id}?include[]=grading_standard`
+        );
+        if (courseDetail?.grading_standard?.grading_scheme) {
+          course.gradingScheme = courseDetail.grading_standard.grading_scheme;
+        }
+      } catch { /* grading standard not available */ }
 
       // ── Syllabus PDF URLs ──────────────────────────────────────────────────
       // We collect download URLs here; the offscreen document (background.js)

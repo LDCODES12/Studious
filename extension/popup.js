@@ -393,9 +393,14 @@ function showResult(result) {
   rCourses.textContent     = s.courses.new     + s.courses.updated;
   rAssignments.textContent = s.assignments.new + s.assignments.updated;
   rModules.textContent     = s.modules.new     + s.modules.updated;
-  resultNote.textContent   =
-    `${s.courses.new} new course${s.courses.new !== 1 ? "s" : ""} · ` +
-    `${s.assignments.new} new assignment${s.assignments.new !== 1 ? "s" : ""}`;
+  const notes = [
+    `${s.courses.new} new course${s.courses.new !== 1 ? "s" : ""}`,
+    `${s.assignments.new} new assignment${s.assignments.new !== 1 ? "s" : ""}`,
+  ];
+  if (s.announcements?.new > 0) {
+    notes.push(`${s.announcements.new} announcement${s.announcements.new !== 1 ? "s" : ""}`);
+  }
+  resultNote.textContent = notes.join(" · ");
   resultSection.hidden = false;
 }
 
