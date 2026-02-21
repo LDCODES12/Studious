@@ -255,6 +255,83 @@ Return JSON: { "weeks": [...] } using the exact same field structure. Return onl
   return weeks;
 }
 
+// ─── Class Schedule Extraction ────────────────────────────────────────────────
+
+export interface ClassMeeting {
+  label: string;      // "Lecture" | "Lab" | "Discussion" | "Recitation" | etc.
+  days: string[];     // RFC 5545 day codes: "MO" | "TU" | "WE" | "TH" | "FR" | "SA" | "SU"
+  startTime: string;  // 24-hour HH:MM
+  endTime: string;    // 24-hour HH:MM
+  location: string;   // Room/building, or ""
+}
+
+export interface ExtractedClassSchedule {
+  meetings: ClassMeeting[];
+  semesterStart: string | null;  // ISO YYYY-MM-DD
+  semesterEnd: string | null;    // ISO YYYY-MM-DD
+}
+
+/**
+ * Extracts the recurring class meeting schedule from a syllabus.
+ * Looks for patterns like "MWF 10:00–10:50 AM, Chem 201" or
+ * "Lectures: TR 2:30–3:45 PM" in the header/details section.
+ *
+ * Returns null if nothing recognisable is found.
+ */
+export async function extractClassSchedule(
+  text: string
+): Promise<ExtractedClassSchedule | null> {
+  // Focus on the first ~3000 chars — schedule info lives in the header
+  const truncated = text.slice(0, 3000);
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You extract class meeting schedule from a course syllabus.
+
+Look for statements like:
+- "Lectures: MWF 10:00–10:50 AM, Chemistry 201"
+- "Meeting days/times: Tuesday & Thursday 2:30–3:45 PM"
+- "Lab section: Wednesdays 1:00–4:00 PM, Room 110"
+- "Class: Mon/Wed/Fri 9–9:50am"
+
+For each distinct meeting type (Lecture, Lab, Discussion, Recitation, etc.) return:
+- label: the meeting type name (e.g. "Lecture", "Lab", "Discussion")
+- days: array of RFC 5545 day codes. Use: MO TU WE TH FR SA SU
+  Common abbreviations: M=MO, T=TU, W=WE, R or Th=TH, F=FR
+- startTime: 24-hour HH:MM (e.g. "10:00", "14:30")
+- endTime: 24-hour HH:MM
+- location: room/building string, or "" if not mentioned
+
+Also extract:
+- semesterStart: first day of classes as YYYY-MM-DD (often called "Classes begin" or inferred from first week)
+- semesterEnd: last day of classes as YYYY-MM-DD (often "Finals end" or "Semester ends")
+
+Rules:
+- Only extract meeting patterns explicitly stated. Never guess.
+- If no clear meeting schedule exists, return { "meetings": [], "semesterStart": null, "semesterEnd": null }
+- Ignore exam/midterm dates — those are single events, not recurring meetings
+- Convert all times to 24-hour format
+
+Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semesterEnd": "YYYY-MM-DD" | null }`,
+        },
+        { role: "user", content: truncated },
+      ],
+    }, { timeout: 20_000 });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return null;
+    const parsed = JSON.parse(content) as ExtractedClassSchedule;
+    if (!parsed.meetings || parsed.meetings.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Role 3 — Extractor ───────────────────────────────────────────────────────
 
 /**

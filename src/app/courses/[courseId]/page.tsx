@@ -85,7 +85,12 @@ export default async function CoursePage({ params }: CoursePageProps) {
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-7">
-      <CourseHeader course={course} courseId={course.id} />
+      <CourseHeader
+        course={course}
+        courseId={course.id}
+        googleConnected={googleConnected}
+        hasClassSchedule={course.classSchedule != null}
+      />
 
       <div className="grid grid-cols-3 gap-7">
         <div className="col-span-2">

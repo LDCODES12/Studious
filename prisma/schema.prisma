@@ -73,6 +73,7 @@ model Course {
   currentScore   Float?           // Numeric score from Canvas (e.g. 91.4)
   gradingScheme  Json?            // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard
   applyGroupWeights Boolean       @default(false) // from Canvas apply_assignment_group_weights
+  classSchedule  Json?            // AI-extracted meeting schedule: { meetings, semesterStart, semesterEnd }
   createdAt      DateTime         @default(now())
   user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments    Assignment[]

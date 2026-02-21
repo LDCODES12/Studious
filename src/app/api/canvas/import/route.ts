@@ -6,6 +6,7 @@ import {
   auditSchedule,
   needsAudit,
   extractDropRules,
+  extractClassSchedule,
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
@@ -670,6 +671,30 @@ export async function POST(request: NextRequest) {
               if (Object.keys(data).length > 0) {
                 await db.assignmentGroup.update({ where: { id: match.id }, data });
               }
+            }
+          }
+        } catch {
+          // Don't fail the whole import on this optional enrichment
+        }
+      }
+
+      // ── d-pre2) Class schedule extraction ──────────────────────────────────
+      // Extracts recurring meeting patterns (days, times, room) so students
+      // can add class times to Google Calendar with one click.
+      // Only runs if the course doesn't already have a classSchedule stored.
+      if (syllabusText.length >= 200) {
+        try {
+          const existingCourse = await db.course.findUnique({
+            where: { id: scCourseId },
+            select: { classSchedule: true },
+          });
+          if (!existingCourse?.classSchedule) {
+            const classSchedule = await extractClassSchedule(syllabusText);
+            if (classSchedule) {
+              await db.course.update({
+                where: { id: scCourseId },
+                data: { classSchedule: classSchedule as object },
+              });
             }
           }
         } catch {
