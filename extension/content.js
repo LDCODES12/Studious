@@ -171,6 +171,8 @@ function extractScheduleSection(html) {
         // PDF links are often in a "Useful Links" section that gets stripped by
         // extractScheduleSection. Never sent to the server.
         _rawSyllabusBody: c.syllabus_body ?? null,
+        // Canvas's authoritative weighted grading flag
+        applyGroupWeights: c.apply_assignment_group_weights ?? false,
         // Enrollment grades — from include[]=total_scores
         currentGrade: c.enrollments?.[0]?.computed_current_grade ?? c.enrollments?.[0]?.grades?.current_grade ?? null,
         currentScore: c.enrollments?.[0]?.computed_current_score ?? c.enrollments?.[0]?.grades?.current_score ?? null,
@@ -192,7 +194,6 @@ function extractScheduleSection(html) {
           `${BASE}/courses/${course.id}/assignments?per_page=100&order_by=due_at&include[]=submission`
         );
         for (const a of rawAssignments) {
-          if (!a.due_at) continue;
           // Map Canvas submission workflow_state → our status field
           const ws = a.submission?.workflow_state;
           const submissionStatus =
@@ -203,14 +204,20 @@ function extractScheduleSection(html) {
             id: a.id,
             courseId: course.id,
             title: a.name,
-            dueDate: a.due_at,
+            dueDate: a.due_at ?? null,
             description: stripHtml(a.description),
             submissionType: a.submission_types?.[0] ?? "assignment",
+            submissionTypes: a.submission_types ?? [],
+            gradingType: a.grading_type ?? null,
+            omitFromFinalGrade: a.omit_from_final_grade ?? false,
             htmlUrl: a.html_url ?? null,
             pointsPossible: a.points_possible ?? null,
             submissionStatus,
             score: a.submission?.score ?? null,
             submittedAt: a.submission?.submitted_at ?? null,
+            excused: a.submission?.excused ?? false,
+            late: a.submission?.late ?? false,
+            missing: a.submission?.missing ?? false,
             assignmentGroupId: a.assignment_group_id ?? null,
           });
         }
@@ -286,6 +293,7 @@ function extractScheduleSection(html) {
             position: g.position ?? 0,
             dropLowest: g.rules?.drop_lowest ?? 0,
             dropHighest: g.rules?.drop_highest ?? 0,
+            neverDrop: (g.rules?.never_drop ?? []).map(String),
           });
         }
       } catch { /* assignment groups restricted */ }

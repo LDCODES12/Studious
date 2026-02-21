@@ -13,7 +13,7 @@ interface AssignmentRowProps {
 }
 
 export function AssignmentRow({ assignment }: AssignmentRowProps) {
-  const dueDate = format(parseISO(assignment.dueDate), "MMM d");
+  const dueDate = assignment.dueDate ? format(parseISO(assignment.dueDate), "MMM d") : "No date";
 
   return (
     <div className="flex items-center gap-3 px-3 py-2.5 hover:bg-accent/30">

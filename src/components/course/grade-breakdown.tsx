@@ -11,7 +11,12 @@ interface AssignmentInGroup {
   score: number | null;
   pointsPossible: number | null;
   status: string;
-  dueDate: string;
+  dueDate: string | null;
+  excused: boolean;
+  omitFromFinalGrade: boolean;
+  canvasAssignmentId: string | null;
+  missing?: boolean;
+  late?: boolean;
 }
 
 interface AssignmentGroupData {
@@ -21,6 +26,7 @@ interface AssignmentGroupData {
   position: number;
   dropLowest: number;
   dropHighest: number;
+  neverDrop: string[];
   assignments: AssignmentInGroup[];
 }
 
@@ -34,6 +40,7 @@ interface GradeBreakdownProps {
   currentGrade: string | null;
   currentScore: number | null;
   gradingScheme: GradingSchemeEntry[] | null;
+  applyGroupWeights: boolean;
 }
 
 interface GroupStats {
@@ -48,28 +55,42 @@ interface GroupStats {
 function computeGroupStats(
   assignments: AssignmentInGroup[],
   dropLowest: number,
-  dropHighest: number
+  dropHighest: number,
+  neverDrop: string[],
 ): GroupStats {
-  const graded = assignments
+  // Exclude excused and omitFromFinalGrade assignments from ALL calculations
+  const countable = assignments.filter((a) => !a.excused && !a.omitFromFinalGrade);
+
+  const graded = countable
     .filter((a) => a.score != null && a.pointsPossible != null && a.pointsPossible > 0)
     .map((a) => ({
       id: a.id,
+      canvasAssignmentId: a.canvasAssignmentId,
       score: a.score!,
       possible: a.pointsPossible!,
       pct: a.score! / a.pointsPossible!,
     }));
 
-  // Sort by percentage ascending for drop logic
-  const sorted = [...graded].sort((a, b) => a.pct - b.pct);
+  // Separate into protected (never_drop) vs droppable
+  const neverDropSet = new Set(neverDrop);
+  const protectedAssignments = graded.filter(
+    (g) => g.canvasAssignmentId && neverDropSet.has(g.canvasAssignmentId)
+  );
+  const droppable = graded.filter(
+    (g) => !g.canvasAssignmentId || !neverDropSet.has(g.canvasAssignmentId)
+  );
+
+  // Sort droppable by percentage ascending for drop logic
+  const sorted = [...droppable].sort((a, b) => a.pct - b.pct);
 
   const droppedIds = new Set<string>();
 
-  // Drop lowest N
+  // Drop lowest N (from droppable only)
   for (let i = 0; i < Math.min(dropLowest, sorted.length); i++) {
     droppedIds.add(sorted[i].id);
   }
 
-  // Drop highest N (from the end)
+  // Drop highest N from the end (from droppable only)
   for (let i = 0; i < Math.min(dropHighest, sorted.length); i++) {
     const idx = sorted.length - 1 - i;
     if (!droppedIds.has(sorted[idx].id)) {
@@ -77,7 +98,11 @@ function computeGroupStats(
     }
   }
 
-  const kept = graded.filter((g) => !droppedIds.has(g.id));
+  // Protected assignments always count + non-dropped droppable assignments
+  const kept = [
+    ...protectedAssignments,
+    ...droppable.filter((g) => !droppedIds.has(g.id)),
+  ];
   const earned = kept.reduce((s, g) => s + g.score, 0);
   const possible = kept.reduce((s, g) => s + g.possible, 0);
 
@@ -86,7 +111,7 @@ function computeGroupStats(
     possible,
     percentage: possible > 0 ? (earned / possible) * 100 : null,
     gradedCount: graded.length,
-    totalCount: assignments.length,
+    totalCount: countable.length,
     droppedIds,
   };
 }
@@ -157,6 +182,10 @@ function CategorySection({
         <div className="border-t border-border">
           {group.assignments.map((a) => {
             const isDropped = stats.droppedIds.has(a.id);
+            const isExcused = a.excused;
+            const isOmitted = a.omitFromFinalGrade;
+            const isMissing = a.missing ?? false;
+            const isLate = a.late ?? false;
             const pct =
               a.score != null && a.pointsPossible && a.pointsPossible > 0
                 ? ((a.score / a.pointsPossible) * 100).toFixed(1)
@@ -167,7 +196,7 @@ function CategorySection({
                 key={a.id}
                 className={cn(
                   "flex items-center gap-2 px-4 py-2 text-[13px]",
-                  isDropped && "opacity-50"
+                  (isDropped || isExcused || isOmitted) && "opacity-50"
                 )}
               >
                 <span
@@ -183,9 +212,29 @@ function CategorySection({
                 >
                   {a.title}
                 </span>
-                {isDropped && (
+                {isExcused && (
+                  <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+                    Excused
+                  </span>
+                )}
+                {isOmitted && !isExcused && (
+                  <span className="shrink-0 text-[10px] italic text-muted-foreground">
+                    Not counted
+                  </span>
+                )}
+                {isDropped && !isExcused && !isOmitted && (
                   <span className="shrink-0 text-[10px] italic text-muted-foreground">
                     dropped
+                  </span>
+                )}
+                {isMissing && !isExcused && (
+                  <span className="shrink-0 rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600">
+                    Missing
+                  </span>
+                )}
+                {isLate && !isMissing && !isExcused && (
+                  <span className="shrink-0 rounded-full bg-yellow-50 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700">
+                    Late
                   </span>
                 )}
                 {a.score != null && a.pointsPossible != null ? (
@@ -197,7 +246,7 @@ function CategorySection({
                   </span>
                 ) : (
                   <span className="shrink-0 text-[12px] text-muted-foreground">
-                    {format(parseISO(a.dueDate), "MMM d")}
+                    {a.dueDate ? format(parseISO(a.dueDate), "MMM d") : "No due date"}
                   </span>
                 )}
               </div>
@@ -214,6 +263,7 @@ export function GradeBreakdown({
   currentGrade,
   currentScore,
   gradingScheme,
+  applyGroupWeights,
 }: GradeBreakdownProps) {
   const [showScheme, setShowScheme] = useState(false);
 
@@ -228,12 +278,13 @@ export function GradeBreakdown({
   }
 
   const sorted = [...assignmentGroups].sort((a, b) => a.position - b.position);
-  const isWeighted = sorted.some((g) => g.weight > 0);
+  // Use Canvas's authoritative flag instead of heuristic detection
+  const isWeighted = applyGroupWeights;
 
   // Compute stats for each group
   const groupStats = new Map<string, GroupStats>();
   for (const g of sorted) {
-    groupStats.set(g.id, computeGroupStats(g.assignments, g.dropLowest, g.dropHighest));
+    groupStats.set(g.id, computeGroupStats(g.assignments, g.dropLowest, g.dropHighest, g.neverDrop));
   }
 
   // Compute overall percentage (our own calculation for display alongside Canvas's)

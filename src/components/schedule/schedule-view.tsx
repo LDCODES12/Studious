@@ -16,7 +16,7 @@ const COLOR_MAP: Record<string, string> = {
 interface Assignment {
   id: string;
   title: string;
-  dueDate: string;
+  dueDate: string | null;
   type: string;
   course: {
     id: string;

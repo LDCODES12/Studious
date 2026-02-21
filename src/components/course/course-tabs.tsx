@@ -13,7 +13,7 @@ import { GradeBreakdown } from "./grade-breakdown";
 interface Assignment {
   id: string;
   title: string;
-  dueDate: string;
+  dueDate: string | null;
   status: string;
   type: string;
   googleEventId: string | null;
@@ -51,13 +51,19 @@ interface AssignmentGroupData {
   position: number;
   dropLowest: number;
   dropHighest: number;
+  neverDrop: string[];
   assignments: {
     id: string;
     title: string;
     score: number | null;
     pointsPossible: number | null;
     status: string;
-    dueDate: string;
+    dueDate: string | null;
+    excused: boolean;
+    omitFromFinalGrade: boolean;
+    canvasAssignmentId: string | null;
+    missing: boolean;
+    late: boolean;
   }[];
 }
 
@@ -69,6 +75,7 @@ interface CourseTabsProps {
   currentGrade: string | null;
   currentScore: number | null;
   gradingScheme: { name: string; value: number }[] | null;
+  applyGroupWeights: boolean;
   courseId: string;
   googleConnected: boolean;
 }
@@ -224,12 +231,16 @@ export function CourseTabs({
   currentGrade,
   currentScore,
   gradingScheme,
+  applyGroupWeights,
   courseId,
   googleConnected,
 }: CourseTabsProps) {
-  const sorted = [...assignments].sort(
-    (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
-  );
+  const sorted = [...assignments].sort((a, b) => {
+    if (!a.dueDate && !b.dueDate) return 0;
+    if (!a.dueDate) return 1;
+    if (!b.dueDate) return -1;
+    return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+  });
 
   const [materials, setMaterials] = useState<CourseMaterial[]>(initialMaterials);
   const [topics, setTopics] = useState<CourseTopic[]>(initialTopics);
@@ -361,7 +372,7 @@ export function CourseTabs({
                     {a.type.replace(/_/g, " ")}
                   </span>
                   <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                    {format(parseISO(a.dueDate), "MMM d")}
+                    {a.dueDate ? format(parseISO(a.dueDate), "MMM d") : "No date"}
                   </span>
                   {googleConnected && (
                     <div className="w-20 shrink-0 text-right">
@@ -395,6 +406,7 @@ export function CourseTabs({
           currentGrade={currentGrade}
           currentScore={currentScore}
           gradingScheme={gradingScheme}
+          applyGroupWeights={applyGroupWeights}
         />
       </TabsContent>
 

@@ -18,7 +18,7 @@ export interface Assignment {
   courseId: string;
   title: string;
   description?: string;
-  dueDate: string;
+  dueDate: string | null;
   status: "not_started" | "in_progress" | "submitted" | "graded";
   type: "homework" | "quiz" | "exam" | "project" | "reading" | "discussion";
   points?: number;

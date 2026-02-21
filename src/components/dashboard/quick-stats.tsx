@@ -2,16 +2,16 @@ import { isThisWeek, parseISO } from "date-fns";
 
 interface Props {
   courses: { id: string }[];
-  assignments: { status: string; dueDate: string }[];
+  assignments: { status: string; dueDate: string | null }[];
 }
 
 export function QuickStats({ courses, assignments }: Props) {
   const dueThisWeek = assignments.filter(
-    (a) => a.status === "not_started" && isThisWeek(parseISO(a.dueDate))
+    (a) => a.status === "not_started" && a.dueDate && isThisWeek(parseISO(a.dueDate))
   ).length;
 
   const upcoming = assignments.filter(
-    (a) => a.status === "not_started" && new Date(a.dueDate) >= new Date()
+    (a) => a.status === "not_started" && a.dueDate && new Date(a.dueDate) >= new Date()
   ).length;
 
   const stats = [

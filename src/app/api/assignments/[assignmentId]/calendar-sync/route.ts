@@ -23,6 +23,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  if (!assignment.dueDate) {
+    return NextResponse.json({ error: "Assignment has no due date" }, { status: 400 });
+  }
+
   const tokensCookie = request.cookies.get("google_tokens");
   if (!tokensCookie) {
     return NextResponse.json({ error: "Google Calendar not connected" }, { status: 401 });

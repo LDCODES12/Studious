@@ -4,15 +4,15 @@ import { formatDistanceToNow, parseISO } from "date-fns";
 interface Assignment {
   id: string;
   title: string;
-  dueDate: string;
+  dueDate: string | null;
   status: string;
   course: { shortName: string | null; color: string };
 }
 
 export function UpcomingDeadlines({ assignments }: { assignments: Assignment[] }) {
   const upcoming = assignments
-    .filter((a) => a.status === "not_started" && new Date(a.dueDate) >= new Date())
-    .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())
+    .filter((a) => a.status === "not_started" && a.dueDate && new Date(a.dueDate) >= new Date())
+    .sort((a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime())
     .slice(0, 6);
 
   if (upcoming.length === 0) {
@@ -32,7 +32,7 @@ export function UpcomingDeadlines({ assignments }: { assignments: Assignment[] }
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         {upcoming.map((assignment, i) => {
           const colors = courseColors[assignment.course.color ?? "blue"];
-          const due = formatDistanceToNow(parseISO(assignment.dueDate), { addSuffix: true });
+          const due = assignment.dueDate ? formatDistanceToNow(parseISO(assignment.dueDate), { addSuffix: true }) : "";
 
           return (
             <div
