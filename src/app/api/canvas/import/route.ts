@@ -8,6 +8,7 @@ import {
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
+import { generateTasksForUser } from "@/lib/tasks";
 
 export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
 
@@ -28,6 +29,8 @@ interface CanvasCourse {
   courseCode: string | null;
   term: string | null;
   instructor: string | null;
+  /** Canvas's authoritative flag for weighted grading */
+  applyGroupWeights?: boolean;
   /** Letter grade from Canvas enrollment (e.g. "A-") */
   currentGrade?: string | null;
   /** Numeric score from Canvas enrollment (e.g. 91.4) */
@@ -44,9 +47,12 @@ interface CanvasAssignment {
   id: number;
   courseId: number;
   title: string;
-  dueDate: string; // ISO datetime
+  dueDate: string | null; // ISO datetime — nullable for participation/attendance items
   description: string | null;
   submissionType: string;
+  submissionTypes?: string[];
+  gradingType?: string | null;
+  omitFromFinalGrade?: boolean;
   htmlUrl: string | null;
   pointsPossible: number | null;
   /** Canvas submission status: "not_started" | "submitted" | "graded" */
@@ -55,6 +61,10 @@ interface CanvasAssignment {
   score?: number | null;
   /** ISO datetime when student submitted */
   submittedAt?: string | null;
+  /** Canvas submission flags */
+  excused?: boolean;
+  late?: boolean;
+  missing?: boolean;
   /** Canvas assignment_group_id */
   assignmentGroupId?: number | null;
 }
@@ -84,6 +94,7 @@ interface CanvasAssignmentGroup {
   position: number;
   dropLowest: number;
   dropHighest: number;
+  neverDrop?: string[];
 }
 
 interface ImportPayload {
@@ -102,8 +113,16 @@ function sha256(token: string): string {
 
 const COLORS = ["blue", "green", "purple", "orange", "rose"];
 
-function inferType(title: string, submissionType: string): string {
-  if (submissionType === "online_quiz") return "quiz";
+function inferType(
+  title: string,
+  submissionTypes: string[],
+  gradingType: string | null,
+): string {
+  // Canvas-authoritative signals first
+  if (submissionTypes.includes("online_quiz")) return "quiz";
+  if (gradingType === "not_graded") return "reading";
+  if (submissionTypes.includes("discussion_topic")) return "reading";
+  // Title-based fallback for ambiguous items
   const t = title.toLowerCase();
   if (/\b(quiz)\b/.test(t)) return "quiz";
   if (/\b(exam|midterm|final|test)\b/.test(t)) return "exam";
@@ -113,8 +132,9 @@ function inferType(title: string, submissionType: string): string {
   return "assignment";
 }
 
-/** Canvas returns ISO datetime; we store YYYY-MM-DD */
-function toDateOnly(iso: string): string {
+/** Canvas returns ISO datetime; we store YYYY-MM-DD. Returns null if input is null. */
+function toDateOnly(iso: string | null): string | null {
+  if (!iso) return null;
   return iso.slice(0, 10);
 }
 
@@ -295,6 +315,7 @@ export async function POST(request: NextRequest) {
           currentGrade: c.currentGrade ?? undefined,
           currentScore: c.currentScore ?? undefined,
           gradingScheme: c.gradingScheme ?? undefined,
+          applyGroupWeights: c.applyGroupWeights ?? false,
         },
       });
       courseIdMap.set(c.id, existing.id);
@@ -314,6 +335,7 @@ export async function POST(request: NextRequest) {
           currentGrade: c.currentGrade ?? null,
           currentScore: c.currentScore ?? null,
           gradingScheme: c.gradingScheme ?? undefined,
+          applyGroupWeights: c.applyGroupWeights ?? false,
         },
       });
       existingCourses.push({ id: created.id, name: created.name, color, canvasCourseId: canvasId });
@@ -346,6 +368,7 @@ export async function POST(request: NextRequest) {
           position: g.position,
           dropLowest: g.dropLowest,
           dropHighest: g.dropHighest,
+          neverDrop: g.neverDrop ?? [],
         },
       });
       groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, existing.id);
@@ -360,6 +383,7 @@ export async function POST(request: NextRequest) {
           position: g.position,
           dropLowest: g.dropLowest,
           dropHighest: g.dropHighest,
+          neverDrop: g.neverDrop ?? [],
         },
       });
       groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, created.id);
@@ -373,11 +397,11 @@ export async function POST(request: NextRequest) {
 
   for (const a of assignments) {
     const scCourseId = courseIdMap.get(a.courseId);
-    if (!scCourseId || !a.dueDate) continue;
+    if (!scCourseId) continue;
 
     const canvasAssId = String(a.id);
     const dueDate = toDateOnly(a.dueDate);
-    const type = inferType(a.title, a.submissionType);
+    const type = inferType(a.title, a.submissionTypes ?? [a.submissionType], a.gradingType ?? null);
 
     const description = a.description
       ? a.description.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000) || null
@@ -388,15 +412,22 @@ export async function POST(request: NextRequest) {
       select: { id: true },
     });
 
-    // Map Canvas submission status to our status field
-    const status = a.submissionStatus && a.submissionStatus !== "not_started"
-      ? a.submissionStatus
-      : undefined; // don't overwrite manual status changes with "not_started"
+    // Canvas is the source of truth for status — always write it
+    const status = a.submissionStatus ?? "not_started";
 
     // Link to assignment group if available
     const scGroupId = a.assignmentGroupId
       ? groupIdMap.get(`${scCourseId}:${String(a.assignmentGroupId)}`)
       : undefined;
+
+    const newFields = {
+      gradingType: a.gradingType ?? null,
+      submissionTypes: a.submissionTypes ?? [],
+      omitFromFinalGrade: a.omitFromFinalGrade ?? false,
+      excused: a.excused ?? false,
+      late: a.late ?? false,
+      missing: a.missing ?? false,
+    };
 
     if (existing) {
       await db.assignment.update({
@@ -407,10 +438,11 @@ export async function POST(request: NextRequest) {
           description,
           canvasUrl: a.htmlUrl,
           pointsPossible: a.pointsPossible,
-          ...(status ? { status } : {}),
+          status,
           score: a.score ?? null,
           submittedAt: a.submittedAt ?? null,
           assignmentGroupId: scGroupId ?? null,
+          ...newFields,
         },
       });
       updatedAssignments++;
@@ -425,10 +457,11 @@ export async function POST(request: NextRequest) {
           description,
           canvasUrl: a.htmlUrl ?? null,
           pointsPossible: a.pointsPossible ?? null,
-          status: status ?? "not_started",
+          status,
           score: a.score ?? null,
           submittedAt: a.submittedAt ?? null,
           assignmentGroupId: scGroupId ?? null,
+          ...newFields,
         },
       });
       newAssignments++;
@@ -693,6 +726,9 @@ export async function POST(request: NextRequest) {
   // Single log entry — read with `vercel logs -x --query "canvas/import"` to see full output
   console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
 
+  // 10. Auto-generate tasks from assignments
+  const tasksCreated = await generateTasksForUser(user.id);
+
   return NextResponse.json({
     ok: true,
     summary: {
@@ -701,6 +737,7 @@ export async function POST(request: NextRequest) {
       assignmentGroups: { new: newGroups, updated: updatedGroups },
       modules: { new: newModules, updated: updatedModules },
       announcements: { new: newAnnouncements },
+      tasks: { autoGenerated: tasksCreated },
       syllabus: { aiWeeks: aiTopicsCreated, filesImported: syllabusFilesImported },
     },
   });

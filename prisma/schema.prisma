@@ -19,6 +19,7 @@ model User {
   apiTokenHash  String?   @unique // SHA-256 hash of extension API token
   createdAt     DateTime  @default(now())
   courses       Course[]
+  tasks         Task[]
   accounts      Account[]
   sessions      Session[]
 }
@@ -71,6 +72,7 @@ model Course {
   currentGrade   String?          // Letter grade from Canvas (e.g. "A-")
   currentScore   Float?           // Numeric score from Canvas (e.g. 91.4)
   gradingScheme  Json?            // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard
+  applyGroupWeights Boolean       @default(false) // from Canvas apply_assignment_group_weights
   createdAt      DateTime         @default(now())
   user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments    Assignment[]
@@ -79,6 +81,7 @@ model Course {
   materials      CourseMaterial[]
   quizzes        Quiz[]
   announcements  Announcement[]
+  tasks          Task[]
 }
 
 model CourseTopic {
@@ -137,6 +140,7 @@ model AssignmentGroup {
   position        Int          // display order
   dropLowest      Int          @default(0)
   dropHighest     Int          @default(0)
+  neverDrop       String[]     @default([]) // Canvas assignment IDs that must never be dropped
   course          Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
   assignments     Assignment[]
 
@@ -148,7 +152,7 @@ model Assignment {
   courseId           String
   title              String
   type               String
-  dueDate            String
+  dueDate            String?           // Nullable for participation/attendance items
   description        String?
   status             String            @default("not_started")
   score              Float?            // Student's score from Canvas submission
@@ -158,9 +162,39 @@ model Assignment {
   canvasUrl          String?           // Direct link to Canvas assignment
   pointsPossible     Float?            // Points possible from Canvas
   assignmentGroupId  String?           // FK to AssignmentGroup
+  gradingType        String?           // 'points' | 'pass_fail' | 'percent' | 'letter_grade' | 'gpa_scale' | 'not_graded'
+  submissionTypes    String[]  @default([]) // Canvas submission_types array
+  omitFromFinalGrade Boolean   @default(false) // true = doesn't count toward grade
+  excused            Boolean   @default(false) // true = excluded from grade calculation
+  missing            Boolean   @default(false) // true = past due, no submission
+  late               Boolean   @default(false) // true = submitted after due date
   createdAt          DateTime          @default(now())
   course             Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
   assignmentGroup    AssignmentGroup?  @relation(fields: [assignmentGroupId], references: [id])
+}
+
+model Task {
+  id            String    @id @default(cuid())
+  userId        String
+  courseId       String?
+  assignmentId  String?       // source assignment for auto-generated tasks
+  title         String
+  description   String?
+  dueDate       String?       // YYYY-MM-DD
+  dueTime       String?       // HH:MM (24h) — optional time component
+  priority      String        @default("medium") // "low" | "medium" | "high"
+  completed     Boolean       @default(false)
+  completedAt   DateTime?
+  source        String        @default("manual") // "manual" | "auto"
+  sourceType    String?       // "study" | "start" | "review" | "complete"
+  googleEventId String?
+  createdAt     DateTime      @default(now())
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course        Course?       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([userId, completed])
+  @@index([userId, dueDate])
+  @@unique([assignmentId, sourceType])
 }
 
 model Announcement {

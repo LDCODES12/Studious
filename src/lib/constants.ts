@@ -1,5 +1,6 @@
 import {
   LayoutDashboard,
+  ListTodo,
   Calendar,
   Brain,
   Users,
@@ -17,6 +18,7 @@ export interface NavItem {
 
 export const mainNavItems: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
+  { label: "Tasks", href: "/tasks", icon: ListTodo },
   { label: "Upload", href: "/upload", icon: Upload },
   { label: "Library", href: "/library", icon: FolderOpen },
   { label: "Schedule", href: "/schedule", icon: Calendar },
