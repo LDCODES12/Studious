@@ -179,7 +179,7 @@ async function handleCanvasData(payload) {
     // ── Step 1: Extract text from all PDF URLs via the offscreen document ─────
     // Count total PDFs across all courses so we can show accurate progress.
     const totalPdfs = payload.courses.reduce(
-      (sum, c) => sum + (c.syllabusFileUrls?.length ?? 0), 0
+      (sum, c) => (sum + (c.syllabusFileUrls?.length ?? 0) + (c.materialFileUrls?.length ?? 0)), 0
     );
 
     if (totalPdfs > 0) {
@@ -195,34 +195,50 @@ async function handleCanvasData(payload) {
       // sequentially to avoid flooding the offscreen doc with concurrent messages.
       await Promise.all(
         payload.courses.map(async (course) => {
-          const fileUrls = course.syllabusFileUrls ?? [];
+          // ── Syllabus PDFs ──────────────────────────────────────────────────
           const syllabusTexts = [];
-
-          for (const { fileName, url } of fileUrls) {
+          for (const { fileName, url } of (course.syllabusFileUrls ?? [])) {
             const messageId = crypto.randomUUID();
             const t0   = Date.now();
             const text = await parsePdfViaOffscreen(url, messageId);
             const ms   = Date.now() - t0;
             if (text.length > 0) {
-              console.log(`[worker] ${course.name} | "${fileName}": ${text.length}c in ${ms}ms`);
+              console.log(`[worker] ${course.name} | syllabus "${fileName}": ${text.length}c in ${ms}ms`);
             } else {
-              console.warn(`[worker] ${course.name} | "${fileName}": 0 chars after ${ms}ms — timed out or empty PDF`);
+              console.warn(`[worker] ${course.name} | syllabus "${fileName}": 0 chars after ${ms}ms`);
             }
             syllabusTexts.push({ fileName, text });
           }
-
-          // Replace syllabusFileUrls with syllabusTexts in place
-          course.syllabusTexts  = syllabusTexts;
+          course.syllabusTexts = syllabusTexts;
           delete course.syllabusFileUrls;
+
+          // ── Course material PDFs (problem sets, lecture notes, etc.) ────────
+          const materialTexts = [];
+          for (const { fileName, url } of (course.materialFileUrls ?? [])) {
+            const messageId = crypto.randomUUID();
+            const t0   = Date.now();
+            const text = await parsePdfViaOffscreen(url, messageId);
+            const ms   = Date.now() - t0;
+            if (text.length > 0) {
+              console.log(`[worker] ${course.name} | material "${fileName}": ${text.length}c in ${ms}ms`);
+            } else {
+              console.warn(`[worker] ${course.name} | material "${fileName}": 0 chars after ${ms}ms`);
+            }
+            materialTexts.push({ fileName, text });
+          }
+          course.materialTexts = materialTexts;
+          delete course.materialFileUrls;
         })
       );
 
       await closeOffscreen();
     } else {
-      // No PDFs — still clean up the field so the server type is consistent
+      // No PDFs — still clean up fields so the server type is consistent
       for (const course of payload.courses) {
         course.syllabusTexts = [];
+        course.materialTexts = [];
         delete course.syllabusFileUrls;
+        delete course.materialFileUrls;
       }
     }
 

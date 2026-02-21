@@ -448,11 +448,48 @@ function extractScheduleSection(html) {
           }
         }
 
-        // ── Collect URLs for offscreen document to fetch + extract ───────────
-        // The actual downloading and PDF parsing is done by the offscreen document
-        // in background.js — we just pass the pre-signed URLs along.
+        // ── Collect syllabus URLs for offscreen document to fetch + extract ──
         for (const { name, url } of toFetch.slice(0, 3)) {
           course.syllabusFileUrls.push({ fileName: name, url });
+        }
+
+        // ── Source 3: course materials from ALL non-orientation modules ───────
+        // Scan every module that isn't a welcome/orientation module for PDF files.
+        // These become CourseMaterial records (problem sets, lecture notes, etc.)
+        // — they do NOT go through the syllabus topic extraction pipeline.
+        // Limit: 10 materials per course. Skip files already queued as syllabi.
+        course.materialFileUrls = [];
+        const MATERIAL_LIMIT = 10;
+        const materialSeenIds = new Set();
+
+        for (const mod of rawModules) {
+          if (course.materialFileUrls.length >= MATERIAL_LIMIT) break;
+          // Skip orientation/syllabus modules — Source 1 already covered these
+          if (SYLLABUS_MOD_RE.test(mod.name ?? "")) continue;
+
+          const items = (mod.items ?? []).filter(
+            (it) => it.type === "File" && it.content_id
+          );
+
+          for (const item of items) {
+            if (course.materialFileUrls.length >= MATERIAL_LIMIT) break;
+            const cid = String(item.content_id);
+            if (seenIds.has(cid) || materialSeenIds.has(cid)) continue;
+            materialSeenIds.add(cid);
+
+            try {
+              const [fileInfo] = await fetchAll(`${BASE}/files/${cid}`);
+              const ct = fileInfo?.["content-type"] ?? "";
+              const name = fileInfo?.display_name ?? item.title ?? "file.pdf";
+              const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
+              // Skip very large files (> 10 MB) — probably textbooks
+              const isReasonableSize = (fileInfo?.size ?? 0) < 10_000_000 && (fileInfo?.size ?? 0) > 0;
+              if (fileInfo?.url && isPdf && isReasonableSize) {
+                course.materialFileUrls.push({ fileName: name, url: fileInfo.url });
+                console.log(`[scout] ${course.name} | material: "${name}" (${Math.round((fileInfo.size ?? 0) / 1024)}KB)`);
+              }
+            } catch { /* skip */ }
+          }
         }
 
         // ── Per-course Scout diagnostic ───────────────────────────────────
@@ -460,7 +497,8 @@ function extractScheduleSection(html) {
           `[scout] ${course.name}:`,
           `syllabusBody=${course.syllabusBody?.length ?? 0}c`,
           `| rawBody=${course._rawSyllabusBody?.length ?? 0}c`,
-          `| PDFs queued=[${course.syllabusFileUrls.map((f) => `"${f.fileName}"`).join(", ") || "none"}]`
+          `| syllabusPDFs=[${course.syllabusFileUrls.map((f) => `"${f.fileName}"`).join(", ") || "none"}]`,
+          `| materialPDFs=${course.materialFileUrls.length}`
         );
       }
     }

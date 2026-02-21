@@ -11,6 +11,7 @@ import {
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
 import { generateTasksForUser } from "@/lib/tasks";
+import { analyzeCourseMaterial } from "@/lib/analyze-material";
 
 export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
 
@@ -43,6 +44,8 @@ interface CanvasCourse {
   syllabusBody?: string | null;
   /** Pre-extracted syllabus text from PDFs (offscreen doc ran pdfjs-dist) */
   syllabusTexts?: SyllabusText[];
+  /** Pre-extracted text from non-syllabus course materials (problem sets, lecture notes, etc.) */
+  materialTexts?: SyllabusText[];
 }
 
 interface CanvasAssignment {
@@ -631,6 +634,49 @@ export async function POST(request: NextRequest) {
             },
           });
           syllabusFilesImported++;
+        }
+      }
+
+      // ── b2) Course materials (problem sets, lecture notes, etc.) ─────────────
+      // materialTexts are non-syllabus PDFs collected from all Canvas modules.
+      // Run AI classification on each and upsert into CourseMaterial.
+      // These are NOT used for syllabus topic extraction — only for the
+      // Materials tab display and quiz generation.
+      const materialTexts = c.materialTexts ?? [];
+      if (materialTexts.length > 0) {
+        const courseTopicLabels = await db.courseTopic.findMany({
+          where: { courseId: scCourseId },
+          select: { weekLabel: true },
+        });
+        const topicLabels = courseTopicLabels.map((t) => t.weekLabel);
+
+        for (const mt of materialTexts) {
+          const pdfText = mt.text.trim();
+          if (pdfText.length < 50) continue; // skip empty/failed extractions
+
+          const existingMat = await db.courseMaterial.findFirst({
+            where: { courseId: scCourseId, fileName: mt.fileName },
+            select: { id: true },
+          });
+          if (existingMat) continue; // already imported — idempotent
+
+          try {
+            const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
+            const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
+            await db.courseMaterial.create({
+              data: {
+                courseId: scCourseId,
+                fileName: mt.fileName,
+                detectedType: analysis.detectedType,
+                summary: analysis.summary,
+                relatedTopics: analysis.relatedTopics,
+                rawText: pdfText.slice(0, 10_000),
+                storedForAI,
+              },
+            });
+          } catch {
+            // Don't fail the whole import if one material analysis errors
+          }
         }
       }
 
