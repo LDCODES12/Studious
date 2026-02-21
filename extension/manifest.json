@@ -31,7 +31,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.gradescope.com/courses/*/assignments*"],
+      "matches": ["https://www.gradescope.com/courses/*"],
       "js": ["gradescope-content.js"],
       "run_at": "document_idle"
     }

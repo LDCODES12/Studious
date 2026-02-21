@@ -172,6 +172,7 @@ model Assignment {
   late               Boolean   @default(false) // true = submitted after due date
   gradescopeScore    Float?                    // score from Gradescope before Canvas sync
   gradescopeMaxScore Float?                    // max score from Gradescope
+  gradescopeId       String?                   // Gradescope assignment ID — set for GS-only assignments not in Canvas
   createdAt          DateTime          @default(now())
   course             Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
   assignmentGroup    AssignmentGroup?  @relation(fields: [assignmentGroupId], references: [id])
