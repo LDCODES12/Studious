@@ -138,9 +138,11 @@ model AssignmentGroup {
   name            String       // e.g. "Exams", "Homework"
   weight          Float        // 0-100 (0 for all groups if unweighted/points-based)
   position        Int          // display order
-  dropLowest      Int          @default(0)
-  dropHighest     Int          @default(0)
-  neverDrop       String[]     @default([]) // Canvas assignment IDs that must never be dropped
+  dropLowest           Int          @default(0)
+  dropHighest          Int          @default(0)
+  neverDrop            String[]     @default([]) // Canvas assignment IDs that must never be dropped
+  syllabusDropLowest   Int          @default(0)
+  syllabusDropHighest  Int          @default(0)
   course          Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
   assignments     Assignment[]
 
@@ -168,6 +170,8 @@ model Assignment {
   excused            Boolean   @default(false) // true = excluded from grade calculation
   missing            Boolean   @default(false) // true = past due, no submission
   late               Boolean   @default(false) // true = submitted after due date
+  gradescopeScore    Float?                    // score from Gradescope before Canvas sync
+  gradescopeMaxScore Float?                    // max score from Gradescope
   createdAt          DateTime          @default(now())
   course             Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
   assignmentGroup    AssignmentGroup?  @relation(fields: [assignmentGroupId], references: [id])

@@ -5,6 +5,7 @@ import {
   sanitizeSchedule,
   auditSchedule,
   needsAudit,
+  extractDropRules,
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
@@ -629,6 +630,39 @@ export async function POST(request: NextRequest) {
       const candidatesSummary = candidates.length === 0
         ? "none"
         : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
+
+      // ── d-pre) Syllabus drop rule extraction ──────────────────────────────
+      // Runs independently of topic processing — even if topics already exist.
+      // Detects "drop lowest N" rules from syllabus text and stores them on
+      // AssignmentGroups that Canvas left with dropLowest/dropHighest = 0.
+      if (syllabusText.length >= 200) {
+        try {
+          const dropRules = await extractDropRules(syllabusText);
+          if (dropRules.length > 0) {
+            const groups = await db.assignmentGroup.findMany({
+              where: { courseId: scCourseId },
+              select: { id: true, name: true, dropLowest: true, dropHighest: true },
+            });
+            const norm = (s: string) => s.toLowerCase().replace(/s+$/, "").trim();
+            for (const rule of dropRules) {
+              const match = groups.find(
+                (g) =>
+                  norm(g.name).includes(norm(rule.groupName)) ||
+                  norm(rule.groupName).includes(norm(g.name))
+              );
+              if (!match) continue;
+              const data: { syllabusDropLowest?: number; syllabusDropHighest?: number } = {};
+              if (rule.dropLowest > 0 && match.dropLowest === 0) data.syllabusDropLowest = rule.dropLowest;
+              if (rule.dropHighest > 0 && match.dropHighest === 0) data.syllabusDropHighest = rule.dropHighest;
+              if (Object.keys(data).length > 0) {
+                await db.assignmentGroup.update({ where: { id: match.id }, data });
+              }
+            }
+          }
+        } catch {
+          // Don't fail the whole import on this optional enrichment
+        }
+      }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
       const aiStatus = !shouldRunAI ? "skip:has-ai-topics"

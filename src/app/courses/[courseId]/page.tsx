@@ -18,7 +18,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
   const cookieStore = await cookies();
   const googleConnected = !!cookieStore.get("google_tokens");
 
-  const course = await db.course.findFirst({
+  const [course, courseTasks] = await Promise.all([db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
     include: {
       assignments: { orderBy: { dueDate: "asc" } },
@@ -32,6 +32,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
               status: true, dueDate: true,
               excused: true, omitFromFinalGrade: true, canvasAssignmentId: true,
               missing: true, late: true,
+              gradescopeScore: true, gradescopeMaxScore: true,
             },
           },
         },
@@ -40,7 +41,12 @@ export default async function CoursePage({ params }: CoursePageProps) {
       materials: { orderBy: { uploadedAt: "desc" } },
       announcements: { orderBy: { postedAt: "desc" }, take: 10 },
     },
-  });
+  }), db.task.findMany({
+    where: { courseId, userId: session.user.id, completed: false },
+    orderBy: { dueDate: "asc" },
+    take: 5,
+    select: { id: true, title: true, dueDate: true, priority: true, source: true },
+  })]);
 
   if (!course) notFound();
 
@@ -56,6 +62,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
     score: a.score,
     pointsPossible: a.pointsPossible,
     canvasUrl: a.canvasUrl,
+    missing: a.missing,
   }));
 
   const materials = course.materials.map((m) => ({
@@ -85,6 +92,8 @@ export default async function CoursePage({ params }: CoursePageProps) {
           <CourseTabs
             assignments={assignments}
             assignmentGroups={course.assignmentGroups}
+            courseTasks={courseTasks}
+            announcements={announcements}
             currentGrade={course.currentGrade}
             currentScore={course.currentScore}
             gradingScheme={course.gradingScheme as { name: string; value: number }[] | null}

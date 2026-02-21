@@ -17,6 +17,8 @@ interface AssignmentInGroup {
   canvasAssignmentId: string | null;
   missing?: boolean;
   late?: boolean;
+  gradescopeScore?: number | null;
+  gradescopeMaxScore?: number | null;
 }
 
 interface AssignmentGroupData {
@@ -27,6 +29,8 @@ interface AssignmentGroupData {
   dropLowest: number;
   dropHighest: number;
   neverDrop: string[];
+  syllabusDropLowest: number;
+  syllabusDropHighest: number;
   assignments: AssignmentInGroup[];
 }
 
@@ -57,7 +61,14 @@ function computeGroupStats(
   dropLowest: number,
   dropHighest: number,
   neverDrop: string[],
+  syllabusDropLowest = 0,
+  syllabusDropHighest = 0,
 ): GroupStats {
+  // Use Canvas rules first; fall back to syllabus-extracted rules
+  const effectiveDropLowest = dropLowest > 0 ? dropLowest : syllabusDropLowest;
+  const effectiveDropHighest = dropHighest > 0 ? dropHighest : syllabusDropHighest;
+  dropLowest = effectiveDropLowest;
+  dropHighest = effectiveDropHighest;
   // Exclude excused and omitFromFinalGrade assignments from ALL calculations
   const countable = assignments.filter((a) => !a.excused && !a.omitFromFinalGrade);
 
@@ -133,7 +144,14 @@ function CategorySection({
   isWeighted: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const hasDropRules = group.dropLowest > 0 || group.dropHighest > 0;
+
+  const canvasHasDrops = group.dropLowest > 0 || group.dropHighest > 0;
+  const syllabusHasDrops = group.syllabusDropLowest > 0 || group.syllabusDropHighest > 0;
+  const usingsyllabusDrops = !canvasHasDrops && syllabusHasDrops;
+  const hasDropRules = canvasHasDrops || syllabusHasDrops;
+
+  const effectiveDropLowest = canvasHasDrops ? group.dropLowest : group.syllabusDropLowest;
+  const effectiveDropHighest = canvasHasDrops ? group.dropHighest : group.syllabusDropHighest;
 
   return (
     <div className="rounded-lg border border-border bg-card">
@@ -169,11 +187,18 @@ function CategorySection({
           />
         </div>
         {hasDropRules && (
-          <p className="mt-1 text-[11px] text-muted-foreground/70">
-            {group.dropLowest > 0 && `Lowest ${group.dropLowest} dropped`}
-            {group.dropLowest > 0 && group.dropHighest > 0 && " · "}
-            {group.dropHighest > 0 && `Highest ${group.dropHighest} dropped`}
-          </p>
+          <div className="mt-1 flex items-center gap-2">
+            <p className="text-[11px] text-muted-foreground/70">
+              {effectiveDropLowest > 0 && `Lowest ${effectiveDropLowest} dropped`}
+              {effectiveDropLowest > 0 && effectiveDropHighest > 0 && " · "}
+              {effectiveDropHighest > 0 && `Highest ${effectiveDropHighest} dropped`}
+            </p>
+            {usingsyllabusDrops && (
+              <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                from syllabus
+              </span>
+            )}
+          </div>
         )}
       </div>
 
@@ -244,6 +269,16 @@ function CategorySection({
                       <span className="ml-1 text-[11px]">({pct}%)</span>
                     )}
                   </span>
+                ) : a.gradescopeScore != null && a.gradescopeMaxScore != null ? (
+                  <span className="flex shrink-0 items-center gap-1.5 tabular-nums text-muted-foreground">
+                    {a.gradescopeScore}/{a.gradescopeMaxScore}
+                    <span
+                      className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+                      title="Score from Gradescope — not yet in Canvas"
+                    >
+                      GS
+                    </span>
+                  </span>
                 ) : (
                   <span className="shrink-0 text-[12px] text-muted-foreground">
                     {a.dueDate ? format(parseISO(a.dueDate), "MMM d") : "No due date"}
@@ -284,7 +319,10 @@ export function GradeBreakdown({
   // Compute stats for each group
   const groupStats = new Map<string, GroupStats>();
   for (const g of sorted) {
-    groupStats.set(g.id, computeGroupStats(g.assignments, g.dropLowest, g.dropHighest, g.neverDrop));
+    groupStats.set(g.id, computeGroupStats(
+      g.assignments, g.dropLowest, g.dropHighest, g.neverDrop,
+      g.syllabusDropLowest, g.syllabusDropHighest
+    ));
   }
 
   // Compute overall percentage (our own calculation for display alongside Canvas's)

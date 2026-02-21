@@ -29,6 +29,13 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://www.gradescope.com/courses/*/assignments*"],
+      "js": ["gradescope-content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "web_accessible_resources": [
     {
       "resources": ["lib/pdf.worker.min.mjs"],

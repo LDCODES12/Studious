@@ -58,6 +58,59 @@ Return a JSON object with an "events" array. Each event must have:
   return parsed.events ?? [];
 }
 
+// ─── Drop Rule Extraction ─────────────────────────────────────────────────────
+
+export interface ExtractedDropRule {
+  groupName: string;   // approximate group name from syllabus (e.g. "Quiz", "Homework")
+  dropLowest: number;
+  dropHighest: number;
+}
+
+/**
+ * Scans syllabus text for drop rules like "lowest quiz dropped", "drop 2 lowest homeworks".
+ * Returns rules per assignment group so they can be matched to Canvas groups.
+ */
+export async function extractDropRules(text: string): Promise<ExtractedDropRule[]> {
+  const truncated = text.slice(0, 8000);
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a grading policy parser. Find every statement in this syllabus that says a certain number of lowest or highest scores will be dropped for a category of assignments.
+
+Examples to detect:
+- "The lowest quiz score will be dropped" → groupName: "Quiz", dropLowest: 1
+- "We will drop your 2 lowest homework grades" → groupName: "Homework", dropLowest: 2
+- "Your worst lab score is removed" → groupName: "Lab", dropLowest: 1
+- "Drop lowest 3 participation scores" → groupName: "Participation", dropLowest: 3
+- "The highest extra credit will be dropped" → groupName: "Extra Credit", dropHighest: 1
+
+Rules:
+- Only extract explicitly stated drop rules, never infer them
+- groupName should be the category name as stated in the syllabus (e.g. "Quiz", "Homework", "Lab")
+- If no drop rules are found, return an empty array
+- Do not include regrade policies or late work policies
+
+Return JSON: { "rules": [{ "groupName": string, "dropLowest": number, "dropHighest": number }] }`,
+        },
+        { role: "user", content: truncated },
+      ],
+    }, { timeout: 20_000 });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return [];
+    const parsed = JSON.parse(content);
+    return (parsed.rules ?? []).filter(
+      (r: ExtractedDropRule) => r.dropLowest > 0 || r.dropHighest > 0
+    );
+  } catch {
+    return [];
+  }
+}
+
 export interface ParsedTopic {
   weekNumber: number;
   weekLabel: string;
