@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseSyllabusText, parseSyllabusTopics } from "@/lib/parse-syllabus";
+import { apiLogger } from "@/lib/logger";
 import { type SyllabusEvent } from "@/types";
 
 type TopicRow = {
@@ -12,12 +13,16 @@ type TopicRow = {
 };
 
 export async function POST(request: NextRequest) {
+  const log = apiLogger("POST /api/syllabus/parse");
+
   try {
     const { texts } = (await request.json()) as { texts: string[] };
 
     if (!texts || texts.length === 0) {
-      return NextResponse.json({ error: "No text provided" }, { status: 400 });
+      return log.respond(NextResponse.json({ error: "No text provided" }, { status: 400 }));
     }
+
+    log.info("parsing syllabus", { textCount: texts.length });
 
     const allEvents: SyllabusEvent[] = [];
     const topicsByCourse: Record<string, TopicRow[]> = {};
@@ -56,12 +61,15 @@ export async function POST(request: NextRequest) {
         })
     );
 
-    return NextResponse.json({ events: allEvents, topicsByCourse });
+    return log.respond(
+      NextResponse.json({ events: allEvents, topicsByCourse }),
+      { events: allEvents.length, topicCourses: Object.keys(topicsByCourse).length },
+    );
   } catch (error) {
-    console.error("Syllabus parse error:", error);
-    return NextResponse.json(
+    log.error("syllabus parse failed", { error: error instanceof Error ? error.message : String(error) });
+    return log.respond(NextResponse.json(
       { error: "Failed to parse syllabus" },
       { status: 500 }
-    );
+    ));
   }
 }

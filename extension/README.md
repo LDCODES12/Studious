@@ -9,6 +9,7 @@ A Chrome extension that pulls your entire Canvas course load into Study Circle w
 | Active courses (name, code, instructor, term) | Sidebar + Dashboard |
 | All assignments with due dates | Course → Deadlines tab |
 | Weekly modules (content, files, URLs) | Course → Content tab |
+| Gradescope assignments + scores | Course → Deadlines tab |
 
 Progress on Content tab topics is **never overwritten** — checking off a topic persists across syncs.
 
@@ -50,10 +51,16 @@ Progress on Content tab topics is **never overwritten** — checking off a topic
       ▼
 [Background service worker]
       │ POST /api/canvas/import   ← Bearer token auth
+      │ finds/opens Gradescope tab
+      │ injects gradescope-sync.js
       ▼
-[Study Circle API]
-      │ upserts courses, assignments, modules
-      │ returns summary
+[Content script on Gradescope page]
+      │ fetch all courses from dashboard
+      │ fetch assignments for each course
+      │ GS_SYNC_DATA → background
+      ▼
+[Background service worker]
+      │ POST /api/gradescope/import
       ▼
 [Popup] shows result card
 ```
@@ -64,6 +71,15 @@ The content script runs on your Canvas domain so the browser automatically inclu
 
 Enable **Auto-sync** in Settings to trigger a sync once per day whenever you have Canvas open.
 
+## Gradescope sync
+
+Gradescope assignments and scores are pulled in **two ways**:
+
+1. **During "Sync Now":** After Canvas data is saved, the extension automatically opens Gradescope, scrapes all your courses' assignments, and sends them to Study Circle. If you're not logged into Gradescope, this step is silently skipped.
+2. **On page visit:** When you visit any Gradescope course page (`gradescope.com/courses/12345`), the extension syncs that course's assignments in the background (debounced to once per hour per course).
+
+Both paths match Gradescope courses to existing Study Circle courses by course code (e.g. CHEM1752) or name similarity, then update or create assignments with Gradescope scores.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -72,3 +88,4 @@ Enable **Auto-sync** in Settings to trigger a sync once per day whenever you hav
 | "Invalid or revoked token" | Regenerate your token in Study Circle → Settings |
 | "Canvas API 401" | Log back into Canvas, then sync again |
 | Popup shows nothing after sync | Re-open the popup — results persist in storage |
+| No Gradescope data after sync | Make sure you're logged into Gradescope in Chrome; check extension console for `[gs-full-sync]` messages |

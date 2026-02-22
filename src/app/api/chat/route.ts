@@ -3,6 +3,7 @@ import { streamText, convertToModelMessages } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { apiLogger } from "@/lib/logger";
 import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
 
 export const maxDuration = 60;
@@ -13,7 +14,10 @@ export async function POST(request: NextRequest) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
   }
 
+  const log = apiLogger("POST /api/chat", session.user.id);
+
   const { messages: uiMessages, courseId } = await request.json();
+  log.info("chat request", { courseId, messageCount: uiMessages?.length ?? 0 });
 
   // Convert UI messages to model messages (async in v6)
   const messages = await convertToModelMessages(uiMessages);
@@ -101,5 +105,6 @@ Help the student understand concepts, explain topics, generate practice problems
     messages,
   });
 
+  log.info("streaming response started", { courseId });
   return result.toUIMessageStreamResponse();
 }

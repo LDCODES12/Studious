@@ -6,6 +6,7 @@
  *            → sends COURSE_SELECTION to popup for user to pick
  *   Phase 2: popup sends SYNC_SELECTED → set window.__sc_selectedIds → re-inject content.js
  *            → receives CANVAS_DATA → extract PDF text via offscreen doc → POST to Study Circle
+ *            → scrape Gradescope (all courses) → POST to gradescope/import → SYNC_COMPLETE
  *
  * Phase info is passed via window.__sc_selectedIds (set by inline executeScript),
  * not chrome.storage.session, to avoid MV3 service worker dormancy timing issues.
@@ -266,23 +267,123 @@ async function handleCanvasData(payload) {
     }
 
     const result = await res.json();
-    await chrome.storage.session.set({ syncRunning: false });
-    await chrome.storage.session.remove(["pendingCourses"]);
 
     // Persist full debug info so it survives popup close.
-    // Read any time: DevTools → Application → Local Storage → chrome-extension://...
-    // Key: "lastSyncDebug"
     if (result.debug) {
       await chrome.storage.local.set({ lastSyncDebug: result.debug });
       console.log("[worker] sync debug saved to chrome.storage.local (key: lastSyncDebug)");
     }
 
+    // ── Step 4: Scrape Gradescope (all courses) ──────────────────────────────
+    // Runs after canvas/import so courses exist in Study Circle for matching.
+    // Failure here is non-fatal — Canvas data is already saved.
+    try {
+      const gsResult = await syncGradescope(scUrl, apiToken);
+      if (gsResult) {
+        result.gradescope = gsResult;
+        console.log("[worker] Gradescope sync:", JSON.stringify(gsResult));
+      }
+    } catch (err) {
+      console.warn("[worker] Gradescope sync failed (non-fatal):", err?.message ?? err);
+    }
+
+    await chrome.storage.session.set({ syncRunning: false });
+    await chrome.storage.session.remove(["pendingCourses"]);
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {
     await closeOffscreen();
     await chrome.storage.session.set({ syncRunning: false });
     handleError(err.message ?? String(err));
+  }
+}
+
+// ── Gradescope sync (runs after canvas/import during full sync) ───────────────
+
+/**
+ * Find or create a Gradescope tab, inject the scraper, wait for data,
+ * then POST to the gradescope/import API. Returns the API response or null.
+ */
+async function syncGradescope(scUrl, apiToken) {
+  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Checking Gradescope…" });
+
+  let gsTabId = null;
+  let createdTab = false;
+
+  // Look for an existing Gradescope tab
+  const tabs = await chrome.tabs.query({ url: "https://www.gradescope.com/*" });
+  if (tabs.length > 0) {
+    gsTabId = tabs[0].id;
+  } else {
+    // Open one in the background — if user isn't logged in the scraper finds
+    // no courses and bails, which is the expected graceful-skip path.
+    try {
+      const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
+      createdTab = true;
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Gradescope took too long to load")), 15_000);
+        chrome.tabs.onUpdated.addListener(function listener(id, info) {
+          if (id === tab.id && info.status === "complete") {
+            clearTimeout(timeout);
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        });
+      });
+      gsTabId = tab.id;
+    } catch (err) {
+      console.warn("[worker] Could not open Gradescope tab:", err?.message);
+      return null;
+    }
+  }
+
+  try {
+    // Inject the all-courses scraper
+    await chrome.scripting.executeScript({ target: { tabId: gsTabId }, files: ["gradescope-sync.js"] });
+
+    // Wait for GS_SYNC_DATA (30s timeout — scraping multiple courses is fast but not instant)
+    const data = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve(null);
+      }, 30_000);
+
+      function listener(msg) {
+        if (msg.type !== "GS_SYNC_DATA") return;
+        chrome.runtime.onMessage.removeListener(listener);
+        clearTimeout(timer);
+        resolve(msg);
+      }
+
+      chrome.runtime.onMessage.addListener(listener);
+    });
+
+    if (!data?.courses?.length) {
+      console.log("[worker] Gradescope: no courses found —", data ? "user may not be logged in" : "timeout");
+      return null;
+    }
+
+    console.log(`[worker] Gradescope: scraped ${data.courses.length} course(s), posting to API…`);
+
+    // POST to the gradescope import endpoint
+    const gsRes = await fetch(`https://${scUrl}/api/gradescope/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiToken}` },
+      body: JSON.stringify({ courses: data.courses }),
+    });
+
+    if (!gsRes.ok) {
+      console.warn("[worker] Gradescope import API error:", gsRes.status);
+      return null;
+    }
+
+    return await gsRes.json();
+
+  } finally {
+    // Clean up: close the tab if we created it (don't close user's existing tab)
+    if (createdTab && gsTabId) {
+      try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
+    }
   }
 }
 

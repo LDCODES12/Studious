@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { apiLogger } from "@/lib/logger";
 import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -15,12 +16,13 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const log = apiLogger("GET /api/courses/quiz", session.user.id);
   const { courseId } = await params;
 
   const course = await db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
   });
-  if (!course) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!course) return log.respond(NextResponse.json({ error: "Not found" }, { status: 404 }));
 
   const quizzes = await db.quiz.findMany({
     where: { courseId },
@@ -28,14 +30,17 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     include: { _count: { select: { questions: true } } },
   });
 
-  return NextResponse.json({
-    quizzes: quizzes.map((q) => ({
-      id: q.id,
-      title: q.title,
-      createdAt: q.createdAt.toISOString(),
-      questionCount: q._count.questions,
-    })),
-  });
+  return log.respond(
+    NextResponse.json({
+      quizzes: quizzes.map((q) => ({
+        id: q.id,
+        title: q.title,
+        createdAt: q.createdAt.toISOString(),
+        questionCount: q._count.questions,
+      })),
+    }),
+    { courseId, quizCount: quizzes.length },
+  );
 }
 
 export async function POST(request: NextRequest, { params }: RouteParams) {
@@ -44,16 +49,19 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const log = apiLogger("POST /api/courses/quiz", session.user.id);
   const { courseId } = await params;
   const { title, materialIds } = ((await request.json().catch(() => ({}))) as {
     title?: string;
     materialIds?: string[];
   }) ?? {};
 
+  log.info("quiz generation started", { courseId, materialIds: materialIds?.length ?? 0 });
+
   const course = await db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
   });
-  if (!course) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!course) return log.respond(NextResponse.json({ error: "Not found" }, { status: 404 }));
 
   // Fetch study materials — optionally filtered to specific file IDs
   const materials = await db.courseMaterial.findMany({
@@ -66,10 +74,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   });
 
   if (materials.length === 0) {
-    return NextResponse.json(
+    return log.respond(NextResponse.json(
       { error: "No study materials uploaded yet. Upload lecture notes or slides first." },
       { status: 400 }
-    );
+    ));
   }
 
   // Concatenate rawText up to 24k chars
@@ -111,7 +119,7 @@ Return JSON with a "questions" array. Each item must have:
 
   const content = response.choices[0]?.message?.content;
   if (!content) {
-    return NextResponse.json({ error: "Failed to generate quiz" }, { status: 500 });
+    return log.respond(NextResponse.json({ error: "Failed to generate quiz" }, { status: 500 }));
   }
 
   let questions: { question: string; options: string[]; correctIndex: number; explanation?: string }[];
@@ -119,7 +127,7 @@ Return JSON with a "questions" array. Each item must have:
     const parsed = JSON.parse(content);
     questions = parsed.questions ?? [];
   } catch {
-    return NextResponse.json({ error: "Failed to parse quiz" }, { status: 500 });
+    return log.respond(NextResponse.json({ error: "Failed to parse quiz" }, { status: 500 }));
   }
 
   const quizTitle = title || `${course.name} Quiz — ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
@@ -140,12 +148,15 @@ Return JSON with a "questions" array. Each item must have:
     include: { questions: true },
   });
 
-  return NextResponse.json({
-    quiz: {
-      id: quiz.id,
-      title: quiz.title,
-      createdAt: quiz.createdAt.toISOString(),
-      questions: quiz.questions,
-    },
-  });
+  return log.respond(
+    NextResponse.json({
+      quiz: {
+        id: quiz.id,
+        title: quiz.title,
+        createdAt: quiz.createdAt.toISOString(),
+        questions: quiz.questions,
+      },
+    }),
+    { courseId, questionCount: quiz.questions.length },
+  );
 }

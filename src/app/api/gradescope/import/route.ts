@@ -1,6 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { apiLogger } from "@/lib/logger";
 import crypto from "crypto";
+
+/** CORS: allow requests from Gradescope (content script) and extension background. */
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
+function withCors(res: NextResponse) {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.headers.set(k, v));
+  return res;
+}
+
+export async function OPTIONS() {
+  return withCors(new NextResponse(null, { status: 204 }));
+}
 
 function sha256(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -70,19 +88,25 @@ interface GradescopeCourse {
 
 export async function POST(request: NextRequest) {
   const user = await authedUser(request);
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) {
+    return withCors(NextResponse.json({ error: "Unauthorized" }, { status: 401 }));
+  }
+
+  const log = apiLogger("POST /api/gradescope/import", user.id);
 
   let body: { courses: GradescopeCourse[] };
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    return log.respond(withCors(NextResponse.json({ error: "Invalid JSON" }, { status: 400 })));
   }
 
   const { courses } = body;
   if (!Array.isArray(courses) || courses.length === 0) {
-    return NextResponse.json({ updated: 0, created: 0 });
+    return log.respond(withCors(NextResponse.json({ updated: 0, created: 0 })), { gsCourses: 0 });
   }
+
+  log.info("import started", { gsCourses: courses.length });
 
   // Fetch all user courses with assignments
   const userCourses = await db.course.findMany({
@@ -131,7 +155,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!matchedCourse) {
-      console.log(`[gs-import] no match for "${gsCourse.name}" | available: ${userCourses.map((c) => `"${c.name}"`).join(", ")}`);
+      log.warn("no match for GS course", { gsName: gsCourse.name, available: userCourses.map((c) => c.name) });
       debugCourses.push({ gsName: gsCourse.name, matched: null, updated: 0, created: 0 });
       continue;
     }
@@ -221,9 +245,12 @@ export async function POST(request: NextRequest) {
       courseCreated++;
     }
 
-    console.log(`[gs-import] "${gsCourse.name}" → "${matchedCourse.name}": updated=${courseUpdated} created=${courseCreated}`);
+    log.info("course matched", { gsName: gsCourse.name, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
     debugCourses.push({ gsName: gsCourse.name, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
   }
 
-  return NextResponse.json({ ok: true, updated, created, debug: { courses: debugCourses } });
+  return log.respond(
+    withCors(NextResponse.json({ ok: true, updated, created, debug: { courses: debugCourses } })),
+    { gsUpdated: updated, gsCreated: created },
+  );
 }
