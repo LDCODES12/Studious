@@ -268,6 +268,15 @@ async function handleCanvasData(payload) {
     const result = await res.json();
     await chrome.storage.session.set({ syncRunning: false });
     await chrome.storage.session.remove(["pendingCourses"]);
+
+    // Persist full debug info so it survives popup close.
+    // Read any time: DevTools → Application → Local Storage → chrome-extension://...
+    // Key: "lastSyncDebug"
+    if (result.debug) {
+      await chrome.storage.local.set({ lastSyncDebug: result.debug });
+      console.log("[worker] sync debug saved to chrome.storage.local (key: lastSyncDebug)");
+    }
+
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {

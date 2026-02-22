@@ -584,8 +584,31 @@ export async function POST(request: NextRequest) {
   let aiTopicsCreated = 0;
   let syllabusFilesImported = 0;
 
-  // Collect per-course debug info for a single summary log
-  const debugRows: string[] = [];
+  // ── Per-course structured debug info ──────────────────────────────────────
+  // Built during processing, logged immediately per course (not batched at
+  // end so a timeout can't silently kill the log), and returned in the
+  // response body so the extension can persist it to chrome.storage.local.
+  type CandidateDebug = { label: string; chars: number; windowChars: number; score: number };
+  type AttemptDebug   = { source: string; format: string; weeksTotal: number; weeksRich: number; accepted: boolean };
+  type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
+  type CourseDebug = {
+    name: string;
+    existingAiTopics: number;
+    shouldRunAI: boolean;
+    syllabusBody: { chars: number; score: number } | null;
+    syllabusTexts: { fileName: string; chars: number; windowChars: number; score: number }[];
+    candidates: CandidateDebug[];
+    selectedSource: string;
+    materials: MaterialDebug[];
+    aiAttempts: AttemptDebug[];
+    auditFired: boolean;
+    auditDelta: string;
+    weeksWritten: number;
+    classScheduleSource: string;
+    status: string;
+    error?: string;
+  };
+  const allCourseDebug: CourseDebug[] = [];
   const scheduleRows: string[] = [];
 
   await Promise.all(
@@ -600,6 +623,23 @@ export async function POST(request: NextRequest) {
       // If we already parsed this course's syllabus, don't overwrite
       const shouldRunAI = existingAiTopics === 0;
 
+      const dbg: CourseDebug = {
+        name: c.name,
+        existingAiTopics,
+        shouldRunAI,
+        syllabusBody: null,
+        syllabusTexts: [],
+        candidates: [],
+        selectedSource: "none",
+        materials: [],
+        aiAttempts: [],
+        auditFired: false,
+        auditDelta: "",
+        weeksWritten: 0,
+        classScheduleSource: "",
+        status: "pending",
+      };
+
       // ── b+c) Pick best source by schedule-content density ─────────────────
       // Collect all candidate texts, score each, use the highest-scoring one.
       // "Longest text" is a poor proxy — a 10k-char policy page scores lower
@@ -612,8 +652,11 @@ export async function POST(request: NextRequest) {
       if (c.syllabusBody) {
         const bodyText = htmlToText(c.syllabusBody);
         if (bodyText.length >= 100) {
+          const win = bestWindow(bodyText);
+          const score = scheduleScore(win);
           // Score the best window — short HTML bodies are scored whole; large ones find densest slice
-          candidates.push({ text: bodyText, score: scheduleScore(bestWindow(bodyText)), label: "html-body" });
+          candidates.push({ text: bodyText, score, label: "html-body" });
+          dbg.syllabusBody = { chars: bodyText.length, score };
         }
       }
 
@@ -621,7 +664,12 @@ export async function POST(request: NextRequest) {
         const pdfText = st.text.trim();
         if (pdfText.length >= 100) {
           // Score using bestWindow so large PDFs with a dense schedule section aren't penalized by dilution
-          candidates.push({ text: pdfText, score: scheduleScore(bestWindow(pdfText)), label: st.fileName });
+          const win = bestWindow(pdfText);
+          const score = scheduleScore(win);
+          candidates.push({ text: pdfText, score, label: st.fileName });
+          dbg.syllabusTexts.push({ fileName: st.fileName, chars: pdfText.length, windowChars: win.length, score });
+        } else {
+          dbg.syllabusTexts.push({ fileName: st.fileName, chars: pdfText.length, windowChars: 0, score: 0 });
         }
 
         // Save as CourseMaterial (visible in the Materials tab)
@@ -695,8 +743,10 @@ export async function POST(request: NextRequest) {
                 },
               });
               importedFileNames.add(mt.fileName);
+              dbg.materials.push({ fileName: mt.fileName, detectedType: analysis.detectedType, chars: pdfText.length });
             } catch {
               // Don't fail the whole import if one material analysis errors
+              dbg.materials.push({ fileName: mt.fileName, detectedType: "error", chars: pdfText.length });
             }
           })
         );
@@ -742,6 +792,15 @@ export async function POST(request: NextRequest) {
       const candidatesSummary = candidates.length === 0
         ? "none"
         : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
+
+      // Record ranked candidates in debug info
+      dbg.candidates = candidates.map(cd => ({
+        label: cd.label,
+        chars: cd.text.length,
+        windowChars: bestWindow(cd.text).length,
+        score: cd.score,
+      }));
+      dbg.selectedSource = bestLabel;
 
       // ── d-pre) Syllabus drop rule extraction ──────────────────────────────
       // Only runs if at least one group still has syllabusDropLowest/Highest = 0.
@@ -811,6 +870,7 @@ export async function POST(request: NextRequest) {
             if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
           }
 
+          dbg.classScheduleSource = classScheduleSource + (classSchedule ? `(${classSchedule.meetings.length} meetings)` : "");
           scheduleRows.push(
             `${c.name}: ${classScheduleSource}` +
             (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
@@ -830,12 +890,14 @@ export async function POST(request: NextRequest) {
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
-      const aiStatus = !shouldRunAI ? "skip:has-ai-topics"
-        : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length})`
-        : `run(${syllabusText.length})`;
+      const aiStatus = !shouldRunAI ? `skip:has-ai-topics(${existingAiTopics})`
+        : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length}c)`
+        : `run(${syllabusText.length}c)`;
 
       if (!shouldRunAI || syllabusText.length < 500) {
-        debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  → ${aiStatus}`);
+        dbg.status = aiStatus;
+        allCourseDebug.push(dbg);
+        console.log(`[sync] ${c.name}: ${aiStatus} | sources: ${candidatesSummary}`);
         return;
       }
 
@@ -868,6 +930,15 @@ export async function POST(request: NextRequest) {
           ).length;
           const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
 
+          dbg.aiAttempts.push({
+            source: src.label,
+            format: fmt,
+            weeksTotal: result.length,
+            weeksRich: richWeeks,
+            accepted: isGoodResult,
+          });
+          console.log(`[sync] ${c.name} attempt[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+
           if (isGoodResult) {
             topics     = result;
             usedFormat = fmt;
@@ -880,7 +951,9 @@ export async function POST(request: NextRequest) {
         }
 
         if (topics.length === 0) {
-          debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  format: ${bestFormat}\n  → extractor: 0 contentful weeks from all ${candidates.length} source(s)`);
+          dbg.status = `ai-0-weeks(${candidates.length} sources tried)`;
+          allCourseDebug.push(dbg);
+          console.log(`[sync] ${c.name}: 0 contentful weeks from all ${candidates.length} source(s) | ${candidatesSummary}`);
           return;
         }
 
@@ -891,11 +964,15 @@ export async function POST(request: NextRequest) {
         // PDFs where the calendar is in the middle/end, not the first 6k chars.
         const preAuditCount = topics.length;
         const auditFired = needsAudit(topics);
+        dbg.auditFired = auditFired;
         if (auditFired) {
           const audited = await auditSchedule(topics, usedWindow);
           if (audited.length > 0) {
             topics    = audited;
             usedLabel = usedLabel + `+audited(${preAuditCount}→${audited.length})`;
+            dbg.auditDelta = `${preAuditCount}→${audited.length}`;
+          } else {
+            dbg.auditDelta = `${preAuditCount}→unchanged(audit returned 0)`;
           }
         }
 
@@ -924,21 +1001,24 @@ export async function POST(request: NextRequest) {
         });
 
         aiTopicsCreated += topics.length;
-        debugRows.push(
-          `${c.name}:\n  candidates: ${candidatesSummary}\n  used: ${usedLabel} [${usedFormat}]` +
-          (auditFired ? `` : ` (audit skipped)`) +
-          `\n  → ${topics.length} weeks saved`
+        dbg.weeksWritten = topics.length;
+        dbg.status = "ok";
+        allCourseDebug.push(dbg);
+        console.log(
+          `[sync] ${c.name}: OK ${topics.length} weeks written | src=${usedLabel} fmt=${usedFormat}` +
+          (auditFired ? ` audit(${dbg.auditDelta})` : ` audit-skipped`)
         );
       } catch (err) {
-        debugRows.push(`${c.name}:\n  candidates: ${candidatesSummary}\n  → ai-error: ${err}`);
+        dbg.status = "error";
+        dbg.error = String(err);
+        allCourseDebug.push(dbg);
+        console.error(`[sync] ${c.name}: ERROR ${err} | sources: ${candidatesSummary}`);
       }
     })
   );
 
-  // Single log entry — read with `vercel logs -x --query "canvas/import"` to see full output
-  console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
   if (scheduleRows.length > 0) {
-    console.log("[canvas-import] classSchedule summary:\n" + scheduleRows.join("\n"));
+    console.log("[sync] classSchedule:\n" + scheduleRows.join("\n"));
   }
 
   // 10. Auto-generate tasks from assignments
@@ -954,6 +1034,12 @@ export async function POST(request: NextRequest) {
       announcements: { new: newAnnouncements },
       tasks: { autoGenerated: tasksCreated },
       syllabus: { aiWeeks: aiTopicsCreated, filesImported: syllabusFilesImported },
+    },
+    // Full per-course debug info — extension saves this to chrome.storage.local
+    // so it's readable any time in DevTools → Application → Local Storage
+    debug: {
+      syncedAt: new Date().toISOString(),
+      courses: allCourseDebug,
     },
   });
 }
