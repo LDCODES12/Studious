@@ -809,10 +809,12 @@ export async function POST(request: NextRequest) {
         });
         if (!existingCourse?.classSchedule) {
           let classSchedule = null;
+          let classScheduleSource = "none";
 
-          // Source 1: syllabus text (AI)
+          // Source 1: syllabus text (AI) — first 6k chars where meeting info lives
           if (syllabusText.length >= 200) {
             classSchedule = await extractClassSchedule(syllabusText);
+            if (classSchedule) classScheduleSource = "syllabus-ai";
           }
 
           // Source 2: Canvas calendar events (deterministic fallback)
@@ -822,10 +824,13 @@ export async function POST(request: NextRequest) {
               c.termStartAt,
               c.termEndAt,
             );
-            if (classSchedule) {
-              console.log(`[import] classSchedule from calendarEvents for ${c.name}: ${classSchedule.meetings.length} meeting(s)`);
-            }
+            if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
           }
+
+          console.log(
+            `[import] classSchedule ${c.name}: ${classScheduleSource}` +
+            (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
+          );
 
           if (classSchedule) {
             await db.course.update({
@@ -833,6 +838,8 @@ export async function POST(request: NextRequest) {
               data: { classSchedule: classSchedule as object },
             });
           }
+        } else {
+          console.log(`[import] classSchedule ${c.name}: already set — skip`);
         }
       } catch {
         // Don't fail the whole import on this optional enrichment

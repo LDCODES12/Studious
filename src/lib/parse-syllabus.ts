@@ -281,8 +281,9 @@ export interface ExtractedClassSchedule {
 export async function extractClassSchedule(
   text: string
 ): Promise<ExtractedClassSchedule | null> {
-  // Focus on the first ~3000 chars — schedule info lives in the header
-  const truncated = text.slice(0, 3000);
+  // Focus on the first ~6000 chars — schedule info lives in the header but
+  // large PDFs often have a full page of title/prerequisites before meeting times.
+  const truncated = text.slice(0, 6000);
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
