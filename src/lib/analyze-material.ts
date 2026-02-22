@@ -27,7 +27,9 @@ export async function autoRouteMaterial(
   }));
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
+    temperature: 0,
+    seed: 1,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -70,7 +72,9 @@ export async function analyzeCourseMaterial(
   topicLabels: string[]
 ): Promise<MaterialAnalysis> {
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
+    temperature: 0,
+    seed: 1,
     response_format: { type: "json_object" },
     messages: [
       {

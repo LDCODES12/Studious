@@ -12,7 +12,9 @@ export interface ParsedEvent {
 
 export async function parseSyllabusText(text: string): Promise<ParsedEvent[]> {
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
+    temperature: 0,
+    seed: 1,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -74,7 +76,9 @@ export async function extractDropRules(text: string): Promise<ExtractedDropRule[
   const truncated = text.slice(0, 8000);
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini-2024-07-18",
+      temperature: 0,
+      seed: 1,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -213,7 +217,9 @@ export async function auditSchedule(
   sourceText: string
 ): Promise<ParsedTopic[]> {
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o-mini-2024-07-18",
+    temperature: 0,
+    seed: 1,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -286,7 +292,9 @@ export async function extractClassSchedule(
   const truncated = text.slice(0, 6000);
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini-2024-07-18",
+      temperature: 0,
+      seed: 1,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -447,10 +455,12 @@ export async function parseSyllabusTopics(text: string, hint?: string): Promise<
   // Calendar grid format requires stronger spatial reasoning to follow the tab structure —
   // use gpt-4o for those cases. Everything else is fine with gpt-4o-mini.
   const isCalendarGrid = hint?.includes("weekly calendar grid") ?? false;
-  const model = isCalendarGrid ? "gpt-4o" : "gpt-4o-mini";
+  const model = isCalendarGrid ? "gpt-4o-2024-08-06" : "gpt-4o-mini-2024-07-18";
 
   const response = await openai.chat.completions.create({
     model,
+    temperature: 0,
+    seed: 1,
     response_format: { type: "json_object" },
     messages: [
       {

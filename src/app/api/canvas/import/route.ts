@@ -771,17 +771,19 @@ export async function POST(request: NextRequest) {
         : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
 
       // ── d-pre) Syllabus drop rule extraction ──────────────────────────────
-      // Runs independently of topic processing — even if topics already exist.
-      // Detects "drop lowest N" rules from syllabus text and stores them on
-      // AssignmentGroups that Canvas left with dropLowest/dropHighest = 0.
+      // Only runs if at least one group still has syllabusDropLowest/Highest = 0.
+      // Skipped on subsequent syncs once rules are detected — avoids redundant AI calls.
       if (syllabusText.length >= 200) {
         try {
-          const dropRules = await extractDropRules(syllabusText);
+          const groups = await db.assignmentGroup.findMany({
+            where: { courseId: scCourseId },
+            select: { id: true, name: true, dropLowest: true, dropHighest: true, syllabusDropLowest: true, syllabusDropHighest: true },
+          });
+          const needsDropRules = groups.some(
+            (g) => g.syllabusDropLowest === 0 && g.syllabusDropHighest === 0
+          );
+          const dropRules = needsDropRules ? await extractDropRules(syllabusText) : [];
           if (dropRules.length > 0) {
-            const groups = await db.assignmentGroup.findMany({
-              where: { courseId: scCourseId },
-              select: { id: true, name: true, dropLowest: true, dropHighest: true },
-            });
             const norm = (s: string) => s.toLowerCase().replace(/s+$/, "").trim();
             for (const rule of dropRules) {
               const match = groups.find(
