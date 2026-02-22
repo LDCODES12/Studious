@@ -146,8 +146,8 @@ export function sanitizeSchedule(weeks: ParsedTopic[]): ParsedTopic[] {
     // 1. Strip policy strings from topic/reading arrays within each week
     .map((w) => ({
       ...w,
-      topics: w.topics.filter((t) => !POLICY_TOPIC_RX.test(t)),
-      readings: w.readings.filter((r) => !POLICY_TOPIC_RX.test(r)),
+      topics: (w.topics ?? []).filter((t) => !POLICY_TOPIC_RX.test(t)),
+      readings: (w.readings ?? []).filter((r) => !POLICY_TOPIC_RX.test(r)),
     }))
     // 2. Drop weeks whose label sounds like admin-only AND have no real content
     .filter((w) => {
@@ -184,7 +184,7 @@ export function needsAudit(weeks: ParsedTopic[]): boolean {
   if (weeks.length < 5) return true; // suspiciously few weeks (< 5 catches failures without over-auditing short intensive courses)
 
   const emptyWeeks = weeks.filter(
-    (w) => w.topics.length === 0 && w.readings.length === 0 && !w.notes
+    (w) => (w.topics ?? []).length === 0 && (w.readings ?? []).length === 0 && !w.notes
   ).length;
   if (emptyWeeks / weeks.length > 0.25) return true; // >25% empty rows
 
