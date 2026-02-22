@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
   parseSyllabusTopics,
@@ -378,131 +379,106 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // 5. Upsert assignment groups
+  // 5. Upsert assignment groups — parallel upserts (@@unique on courseId+canvasGroupId)
   let newGroups = 0;
   let updatedGroups = 0;
   // Maps "scCourseId:canvasGroupId" → SC AssignmentGroup ID
   const groupIdMap = new Map<string, string>();
+  const allScCourseIds = [...courseIdMap.values()];
 
-  for (const g of rawGroups) {
-    const scCourseId = courseIdMap.get(g.courseId);
-    if (!scCourseId) continue;
-
-    const existing = await db.assignmentGroup.findUnique({
-      where: { courseId_canvasGroupId: { courseId: scCourseId, canvasGroupId: g.canvasGroupId } },
-      select: { id: true },
+  {
+    // Fetch existing to distinguish new vs updated for counters
+    const existingGroupsDb = await db.assignmentGroup.findMany({
+      where: { courseId: { in: allScCourseIds } },
+      select: { courseId: true, canvasGroupId: true },
     });
+    const existingGroupSet = new Set(existingGroupsDb.map(g => `${g.courseId}:${g.canvasGroupId}`));
 
-    if (existing) {
-      await db.assignmentGroup.update({
-        where: { id: existing.id },
-        data: {
-          name: g.name,
-          weight: g.weight,
-          position: g.position,
-          dropLowest: g.dropLowest,
-          dropHighest: g.dropHighest,
-          neverDrop: g.neverDrop ?? [],
-        },
-      });
-      groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, existing.id);
-      updatedGroups++;
-    } else {
-      const created = await db.assignmentGroup.create({
-        data: {
-          courseId: scCourseId,
-          canvasGroupId: g.canvasGroupId,
-          name: g.name,
-          weight: g.weight,
-          position: g.position,
-          dropLowest: g.dropLowest,
-          dropHighest: g.dropHighest,
-          neverDrop: g.neverDrop ?? [],
-        },
-      });
-      groupIdMap.set(`${scCourseId}:${g.canvasGroupId}`, created.id);
-      newGroups++;
+    // All upserts run in parallel — AssignmentGroup has @@unique([courseId, canvasGroupId])
+    const upserted = await Promise.all(
+      rawGroups
+        .filter(g => courseIdMap.has(g.courseId))
+        .map(async (g) => {
+          const scCourseId = courseIdMap.get(g.courseId)!;
+          const fields = { name: g.name, weight: g.weight, position: g.position, dropLowest: g.dropLowest, dropHighest: g.dropHighest, neverDrop: g.neverDrop ?? [] };
+          const result = await db.assignmentGroup.upsert({
+            where: { courseId_canvasGroupId: { courseId: scCourseId, canvasGroupId: g.canvasGroupId } },
+            update: fields,
+            create: { courseId: scCourseId, canvasGroupId: g.canvasGroupId, ...fields },
+            select: { id: true, courseId: true, canvasGroupId: true },
+          });
+          const key = `${scCourseId}:${g.canvasGroupId}`;
+          if (existingGroupSet.has(key)) updatedGroups++; else newGroups++;
+          return result;
+        })
+    );
+    for (const g of upserted) {
+      groupIdMap.set(`${g.courseId}:${g.canvasGroupId}`, g.id);
     }
   }
 
-  // 6. Upsert assignments
+  // 6. Upsert assignments — bulk fetch then createMany + parallel updates
   let newAssignments = 0;
   let updatedAssignments = 0;
 
-  for (const a of assignments) {
-    const scCourseId = courseIdMap.get(a.courseId);
-    if (!scCourseId) continue;
-
-    const canvasAssId = String(a.id);
-    const dueDate = toDateOnly(a.dueDate);
-    const type = inferType(a.title, a.submissionTypes ?? [a.submissionType], a.gradingType ?? null);
-
-    const description = a.description
-      ? a.description.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000) || null
-      : null;
-
-    const existing = await db.assignment.findFirst({
-      where: { courseId: scCourseId, canvasAssignmentId: canvasAssId },
-      select: { id: true },
+  {
+    // One query to find all existing Canvas assignments for this user's courses
+    const existingAssDb = await db.assignment.findMany({
+      where: { courseId: { in: allScCourseIds }, canvasAssignmentId: { not: null } },
+      select: { id: true, courseId: true, canvasAssignmentId: true },
     });
+    const existingAssMap = new Map(
+      existingAssDb.map(a => [`${a.courseId}:${a.canvasAssignmentId}`, a.id])
+    );
 
-    // Canvas is the source of truth for status — always write it
-    const status = a.submissionStatus ?? "not_started";
+    type AssCreate = Prisma.AssignmentCreateManyInput;
+    type AssUpdate = { id: string; data: Prisma.AssignmentUncheckedUpdateInput };
+    const assCreates: AssCreate[] = [];
+    const assUpdates: AssUpdate[] = [];
 
-    // Link to assignment group if available
-    const scGroupId = a.assignmentGroupId
-      ? groupIdMap.get(`${scCourseId}:${String(a.assignmentGroupId)}`)
-      : undefined;
+    for (const a of assignments) {
+      const scCourseId = courseIdMap.get(a.courseId);
+      if (!scCourseId) continue;
 
-    const newFields = {
-      gradingType: a.gradingType ?? null,
-      submissionTypes: a.submissionTypes ?? [],
-      omitFromFinalGrade: a.omitFromFinalGrade ?? false,
-      excused: a.excused ?? false,
-      late: a.late ?? false,
-      missing: a.missing ?? false,
-    };
+      const canvasAssId = String(a.id);
+      const dueDate = toDateOnly(a.dueDate);
+      const type = inferType(a.title, a.submissionTypes ?? [a.submissionType], a.gradingType ?? null);
+      const description = a.description
+        ? a.description.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000) || null
+        : null;
+      const status = a.submissionStatus ?? "not_started";
+      const scGroupId = a.assignmentGroupId
+        ? groupIdMap.get(`${scCourseId}:${String(a.assignmentGroupId)}`)
+        : undefined;
+      const extraFields = {
+        gradingType: a.gradingType ?? null,
+        submissionTypes: a.submissionTypes ?? [],
+        omitFromFinalGrade: a.omitFromFinalGrade ?? false,
+        excused: a.excused ?? false,
+        late: a.late ?? false,
+        missing: a.missing ?? false,
+      };
 
-    if (existing) {
-      await db.assignment.update({
-        where: { id: existing.id },
-        data: {
-          title: a.title,
-          dueDate,
-          description,
-          canvasUrl: a.htmlUrl,
-          pointsPossible: a.pointsPossible,
-          status,
-          score: a.score ?? null,
-          submittedAt: a.submittedAt ?? null,
-          assignmentGroupId: scGroupId ?? null,
-          ...newFields,
-        },
-      });
-      updatedAssignments++;
-    } else {
-      await db.assignment.create({
-        data: {
-          courseId: scCourseId,
-          canvasAssignmentId: canvasAssId,
-          title: a.title,
-          type,
-          dueDate,
-          description,
-          canvasUrl: a.htmlUrl ?? null,
-          pointsPossible: a.pointsPossible ?? null,
-          status,
-          score: a.score ?? null,
-          submittedAt: a.submittedAt ?? null,
-          assignmentGroupId: scGroupId ?? null,
-          ...newFields,
-        },
-      });
-      newAssignments++;
+      const existingId = existingAssMap.get(`${scCourseId}:${canvasAssId}`);
+      if (existingId) {
+        assUpdates.push({
+          id: existingId,
+          data: { title: a.title, dueDate, description, canvasUrl: a.htmlUrl, pointsPossible: a.pointsPossible, status, score: a.score ?? null, submittedAt: a.submittedAt ?? null, assignmentGroupId: scGroupId ?? null, ...extraFields },
+        });
+        updatedAssignments++;
+      } else {
+        assCreates.push({
+          courseId: scCourseId, canvasAssignmentId: canvasAssId, title: a.title, type, dueDate, description, canvasUrl: a.htmlUrl ?? null, pointsPossible: a.pointsPossible ?? null, status, score: a.score ?? null, submittedAt: a.submittedAt ?? null, assignmentGroupId: scGroupId ?? null, ...extraFields,
+        });
+        newAssignments++;
+      }
     }
+
+    if (assCreates.length > 0) await db.assignment.createMany({ data: assCreates });
+    await Promise.all(assUpdates.map(({ id, data }) => db.assignment.update({ where: { id }, data })));
   }
 
-  // 7. Upsert modules as CourseTopic (fallback — may be replaced by AI below)
+  // 7. Upsert modules as CourseTopic — bulk fetch then createMany + parallel updates
   //
   // ALL modules are imported regardless of their naming convention. Canvas module
   // data is real course data the student has access to and serves as a meaningful
@@ -511,42 +487,39 @@ export async function POST(request: NextRequest) {
   let newModules = 0;
   let updatedModules = 0;
 
-  for (const mod of modules) {
-    const scCourseId = courseIdMap.get(mod.courseId);
-    if (!scCourseId) continue;
-
-    const canvasModId = String(mod.moduleId);
-
-    const existing = await db.courseTopic.findFirst({
-      where: { courseId: scCourseId, canvasModuleId: canvasModId },
-      select: { id: true, completedTopics: true },
+  {
+    const existingModDb = await db.courseTopic.findMany({
+      where: { courseId: { in: allScCourseIds }, canvasModuleId: { not: null } },
+      select: { id: true, courseId: true, canvasModuleId: true },
     });
+    const existingModMap = new Map(
+      existingModDb.map(m => [`${m.courseId}:${m.canvasModuleId}`, m.id])
+    );
 
-    if (existing) {
-      await db.courseTopic.update({
-        where: { id: existing.id },
-        data: {
-          weekNumber: mod.position,
-          weekLabel: mod.name,
-          topics: mod.topics,
-          readings: mod.readings,
-          // Preserve completedTopics — never overwrite user progress
-        },
-      });
-      updatedModules++;
-    } else {
-      await db.courseTopic.create({
-        data: {
-          courseId: scCourseId,
-          canvasModuleId: canvasModId,
-          weekNumber: mod.position,
-          weekLabel: mod.name,
-          topics: mod.topics,
-          readings: mod.readings,
-        },
-      });
-      newModules++;
+    type ModCreate = Prisma.CourseTopicCreateManyInput;
+    type ModUpdate = { id: string; data: Prisma.CourseTopicUpdateInput };
+    const modCreates: ModCreate[] = [];
+    const modUpdates: ModUpdate[] = [];
+
+    for (const mod of modules) {
+      const scCourseId = courseIdMap.get(mod.courseId);
+      if (!scCourseId) continue;
+      const canvasModId = String(mod.moduleId);
+      const existingId = existingModMap.get(`${scCourseId}:${canvasModId}`);
+      if (existingId) {
+        modUpdates.push({
+          id: existingId,
+          data: { weekNumber: mod.position, weekLabel: mod.name, topics: mod.topics, readings: mod.readings },
+        });
+        updatedModules++;
+      } else {
+        modCreates.push({ courseId: scCourseId, canvasModuleId: canvasModId, weekNumber: mod.position, weekLabel: mod.name, topics: mod.topics, readings: mod.readings });
+        newModules++;
+      }
     }
+
+    if (modCreates.length > 0) await db.courseTopic.createMany({ data: modCreates });
+    await Promise.all(modUpdates.map(({ id, data }) => db.courseTopic.update({ where: { id }, data })));
   }
 
   // 8. Upsert announcements
@@ -565,36 +538,34 @@ export async function POST(request: NextRequest) {
       .trim();
   }
 
-  for (const ann of announcements) {
-    const scCourseId = courseIdMap.get(ann.courseId);
-    if (!scCourseId || !ann.postedAt) continue;
-
-    const existing = await db.announcement.findFirst({
-      where: { courseId: scCourseId, canvasId: ann.canvasId },
-      select: { id: true },
+  // Bulk fetch existing announcements, then createMany + parallel updates
+  {
+    const validAnns = announcements.filter(ann => courseIdMap.has(ann.courseId) && !!ann.postedAt);
+    const existingAnnDb = await db.announcement.findMany({
+      where: { courseId: { in: allScCourseIds } },
+      select: { id: true, courseId: true, canvasId: true },
     });
+    const existingAnnMap = new Map(existingAnnDb.map(a => [`${a.courseId}:${a.canvasId}`, a.id]));
 
-    if (existing) {
-      await db.announcement.update({
-        where: { id: existing.id },
-        data: {
-          title: ann.title,
-          body: decodeAnnouncementBody(ann.body),
-          postedAt: ann.postedAt,
-        },
-      });
-    } else {
-      await db.announcement.create({
-        data: {
-          courseId: scCourseId,
-          canvasId: ann.canvasId,
-          title: ann.title,
-          body: decodeAnnouncementBody(ann.body),
-          postedAt: ann.postedAt,
-        },
-      });
-      newAnnouncements++;
+    type AnnCreate = Prisma.AnnouncementCreateManyInput;
+    type AnnUpdate = { id: string; data: Prisma.AnnouncementUpdateInput };
+    const annCreates: AnnCreate[] = [];
+    const annUpdates: AnnUpdate[] = [];
+
+    for (const ann of validAnns) {
+      const scCourseId = courseIdMap.get(ann.courseId)!;
+      const body = decodeAnnouncementBody(ann.body);
+      const existingId = existingAnnMap.get(`${scCourseId}:${ann.canvasId}`);
+      if (existingId) {
+        annUpdates.push({ id: existingId, data: { title: ann.title, body, postedAt: ann.postedAt! } });
+      } else {
+        annCreates.push({ courseId: scCourseId, canvasId: ann.canvasId, title: ann.title, body, postedAt: ann.postedAt! });
+        newAnnouncements++;
+      }
     }
+
+    if (annCreates.length > 0) await db.announcement.createMany({ data: annCreates });
+    await Promise.all(annUpdates.map(({ id, data }) => db.announcement.update({ where: { id }, data })));
   }
 
   // 9. AI syllabus processing — run all courses in parallel for speed
