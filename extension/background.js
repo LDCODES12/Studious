@@ -189,49 +189,50 @@ async function handleCanvasData(payload) {
         label: `Extracting text from ${totalPdfs} syllabus PDF${totalPdfs !== 1 ? "s" : ""}…`,
       });
 
+      // Flatten all PDFs from all courses into one ordered list so the pdfjs
+      // worker processes exactly one document at a time. Running multiple pdfjs
+      // documents concurrently in the shared worker causes "Invalid page request"
+      // errors mid-document because the worker crashes under memory pressure.
+      for (const course of payload.courses) {
+        course.syllabusTexts = [];
+        course.materialTexts = [];
+      }
+
+      const allPdfTasks = [];
+      for (const course of payload.courses) {
+        for (const { fileName, url } of (course.syllabusFileUrls ?? [])) {
+          allPdfTasks.push({ course, type: "syllabus", fileName, url });
+        }
+        for (const { fileName, url } of (course.materialFileUrls ?? [])) {
+          allPdfTasks.push({ course, type: "material", fileName, url });
+        }
+      }
+
       await ensureOffscreen();
 
-      // Process all courses in parallel; within each course, process files
-      // sequentially to avoid flooding the offscreen doc with concurrent messages.
-      await Promise.all(
-        payload.courses.map(async (course) => {
-          // ── Syllabus PDFs ──────────────────────────────────────────────────
-          const syllabusTexts = [];
-          for (const { fileName, url } of (course.syllabusFileUrls ?? [])) {
-            const messageId = crypto.randomUUID();
-            const t0   = Date.now();
-            const text = await parsePdfViaOffscreen(url, messageId);
-            const ms   = Date.now() - t0;
-            if (text.length > 0) {
-              console.log(`[worker] ${course.name} | syllabus "${fileName}": ${text.length}c in ${ms}ms`);
-            } else {
-              console.warn(`[worker] ${course.name} | syllabus "${fileName}": 0 chars after ${ms}ms`);
-            }
-            syllabusTexts.push({ fileName, text });
-          }
-          course.syllabusTexts = syllabusTexts;
-          delete course.syllabusFileUrls;
-
-          // ── Course material PDFs (problem sets, lecture notes, etc.) ────────
-          const materialTexts = [];
-          for (const { fileName, url } of (course.materialFileUrls ?? [])) {
-            const messageId = crypto.randomUUID();
-            const t0   = Date.now();
-            const text = await parsePdfViaOffscreen(url, messageId);
-            const ms   = Date.now() - t0;
-            if (text.length > 0) {
-              console.log(`[worker] ${course.name} | material "${fileName}": ${text.length}c in ${ms}ms`);
-            } else {
-              console.warn(`[worker] ${course.name} | material "${fileName}": 0 chars after ${ms}ms`);
-            }
-            materialTexts.push({ fileName, text });
-          }
-          course.materialTexts = materialTexts;
-          delete course.materialFileUrls;
-        })
-      );
+      for (const task of allPdfTasks) {
+        const messageId = crypto.randomUUID();
+        const t0   = Date.now();
+        const text = await parsePdfViaOffscreen(task.url, messageId);
+        const ms   = Date.now() - t0;
+        if (text.length > 0) {
+          console.log(`[worker] ${task.course.name} | ${task.type} "${task.fileName}": ${text.length}c in ${ms}ms`);
+        } else {
+          console.warn(`[worker] ${task.course.name} | ${task.type} "${task.fileName}": 0 chars after ${ms}ms`);
+        }
+        if (task.type === "syllabus") {
+          task.course.syllabusTexts.push({ fileName: task.fileName, text });
+        } else {
+          task.course.materialTexts.push({ fileName: task.fileName, text });
+        }
+      }
 
       await closeOffscreen();
+
+      for (const course of payload.courses) {
+        delete course.syllabusFileUrls;
+        delete course.materialFileUrls;
+      }
     } else {
       // No PDFs — still clean up fields so the server type is consistent
       for (const course of payload.courses) {

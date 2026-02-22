@@ -90,6 +90,10 @@ async function extractTextFromUrl(url) {
     console.warn("[offscreen] low text yield — PDF may be scanned/image-only:", text.length, "chars for", pdf.numPages, "pages");
   }
 
+  // Release pdfjs internal resources. Without this, memory accumulates across
+  // documents and can cause the shared worker to crash mid-extraction.
+  pdf.destroy();
+
   return text;
 }
 
