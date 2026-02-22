@@ -120,7 +120,19 @@ function extractPageText(items) {
 
   let columnBoundary = null; // X coordinate separating left from right column
 
-  if (xRange > 180 && textItems.length > 20) {
+  // Skip two-column detection for calendar grid pages (7-column Sun–Sat layout).
+  // A calendar grid has ~6 evenly-spaced column boundaries; the biggest-gap
+  // heuristic would fire on the middle boundary and split the grid into
+  // "left 3.5 days" / "right 3.5 days", destroying the weekly row grouping.
+  // Instead we let assembleLines group items by Y (row = one week) and insert
+  // tabs between the 7 day cells so the row structure is preserved intact.
+  const rawPageText = textItems.map((it) => it.str).join(" ").toLowerCase();
+  const dayNameHits = (rawPageText.match(
+    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/g
+  ) ?? []).length;
+  const isCalendarGrid = dayNameHits >= 5;
+
+  if (!isCalendarGrid && xRange > 180 && textItems.length > 20) {
     // Find the largest gap between consecutive sorted X values
     let maxGap = 0;
     let gapAt  = -1;
@@ -136,6 +148,10 @@ function extractPageText(items) {
       columnBoundary = (xs[gapAt - 1] + xs[gapAt]) / 2;
       console.log("[offscreen] two-column layout detected, boundary X ≈", columnBoundary.toFixed(1));
     }
+  }
+
+  if (isCalendarGrid) {
+    console.log("[offscreen] calendar grid detected — skipping two-column heuristic, dayNameHits:", dayNameHits);
   }
 
   // ── Line assembly ───────────────────────────────────────────────────────────

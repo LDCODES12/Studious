@@ -185,8 +185,11 @@ function detectSourceFormat(text: string): string {
 
   // Detect Sun-Mon-Tue-Wed-Thu-Fri-Sat calendar grid (common in lab/science syllabi)
   // These appear as color-coded weekly grids with day-names as column headers.
-  // After PDF extraction they look like date+content cells interleaved row by row.
-  const dayNameHits = (text.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi) ?? []).length;
+  // Match both full day names (Sunday) and common abbreviations (Sun, Su, Mo, Tu...).
+  // The PDF extractor preserves rows as tab-separated lines; the AI uses tabs to parse.
+  const dayNameHits = (text.match(
+    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/gi
+  ) ?? []).length;
   if (dayNameHits >= 5) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
 
   const tabLines = lines.filter((l) => l.includes("\t")).length;

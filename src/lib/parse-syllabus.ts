@@ -366,18 +366,19 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
 - "html-list" → bullet or numbered list items are individual schedule entries
 - "paragraph text" → schedule may be embedded in prose; look harder for patterns
 - "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)" →
-    PDF text extraction destroys the 7-column grid structure — do NOT try to find exact grid rows.
-    Use this proximity-scan strategy instead:
-    1. Find ALL named events in the text: look for patterns like "Experiment 1", "Experiment 2", "Lecture 1",
-       "Lab 1", "Quiz 1", "Unit 1", or any numbered/named recurring event.
-    2. For each event, find the nearest date string in the surrounding ±200 characters (e.g. "Jan 14", "Feb 3").
-    3. Use that date to determine the week (Mon–Sun). Set startDate to that Monday as YYYY-MM-DD.
-    4. weekLabel = the event name(s) for that week (e.g. "Experiment 1: Gas Constant").
+    The PDF extractor preserves the calendar structure: each calendar ROW becomes ONE text line,
+    with TAB characters (\t) separating the 7 day cells (Sun\tMon\tTue\tWed\tThu\tFri\tSat).
+    Primary strategy — use the tab structure:
+    1. Find the header line containing day names separated by tabs (Sun/Mon/.../Sat or full names).
+    2. Each subsequent line = one week. Split on \t to get the 7 day cells.
+    3. Each cell may contain a date, an event name like "Experiment 1: Gas Constant", both, or be empty.
+    4. Collect all event names from the 7 cells of that line → that is ONE week entry.
+    5. Set startDate to the Monday date found in that line (YYYY-MM-DD).
+    6. weekLabel = the main event name(s) (e.g. "Experiment 1: Gas Constant").
        Also add each event name to topics[] — e.g. topics: ["Experiment 1: Gas Constant"].
-    5. Group multiple events that fall in the same Mon–Sun week into ONE week entry.
-    6. If a cell says "No experiment", "No class", "MLK Day", or similar, record it as notes for that week.
-    CRITICAL: Even if the structure is ambiguous or garbled, ALWAYS extract whatever named events you can find
-    with their approximate dates. Return an empty array ONLY if there are literally zero event names in the text.
+    7. If a cell says "No experiment", "No class", "MLK Day" etc., record it as notes for that week.
+    Fallback (if tab structure is garbled or absent): scan for named events near dates using proximity.
+    CRITICAL: Return an empty array ONLY if there are literally zero event names in the entire text.
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly
