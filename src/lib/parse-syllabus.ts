@@ -342,8 +342,13 @@ Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semeste
 export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
 
+  // Calendar grid format requires stronger spatial reasoning to follow the tab structure —
+  // use gpt-4o for those cases. Everything else is fine with gpt-4o-mini.
+  const isCalendarGrid = hint?.includes("weekly calendar grid") ?? false;
+  const model = isCalendarGrid ? "gpt-4o" : "gpt-4o-mini";
+
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model,
     response_format: { type: "json_object" },
     messages: [
       {
