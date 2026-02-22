@@ -509,11 +509,26 @@ function extractScheduleSection(html) {
             if (seenIds.has(cid) || materialSeenIds.has(cid)) continue;
             materialSeenIds.add(cid);
 
-            const candidateFileName = item.title ?? "file.pdf";
-            // Only track PDF files as candidates
-            if (!candidateFileName.toLowerCase().endsWith(".pdf")) continue;
+            // content_details is included via include[]=content_details on the modules
+            // endpoint — it gives us the real filename + MIME type + size without
+            // needing a separate /files/:id API call for each candidate.
+            const details = item.content_details ?? {};
+            // item.title = the link label in the module (often human-readable, no extension)
+            // details.display_name = the actual stored filename (usually has extension)
+            const candidateFileName = details.display_name ?? item.title ?? "file.pdf";
+            const contentType = details.content_type ?? "";
 
-            // Add to candidates list — no API call needed here
+            // Only track PDF files as candidates
+            const isPdfCandidate =
+              contentType.includes("pdf") ||
+              candidateFileName.toLowerCase().endsWith(".pdf");
+            if (!isPdfCandidate) continue;
+
+            // Skip textbook-sized files from the candidate list (> 20 MB)
+            const candidateSize = details.size ?? 0;
+            if (candidateSize > 20_000_000) continue;
+
+            // Add to candidates list — no extra API call needed
             course.materialCandidates.push({
               fileName: candidateFileName,
               moduleName: mod.name ?? "Unknown Module",
