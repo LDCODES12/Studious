@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { Trash2 } from "lucide-react";
+import { Trash2, ChevronRight } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
 interface QuizQuestion {
@@ -26,17 +26,158 @@ interface ActiveQuiz {
   questions: QuizQuestion[];
 }
 
+interface CourseMaterial {
+  id: string;
+  fileName: string;
+  detectedType: string;
+  relatedTopics: string[];
+  storedForAI: boolean;
+}
+
 interface QuizSectionProps {
   courseId: string;
   hasStudyMaterials: boolean;
+  materials: CourseMaterial[];
 }
 
-export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
+// Group materials by their primary topic (first relatedTopic), falling back to type label
+const TYPE_LABELS: Record<string, string> = {
+  lecture_notes: "Lecture Notes",
+  lecture_slides: "Lecture Slides",
+  textbook: "Textbook",
+  problem_set: "Problem Sets",
+  syllabus: "Syllabus",
+  other: "Other",
+};
+
+function groupMaterials(materials: CourseMaterial[]): Record<string, CourseMaterial[]> {
+  const groups: Record<string, CourseMaterial[]> = {};
+  for (const m of materials) {
+    if (!m.storedForAI) continue;
+    const key = m.relatedTopics[0] ?? TYPE_LABELS[m.detectedType] ?? "Other";
+    (groups[key] ??= []).push(m);
+  }
+  return groups;
+}
+
+// ── Material selector ─────────────────────────────────────────────────────────
+
+function MaterialSelector({
+  materials,
+  selectedIds,
+  onToggle,
+  onQuizGroup,
+}: {
+  materials: CourseMaterial[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+  onQuizGroup: (ids: string[]) => void;
+}) {
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  const groups = groupMaterials(materials);
+  const groupEntries = Object.entries(groups);
+
+  if (groupEntries.length === 0) return null;
+
+  const toggleGroup = (name: string) => {
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  return (
+    <div className="space-y-1.5">
+      {groupEntries.map(([groupName, items]) => {
+        const isOpen = openGroups.has(groupName);
+        const groupIds = items.map((m) => m.id);
+        const allSelected = groupIds.every((id) => selectedIds.has(id));
+        const someSelected = groupIds.some((id) => selectedIds.has(id));
+
+        return (
+          <div key={groupName} className="rounded-lg border border-border bg-card overflow-hidden">
+            <div className="flex items-center gap-2 px-3 py-2">
+              <button
+                onClick={() => toggleGroup(groupName)}
+                className="flex flex-1 items-center gap-2 text-left min-w-0"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
+                    isOpen && "rotate-90"
+                  )}
+                />
+                <span className="truncate text-[12px] font-medium">{groupName}</span>
+                <span className="ml-1 shrink-0 text-[11px] text-muted-foreground">
+                  {items.length} file{items.length !== 1 ? "s" : ""}
+                </span>
+                {someSelected && (
+                  <span className="ml-1 shrink-0 rounded-full bg-blue-100 px-1.5 text-[10px] font-medium text-blue-700">
+                    {groupIds.filter((id) => selectedIds.has(id)).length} selected
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => onQuizGroup(groupIds)}
+                className="shrink-0 rounded-md bg-foreground px-2.5 py-1 text-[11px] font-medium text-background hover:opacity-90"
+              >
+                Quiz group
+              </button>
+            </div>
+
+            {isOpen && (
+              <div className="border-t border-border divide-y divide-border">
+                {items.map((m) => (
+                  <label
+                    key={m.id}
+                    className="flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-accent/30"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(m.id)}
+                      onChange={() => onToggle(m.id)}
+                      className="h-3.5 w-3.5 shrink-0 accent-foreground"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[12px]">{m.fileName}</span>
+                    {allSelected || someSelected ? null : null}
+                  </label>
+                ))}
+                <div className="px-4 py-2 flex gap-2">
+                  <button
+                    onClick={() => {
+                      const allChosen = groupIds.every((id) => selectedIds.has(id));
+                      groupIds.forEach((id) => {
+                        if (allChosen ? selectedIds.has(id) : !selectedIds.has(id)) onToggle(id);
+                      });
+                    }}
+                    className="text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    {groupIds.every((id) => selectedIds.has(id)) ? "Deselect all" : "Select all"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
+export function QuizSection({ courseId, hasStudyMaterials, materials }: QuizSectionProps) {
   const [quizzes, setQuizzes] = useState<QuizSummary[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [activeQuiz, setActiveQuiz] = useState<ActiveQuiz | null>(null);
+
+  // Material selection
+  const [selectedMaterialIds, setSelectedMaterialIds] = useState<Set<string>>(new Set());
+  const [selectorOpen, setSelectorOpen] = useState(false);
 
   // Quiz-taking state
   const [currentQ, setCurrentQ] = useState(0);
@@ -53,27 +194,46 @@ export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
       .finally(() => setLoadingList(false));
   }, [courseId]);
 
-  const handleGenerate = async () => {
+  const handleToggleMaterial = (id: string) => {
+    setSelectedMaterialIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleGenerate = async (materialIds?: string[]) => {
     setGenerating(true);
     setGenerateError(null);
+    const ids = materialIds ?? (selectedMaterialIds.size > 0 ? Array.from(selectedMaterialIds) : undefined);
     try {
-      const res = await fetch(`/api/courses/${courseId}/quiz`, { method: "POST" });
+      const res = await fetch(`/api/courses/${courseId}/quiz`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ materialIds: ids }),
+      });
       const data = await res.json();
       if (!res.ok) {
         setGenerateError(data.error ?? "Failed to generate quiz.");
         return;
       }
-      // Add to list and start immediately
       setQuizzes((prev) => [
         { id: data.quiz.id, title: data.quiz.title, createdAt: data.quiz.createdAt, questionCount: data.quiz.questions.length },
         ...prev,
       ]);
       startQuiz(data.quiz);
+      setSelectedMaterialIds(new Set());
+      setSelectorOpen(false);
     } catch {
       setGenerateError("Failed to generate quiz. Please try again.");
     } finally {
       setGenerating(false);
     }
+  };
+
+  const handleQuizGroup = (ids: string[]) => {
+    handleGenerate(ids);
   };
 
   const handleLoadQuiz = async (quizId: string) => {
@@ -131,7 +291,7 @@ export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
         <div className="rounded-lg border border-border bg-card p-6 text-center space-y-4">
           <p className="text-2xl font-semibold">{score} / {activeQuiz.questions.length}</p>
           <p className="text-[13px] text-muted-foreground">
-            {pct >= 80 ? "Great work! 🎉" : pct >= 60 ? "Good effort — keep studying!" : "Keep reviewing the material and try again."}
+            {pct >= 80 ? "Great work!" : pct >= 60 ? "Good effort — keep studying!" : "Keep reviewing the material and try again."}
           </p>
           <div className="flex justify-center gap-3 pt-2">
             <button
@@ -141,7 +301,7 @@ export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
               Try Again
             </button>
             <button
-              onClick={handleGenerate}
+              onClick={() => handleGenerate()}
               disabled={generating}
               className="rounded-md bg-foreground px-4 py-2 text-[13px] font-medium text-background hover:opacity-90 disabled:opacity-50"
             >
@@ -226,6 +386,8 @@ export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
   }
 
   // ── Quiz list / generate view ──
+  const studyMaterials = materials.filter((m) => m.storedForAI);
+
   return (
     <div className="space-y-4">
       {!hasStudyMaterials && (
@@ -242,13 +404,48 @@ export function QuizSection({ courseId, hasStudyMaterials }: QuizSectionProps) {
         </div>
       )}
 
-      <button
-        onClick={handleGenerate}
-        disabled={generating || !hasStudyMaterials}
-        className="rounded-md bg-foreground px-4 py-2 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
-      >
-        {generating ? "Generating quiz..." : "Generate Quiz from Materials"}
-      </button>
+      {/* Generate controls */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => handleGenerate()}
+          disabled={generating || !hasStudyMaterials}
+          className="rounded-md bg-foreground px-4 py-2 text-[13px] font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          {generating
+            ? "Generating quiz..."
+            : selectedMaterialIds.size > 0
+            ? `Quiz ${selectedMaterialIds.size} selected file${selectedMaterialIds.size !== 1 ? "s" : ""}`
+            : "Generate Quiz from All Materials"}
+        </button>
+
+        {studyMaterials.length > 0 && (
+          <button
+            onClick={() => setSelectorOpen((o) => !o)}
+            className="rounded-md border border-border px-3 py-2 text-[13px] font-medium hover:bg-accent"
+          >
+            {selectorOpen ? "Hide selector" : "Select specific files"}
+          </button>
+        )}
+
+        {selectedMaterialIds.size > 0 && (
+          <button
+            onClick={() => setSelectedMaterialIds(new Set())}
+            className="text-[12px] text-muted-foreground hover:text-foreground"
+          >
+            Clear selection
+          </button>
+        )}
+      </div>
+
+      {/* Material selector */}
+      {selectorOpen && studyMaterials.length > 0 && (
+        <MaterialSelector
+          materials={studyMaterials}
+          selectedIds={selectedMaterialIds}
+          onToggle={handleToggleMaterial}
+          onQuizGroup={handleQuizGroup}
+        />
+      )}
 
       {loadingList ? (
         <p className="text-[13px] text-muted-foreground">Loading...</p>

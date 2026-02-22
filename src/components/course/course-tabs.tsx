@@ -398,6 +398,37 @@ function DeadlinesSection({
   );
 }
 
+// ── MaterialGroupSection ──────────────────────────────────────────────────────
+
+function MaterialGroupSection({ groupName, items }: { groupName: string; items: CourseMaterial[] }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex items-center gap-2 text-left"
+      >
+        <ChevronRight
+          className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", open && "rotate-90")}
+        />
+        <span className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {groupName}
+        </span>
+        <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {items.length}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2 pl-2">
+          {items.map((m) => (
+            <MaterialCard key={m.id} material={m} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main CourseTabs export ───────────────────────────────────────────────────
 
 export function CourseTabs({
@@ -656,13 +687,40 @@ export function CourseTabs({
               <div className="rounded-lg border border-border bg-card px-6 py-10 text-center">
                 <p className="text-[13px] text-muted-foreground">No files uploaded yet.</p>
               </div>
-            ) : (
-              <div className="space-y-3">
-                {materials.map((m) => (
-                  <MaterialCard key={m.id} material={m} />
-                ))}
-              </div>
-            )}
+            ) : (() => {
+              // Group materials by first relatedTopic (or detectedType label as fallback)
+              const typeLabels: Record<string, string> = {
+                lecture_notes: "Lecture Notes",
+                lecture_slides: "Lecture Slides",
+                textbook: "Textbook",
+                problem_set: "Problem Sets",
+                syllabus: "Syllabus",
+                other: "Other",
+              };
+              const grouped: Record<string, CourseMaterial[]> = {};
+              for (const m of materials) {
+                const key = m.relatedTopics[0] ?? typeLabels[m.detectedType] ?? "Other";
+                (grouped[key] ??= []).push(m);
+              }
+              const entries = Object.entries(grouped);
+              // If only one group, show flat list
+              if (entries.length <= 1) {
+                return (
+                  <div className="space-y-3">
+                    {materials.map((m) => (
+                      <MaterialCard key={m.id} material={m} />
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <div className="space-y-4">
+                  {entries.map(([groupName, items]) => (
+                    <MaterialGroupSection key={groupName} groupName={groupName} items={items} />
+                  ))}
+                </div>
+              );
+            })()}
           </div>
 
           {/* From Canvas — candidates grouped by module */}
@@ -731,7 +789,7 @@ export function CourseTabs({
 
       {/* ── Quiz Tab ── */}
       <TabsContent value="quiz">
-        <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} />
+        <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
       </TabsContent>
     </Tabs>
   );

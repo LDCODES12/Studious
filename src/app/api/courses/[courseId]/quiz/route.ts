@@ -45,16 +45,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
 
   const { courseId } = await params;
-  const { title } = ((await request.json().catch(() => ({}))) as { title?: string }) ?? {};
+  const { title, materialIds } = ((await request.json().catch(() => ({}))) as {
+    title?: string;
+    materialIds?: string[];
+  }) ?? {};
 
   const course = await db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
   });
   if (!course) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Fetch study materials
+  // Fetch study materials — optionally filtered to specific file IDs
   const materials = await db.courseMaterial.findMany({
-    where: { courseId, storedForAI: true },
+    where: {
+      courseId,
+      storedForAI: true,
+      ...(materialIds && materialIds.length > 0 ? { id: { in: materialIds } } : {}),
+    },
     select: { rawText: true, fileName: true, detectedType: true },
   });
 
@@ -65,13 +72,13 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Concatenate rawText up to 8k chars
+  // Concatenate rawText up to 24k chars
   let combinedText = "";
   for (const m of materials) {
-    if (combinedText.length >= 8000) break;
+    if (combinedText.length >= 24000) break;
     combinedText += `\n\n--- ${m.fileName} ---\n${m.rawText}`;
   }
-  combinedText = combinedText.slice(0, 8000);
+  combinedText = combinedText.slice(0, 24000);
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
