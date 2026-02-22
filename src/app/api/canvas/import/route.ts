@@ -182,6 +182,13 @@ function scheduleScore(text: string): number {
 function detectSourceFormat(text: string): string {
   const lines = text.split("\n").filter((l) => l.trim().length > 0);
   if (lines.length < 2) return "short text";
+
+  // Detect Sun-Mon-Tue-Wed-Thu-Fri-Sat calendar grid (common in lab/science syllabi)
+  // These appear as color-coded weekly grids with day-names as column headers.
+  // After PDF extraction they look like date+content cells interleaved row by row.
+  const dayNameHits = (text.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi) ?? []).length;
+  if (dayNameHits >= 5) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
+
   const tabLines = lines.filter((l) => l.includes("\t")).length;
   if (tabLines / lines.length > 0.25) return "tab-separated table";
   const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;

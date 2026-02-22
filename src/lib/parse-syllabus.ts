@@ -365,6 +365,14 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
 - "tab-separated table" → columns are tab-separated; first column is usually week/date, others are topic/readings
 - "html-list" → bullet or numbered list items are individual schedule entries
 - "paragraph text" → schedule may be embedded in prose; look harder for patterns
+- "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)" →
+    This is a physical calendar grid. After PDF text extraction the 7 columns are interleaved in reading order.
+    Strategy: find the day-name header row (Sunday Monday Tuesday ... Saturday), then read subsequent rows
+    where each group of 7 date-cells forms one week. The meaningful content is in the cells that have both a
+    date and an event label (e.g. "Jan 26 Lecture 1", "Jan 27 Experiment 1: Gas constant [ABC]").
+    Group all events from the same 7-cell row as ONE week entry. Set startDate to the Monday of that row.
+    weekLabel should summarize the main lecture/experiment topic(s) for that week (e.g. "Lecture 1 / Experiment 1: Gas constant").
+    If a cell only has a date with no event name, skip it. If a cell says "No experiment" or "MLK day: no classes", record that as notes.
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly
@@ -372,6 +380,7 @@ IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Date-based: Individual class session dates → calculate week numbers from the dates
 - Module/unit-based: Group modules into sequential weeks
 - Table format: Many syllabi use schedule tables — read every row
+- Calendar grid: 7-column Sun-Sat physical calendar → each row of 7 cells = one week; extract events from cells that have content beyond just a date
 
 WHAT TO EXTRACT:
 - Every topic title, subtopic, and specific concept explicitly listed in the schedule

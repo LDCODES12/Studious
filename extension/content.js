@@ -243,8 +243,7 @@ function extractScheduleSection(html) {
         rawModules.push(...fetched);
         for (const mod of rawModules) {
           const items    = mod.items ?? [];
-          // SubHeader items are Canvas UI section dividers (e.g. ">>> Sign up for Piazza <<<") — never academic topics
-          const topics   = items.filter((it) => ["Page", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
+          const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
           const readings = items.filter((it) => it.type === "File").map((it) => it.title).filter(Boolean);
           payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
         }
