@@ -187,12 +187,16 @@ function detectSourceFormat(text: string): string {
   // These appear as color-coded weekly grids with day-names as column headers.
   // Match both full day names (Sunday) and common abbreviations (Sun, Su, Mo, Tu...).
   // The PDF extractor preserves rows as tab-separated lines; the AI uses tabs to parse.
+  // REQUIRE both day-name hits AND actual tab characters: day names alone appear in any
+  // syllabus that says "Monday/Wednesday lectures" or lists office hours by day. Tabs
+  // confirm that assembleLines() actually preserved a physical grid's column structure.
   const dayNameHits = (text.match(
     /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/gi
   ) ?? []).length;
-  if (dayNameHits >= 5) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
-
   const tabLines = lines.filter((l) => l.includes("\t")).length;
+  const hasTabStructure = lines.length > 0 && tabLines / lines.length > 0.15;
+  if (dayNameHits >= 5 && hasTabStructure) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
+
   if (tabLines / lines.length > 0.25) return "tab-separated table";
   const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
   const shortLineRatio = lines.filter((l) => l.length < 120).length / lines.length;
