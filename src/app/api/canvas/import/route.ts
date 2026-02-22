@@ -482,12 +482,41 @@ export async function POST(request: NextRequest) {
   }
 
   // 7. Upsert modules as CourseTopic (fallback — may be replaced by AI below)
+  //
+  // Only import modules whose names look like actual weeks/units (e.g. "Week 1",
+  // "Module 2: Intro", "Lab 3"). Skip category-named modules ("Course Resources",
+  // "Lectures", "EXCEL Templates", "Ungraded Problem Sets") — they produce garbage
+  // in the Content tab (administrative file names instead of academic topics).
+  //
+  // A module is "week-flavored" if its name contains a number preceded by a
+  // week-type keyword, OR starts with a number followed by punctuation/space.
+  // Examples that pass:  "Week 1", "Unit 2: Thermodynamics", "Lab 3", "01 - Intro"
+  // Examples that fail:  "Course Resources", "Lectures", "Problem Sets", "Videos"
+  const WEEK_FLAVOR_RE = /\b(week|module|unit|chapter|lecture|lab|class|part|session)\s*\d+|\b\d+\s*[-.:]/i;
+  function isWeekFlavored(name: string): boolean {
+    return WEEK_FLAVOR_RE.test(name.trim());
+  }
+
   let newModules = 0;
   let updatedModules = 0;
+
+  // Track which internal courseIds had at least one week-flavored module this sync.
+  // Courses with ZERO week-flavored modules will have their stale module-based topics
+  // cleaned up below, so the Content tab shows the "upload your syllabus" prompt
+  // instead of categorical garbage.
+  const coursesWithWeekModules = new Set<string>();
+  const allSyncedModuleCourses = new Set<string>();
 
   for (const mod of modules) {
     const scCourseId = courseIdMap.get(mod.courseId);
     if (!scCourseId) continue;
+    allSyncedModuleCourses.add(scCourseId);
+
+    // Skip categorical modules — they belong to courses where Canvas organizes
+    // by resource type rather than by week.  These would show "Lectures" or
+    // "Course Resources" as week labels with file/link names as topics — not useful.
+    if (!isWeekFlavored(mod.name)) continue;
+    coursesWithWeekModules.add(scCourseId);
 
     const canvasModId = String(mod.moduleId);
 
@@ -520,6 +549,17 @@ export async function POST(request: NextRequest) {
         },
       });
       newModules++;
+    }
+  }
+
+  // Clean up courses that sent modules but none were week-flavored.
+  // This removes any stale categorical module records imported on previous syncs
+  // (e.g. "Course Resources", "Lectures", "EXCEL Templates" for Chem Lab courses).
+  for (const scCourseId of allSyncedModuleCourses) {
+    if (!coursesWithWeekModules.has(scCourseId)) {
+      await db.courseTopic.deleteMany({
+        where: { courseId: scCourseId, canvasModuleId: { not: null } },
+      });
     }
   }
 
