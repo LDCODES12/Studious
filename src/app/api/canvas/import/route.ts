@@ -687,38 +687,46 @@ export async function POST(request: NextRequest) {
         });
         const topicLabels = courseTopicLabels.map((t) => t.weekLabel);
 
+        // Check which files are already imported
+        const existingMats = await db.courseMaterial.findMany({
+          where: { courseId: scCourseId },
+          select: { fileName: true },
+        });
+        const existingFileNames = new Set(existingMats.map((m) => m.fileName));
+
+        // Mark already-imported files
         for (const mt of materialTexts) {
-          const pdfText = mt.text.trim();
-          if (pdfText.length < 50) continue; // skip empty/failed extractions
-
-          const existingMat = await db.courseMaterial.findFirst({
-            where: { courseId: scCourseId, fileName: mt.fileName },
-            select: { id: true },
-          });
-          if (existingMat) {
-            importedFileNames.add(mt.fileName);
-            continue; // already imported — idempotent
-          }
-
-          try {
-            const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
-            const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
-            await db.courseMaterial.create({
-              data: {
-                courseId: scCourseId,
-                fileName: mt.fileName,
-                detectedType: analysis.detectedType,
-                summary: analysis.summary,
-                relatedTopics: analysis.relatedTopics,
-                rawText: pdfText.slice(0, 10_000),
-                storedForAI,
-              },
-            });
-            importedFileNames.add(mt.fileName);
-          } catch {
-            // Don't fail the whole import if one material analysis errors
-          }
+          if (existingFileNames.has(mt.fileName)) importedFileNames.add(mt.fileName);
         }
+
+        // Analyze all new materials in parallel
+        const newMaterials = materialTexts.filter(
+          (mt) => mt.text.trim().length >= 50 && !existingFileNames.has(mt.fileName)
+        );
+
+        await Promise.all(
+          newMaterials.map(async (mt) => {
+            const pdfText = mt.text.trim();
+            try {
+              const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
+              const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
+              await db.courseMaterial.create({
+                data: {
+                  courseId: scCourseId,
+                  fileName: mt.fileName,
+                  detectedType: analysis.detectedType,
+                  summary: analysis.summary,
+                  relatedTopics: analysis.relatedTopics,
+                  rawText: pdfText.slice(0, 10_000),
+                  storedForAI,
+                },
+              });
+              importedFileNames.add(mt.fileName);
+            } catch {
+              // Don't fail the whole import if one material analysis errors
+            }
+          })
+        );
       }
 
       // ── b3) Material candidates — upsert all, then prune imported ones ────
