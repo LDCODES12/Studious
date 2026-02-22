@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCalendarClient } from "@/lib/google";
+import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 import { type SyllabusEvent } from "@/types";
 
 export async function POST(request: NextRequest) {
@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     }
 
     const tokens = JSON.parse(tokensCookie.value);
-    const calendar = getCalendarClient(tokens.access_token);
+    const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(tokens);
 
     const { events } = (await request.json()) as { events: SyllabusEvent[] };
 
@@ -37,7 +37,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ results });
+    const res = NextResponse.json({ results });
+    applyRefreshedTokensCookie(res, tokens, getUpdatedTokens());
+    return res;
   } catch (error) {
     console.error("Calendar sync error:", error);
     return NextResponse.json(

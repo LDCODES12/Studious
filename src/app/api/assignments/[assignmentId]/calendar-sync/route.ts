@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getCalendarClient } from "@/lib/google";
+import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 
 interface RouteParams {
   params: Promise<{ assignmentId: string }>;
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
 
   const tokens = JSON.parse(tokensCookie.value);
-  const calendar = getCalendarClient(tokens.access_token);
+  const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(tokens);
 
   const response = await calendar.events.insert({
     calendarId: "primary",
@@ -54,5 +54,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     data: { googleEventId },
   });
 
-  return NextResponse.json({ googleEventId });
+  const res = NextResponse.json({ googleEventId });
+  applyRefreshedTokensCookie(res, tokens, getUpdatedTokens());
+  return res;
 }

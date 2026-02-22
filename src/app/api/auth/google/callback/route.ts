@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTokensFromCode } from "@/lib/google";
+import { getTokensFromCode, GOOGLE_COOKIE_NAME, GOOGLE_COOKIE_OPTIONS } from "@/lib/google";
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
@@ -15,13 +15,7 @@ export async function GET(request: NextRequest) {
       new URL("/upload?google=connected", request.url)
     );
 
-    response.cookies.set("google_tokens", JSON.stringify(tokens), {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 60 * 60 * 24 * 30, // 30 days
-      path: "/",
-    });
+    response.cookies.set(GOOGLE_COOKIE_NAME, JSON.stringify(tokens), GOOGLE_COOKIE_OPTIONS);
 
     return response;
   } catch (error) {

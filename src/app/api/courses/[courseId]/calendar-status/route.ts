@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getCalendarClient } from "@/lib/google";
+import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   }
 
   const tokens = JSON.parse(tokensCookie.value);
-  const calendar = getCalendarClient(tokens.access_token);
+  const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(tokens);
 
   const results = await Promise.allSettled(
     course.assignments.map(async (a) => {
@@ -54,5 +54,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     .map((r) => (r.status === "fulfilled" ? r.value : null))
     .filter(Boolean);
 
-  return NextResponse.json({ statuses });
+  const res = NextResponse.json({ statuses });
+  applyRefreshedTokensCookie(res, tokens, getUpdatedTokens());
+  return res;
 }

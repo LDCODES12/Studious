@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCalendarClient } from "@/lib/google";
+import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
     }
 
     const tokens = JSON.parse(tokensCookie.value);
-    const calendar = getCalendarClient(tokens.access_token);
+    const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(tokens);
 
     const { eventIds } = (await request.json()) as { eventIds: string[] };
 
@@ -27,7 +27,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ results });
+    const res = NextResponse.json({ results });
+    applyRefreshedTokensCookie(res, tokens, getUpdatedTokens());
+    return res;
   } catch (error) {
     console.error("Calendar remove error:", error);
     return NextResponse.json(

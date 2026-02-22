@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getCalendarClient } from "@/lib/google";
+import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 
 export async function GET(request: NextRequest) {
   const session = await auth();
@@ -34,11 +34,13 @@ export async function GET(request: NextRequest) {
   // Fetch GCal events if connected
   let calendarEvents: { id: string; summary: string; start: string; end: string }[] = [];
   const tokensCookie = request.cookies.get("google_tokens");
+  let updatedGoogleTokens = null;
+  let originalTokens: Record<string, unknown> = {};
   if (tokensCookie) {
     try {
-      const tokens = JSON.parse(tokensCookie.value);
-      const calendar = getCalendarClient(tokens.access_token);
-      const res = await calendar.events.list({
+      originalTokens = JSON.parse(tokensCookie.value);
+      const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(originalTokens);
+      const gcalRes = await calendar.events.list({
         calendarId: "primary",
         timeMin: new Date(start).toISOString(),
         timeMax: new Date(`${end}T23:59:59`).toISOString(),
@@ -46,18 +48,19 @@ export async function GET(request: NextRequest) {
         orderBy: "startTime",
         maxResults: 100,
       });
-      calendarEvents = (res.data.items ?? []).map((e) => ({
+      calendarEvents = (gcalRes.data.items ?? []).map((e) => ({
         id: e.id ?? "",
         summary: e.summary ?? "(No title)",
         start: e.start?.date ?? e.start?.dateTime ?? "",
         end: e.end?.date ?? e.end?.dateTime ?? "",
       }));
+      updatedGoogleTokens = getUpdatedTokens();
     } catch {
       // Silently ignore GCal errors
     }
   }
 
-  return NextResponse.json({
+  const res = NextResponse.json({
     assignments: assignments.map((a) => ({
       id: a.id,
       title: a.title,
@@ -68,4 +71,6 @@ export async function GET(request: NextRequest) {
     })),
     calendarEvents,
   });
+  applyRefreshedTokensCookie(res, originalTokens, updatedGoogleTokens);
+  return res;
 }
