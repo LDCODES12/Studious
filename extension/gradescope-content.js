@@ -8,11 +8,15 @@
  *  2. Otherwise → fetch /assignments HTML as a same-origin request and parse it.
  *
  * Per-course debounce: skips if the same course was synced within the last hour.
+ * Check DevTools > Console on any Gradescope course page to see [gs-sync] logs.
  */
 
 (async () => {
   const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
-  if (!scUrl || !apiToken) return;
+  if (!scUrl || !apiToken) {
+    console.log("[gs-sync] No scUrl/apiToken configured — skipping");
+    return;
+  }
 
   // Only fire on numeric course pages: /courses/{numericId} or /courses/{id}/anything
   const courseMatch = window.location.pathname.match(/^\/courses\/(\d+)/);
@@ -23,28 +27,64 @@
   const debounceKey = `gs_synced_${gsCourseId}`;
   const stored = await chrome.storage.local.get([debounceKey]);
   const lastSynced = stored[debounceKey];
-  if (lastSynced && Date.now() - lastSynced < 3_600_000) return;
+  if (lastSynced && Date.now() - lastSynced < 3_600_000) {
+    console.log(`[gs-sync] course ${gsCourseId}: debounced (synced ${Math.round((Date.now() - lastSynced) / 60000)}m ago)`);
+    return;
+  }
+
+  // ── Course name from page title (most reliable source) ────────────────────
+  // Gradescope page titles:
+  //   Assignments page: "Assignments | CHEM 1120 - Gradescope"
+  //   Course dashboard: "CHEM 1120 - Gradescope"
+  // Extract the course name by stripping "Assignments | " prefix and " - Gradescope" suffix.
+  function courseNameFromTitle(title) {
+    if (!title) return "";
+    // Strip trailing " - Gradescope" or " | Gradescope"
+    const stripped = title.replace(/\s*[-|]\s*Gradescope\s*$/i, "").trim();
+    // If there's a " | " separator, the course name is after the last "|"
+    const parts = stripped.split("|");
+    return parts[parts.length - 1].trim();
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  function extractCourseName(doc) {
-    return (
-      doc.querySelector(".courseHeader--title h1")?.textContent?.trim() ||
-      doc.querySelector("h1.courseHeader--name")?.textContent?.trim() ||
-      doc.querySelector(".courseHeader h1")?.textContent?.trim() ||
-      doc.querySelector("h1")?.textContent?.trim() ||
-      ""
+  function extractCourseName(doc, isLiveDocument) {
+    // For the live document, use the actual page title — it's the most reliable source
+    // and avoids getting the "Assignments" h1 which is the page heading, not the course name.
+    const titleName = courseNameFromTitle(
+      isLiveDocument ? document.title : doc.querySelector("title")?.textContent
     );
+    if (titleName) return titleName;
+
+    // DOM fallback: look for course header elements that Gradescope uses
+    // Explicitly skip any h1 that just says "Assignments"
+    for (const sel of [
+      ".courseHeader--title h1",
+      "h1.courseHeader--name",
+      ".courseHeader h1",
+      ".sidebar--course-info h1",
+      "[class*='courseHeader'] h1",
+    ]) {
+      const el = doc.querySelector(sel);
+      const text = el?.textContent?.trim();
+      if (text && !/^assignments$/i.test(text)) return text;
+    }
+    return "";
   }
 
   function extractAssignments(doc) {
+    // Gradescope's assignments table — try multiple selector strategies
     const rows = doc.querySelectorAll(
-      "table.table tbody tr, table.js-assignmentTable tbody tr, tbody tr"
+      "table.table--assignments tbody tr, " +
+      "table.js-assignmentsTable tbody tr, " +
+      "table.table tbody tr, " +
+      "table.js-assignmentTable tbody tr, " +
+      "tbody tr"
     );
     const results = [];
 
     for (const row of rows) {
-      // Title — Gradescope uses <th scope="row"> for the title cell
+      // Title — Gradescope uses <th scope="row"><a> for the title cell
       const titleLink = row.querySelector("th a");
       const titleCell = row.querySelector("th");
       const title =
@@ -54,6 +94,7 @@
       // Gradescope assignment ID — from data attribute or link href
       const gradescopeAssignmentId =
         row.dataset?.assignmentId ||
+        row.id?.replace(/^assignment-/, "") ||
         (titleLink
           ? titleLink.getAttribute("href")?.match(/\/assignments\/(\d+)/)?.[1]
           : null) ||
@@ -66,17 +107,10 @@
       let status = "unsubmitted";
 
       for (const cell of cells) {
-        const scoreEl = cell.querySelector(
-          ".submissionStatus--score, [class*='score']"
-        );
-        const scoreText = scoreEl
-          ? scoreEl.textContent?.trim()
-          : cell.textContent?.trim();
+        const cellText = cell.textContent?.trim() ?? "";
 
-        if (!scoreText) continue;
-
-        // Match "18.5 / 20", "18.5/20", "18 / 20"
-        const m = scoreText.match(/([\d.]+)\s*\/\s*([\d.]+)/);
+        // Match "18.5 / 20", "18.5/20", "18 / 20" anywhere in the cell
+        const m = cellText.match(/([\d.]+)\s*\/\s*([\d.]+)/);
         if (m) {
           score = parseFloat(m[1]);
           maxScore = parseFloat(m[2]);
@@ -84,23 +118,10 @@
           break;
         }
 
-        // Status text fallback
-        const statusEl = cell.querySelector(
-          ".submissionStatus--text, [class*='status']"
-        );
-        const statusText = (
-          statusEl?.textContent ||
-          cell.textContent ||
-          ""
-        )
-          .trim()
-          .toLowerCase();
-
-        if (
-          statusText.includes("submitted") ||
-          statusText.includes("graded") ||
-          statusText === "submitted"
-        ) {
+        const lower = cellText.toLowerCase();
+        if (lower.includes("graded")) {
+          if (status !== "graded") status = "graded";
+        } else if (lower.includes("submitted")) {
           if (status !== "graded") status = "submitted";
         }
       }
@@ -109,6 +130,19 @@
     }
 
     return results;
+  }
+
+  // Wait for the assignments table to appear in the DOM (handles React/Stimulus hydration).
+  // Resolves as soon as a <tbody tr> is found, or after the timeout (2s).
+  function waitForTable(timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      if (document.querySelector("tbody tr")) { resolve(); return; }
+      const observer = new MutationObserver(() => {
+        if (document.querySelector("tbody tr")) { observer.disconnect(); resolve(); }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => { observer.disconnect(); resolve(); }, timeoutMs);
+    });
   }
 
   // ── Get assignments data ──────────────────────────────────────────────────
@@ -121,14 +155,15 @@
   );
 
   if (onAssignmentsPage) {
-    // Already on the assignments page — the live DOM is fully rendered.
-    // Wait briefly for any client-side hydration to complete.
-    await new Promise((r) => setTimeout(r, 800));
-    courseName = extractCourseName(document);
+    // Wait for the table to render (handles both server-rendered and JS-hydrated pages)
+    await waitForTable(2000);
+    courseName = extractCourseName(document, true);
     assignments = extractAssignments(document);
+    console.log(`[gs-sync] live DOM: courseName="${courseName}" assignments=${assignments.length}`);
   }
 
-  // Fallback: fetch the assignments page HTML (works when student is on another course page)
+  // Fallback: fetch the assignments page HTML (works when student is on another course page,
+  // and serves as a second chance when the live DOM parse found nothing)
   if (assignments.length === 0) {
     try {
       const resp = await fetch(`/courses/${gsCourseId}/assignments`, {
@@ -137,46 +172,50 @@
       });
       if (resp.ok) {
         const html = await resp.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, "text/html");
-        if (!courseName) courseName = extractCourseName(doc);
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        if (!courseName) courseName = extractCourseName(doc, false);
         assignments = extractAssignments(doc);
+        console.log(`[gs-sync] fetched HTML: courseName="${courseName}" assignments=${assignments.length}`);
       }
-    } catch {
-      // Silent — network errors ignored
+    } catch (err) {
+      console.warn("[gs-sync] fetch fallback failed:", err?.message);
     }
   }
 
-  if (assignments.length === 0) return;
-
-  // Course name fallback: use the page title if no h1 matched
-  if (!courseName) {
-    courseName =
-      document.title?.replace(/\s*[-|].*$/, "").trim() || `GS-${gsCourseId}`;
+  if (assignments.length === 0) {
+    console.log(`[gs-sync] course ${gsCourseId}: no assignments found — skipping`);
+    return;
   }
+
+  // Final course name fallback: use gsCourseId so we still send something
+  if (!courseName) {
+    courseName = `GS-${gsCourseId}`;
+    console.warn(`[gs-sync] course ${gsCourseId}: could not determine course name, using "${courseName}"`);
+  }
+
+  const graded = assignments.filter((a) => a.score !== null).length;
+  console.log(`[gs-sync] sending: course="${courseName}" total=${assignments.length} graded=${graded}`);
 
   // ── Send to Study Circle ──────────────────────────────────────────────────
   try {
-    await fetch(`https://${scUrl}/api/gradescope/import`, {
+    const res = await fetch(`https://${scUrl}/api/gradescope/import`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiToken}`,
       },
       body: JSON.stringify({
-        courses: [
-          {
-            name: courseName,
-            gradescopeCourseId: gsCourseId,
-            assignments,
-          },
-        ],
+        courses: [{ name: courseName, gradescopeCourseId: gsCourseId, assignments }],
       }),
     });
+    const data = res.ok ? await res.json() : null;
+    console.log(`[gs-sync] API response ${res.status}:`, data);
 
-    // Record successful sync timestamp for this course
-    await chrome.storage.local.set({ [debounceKey]: Date.now() });
-  } catch {
-    // Silent — network errors ignored
+    // Only set debounce if we actually sent data successfully
+    if (res.ok) {
+      await chrome.storage.local.set({ [debounceKey]: Date.now() });
+    }
+  } catch (err) {
+    console.warn("[gs-sync] API request failed:", err?.message);
   }
 })();

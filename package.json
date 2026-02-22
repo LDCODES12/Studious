@@ -10,8 +10,11 @@
     "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.30",
+    "@ai-sdk/react": "^3.0.99",
     "@auth/prisma-adapter": "^2.11.1",
     "@prisma/client": "^6.19.2",
+    "ai": "^6.0.97",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

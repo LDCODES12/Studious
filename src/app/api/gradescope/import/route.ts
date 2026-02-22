@@ -104,6 +104,7 @@ export async function POST(request: NextRequest) {
 
   let updated = 0;
   let created = 0;
+  const debugCourses: { gsName: string; matched: string | null; updated: number; created: number }[] = [];
 
   for (const gsCourse of courses) {
     // ── Match Gradescope course → Canvas course ──────────────────────────────
@@ -129,9 +130,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!matchedCourse) continue;
+    if (!matchedCourse) {
+      console.log(`[gs-import] no match for "${gsCourse.name}" | available: ${userCourses.map((c) => `"${c.name}"`).join(", ")}`);
+      debugCourses.push({ gsName: gsCourse.name, matched: null, updated: 0, created: 0 });
+      continue;
+    }
 
     const courseId = matchedCourse.id;
+    let courseUpdated = 0;
+    let courseCreated = 0;
 
     for (const gsAssignment of gsCourse.assignments) {
       const { title, score, maxScore, status, gradescopeAssignmentId } = gsAssignment;
@@ -149,6 +156,7 @@ export async function POST(request: NextRequest) {
               data: { gradescopeScore: score, gradescopeMaxScore: maxScore },
             });
             updated++;
+            courseUpdated++;
           }
           continue;
         }
@@ -174,6 +182,7 @@ export async function POST(request: NextRequest) {
             },
           });
           updated++;
+          courseUpdated++;
         } else if (gradescopeAssignmentId && !canvasMatch.gradescopeId) {
           // At least save the GS ID even if we have no new score
           await db.assignment.update({
@@ -209,8 +218,12 @@ export async function POST(request: NextRequest) {
         },
       });
       created++;
+      courseCreated++;
     }
+
+    console.log(`[gs-import] "${gsCourse.name}" → "${matchedCourse.name}": updated=${courseUpdated} created=${courseCreated}`);
+    debugCourses.push({ gsName: gsCourse.name, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
   }
 
-  return NextResponse.json({ ok: true, updated, created });
+  return NextResponse.json({ ok: true, updated, created, debug: { courses: debugCourses } });
 }

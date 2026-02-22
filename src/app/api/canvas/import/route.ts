@@ -14,6 +14,7 @@ import {
 import crypto from "crypto";
 import { generateTasksForUser } from "@/lib/tasks";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
+import { generateEmbedding } from "@/lib/embeddings";
 
 export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
 
@@ -678,7 +679,7 @@ export async function POST(request: NextRequest) {
           select: { id: true },
         });
         if (!existing) {
-          await db.courseMaterial.create({
+          const material = await db.courseMaterial.create({
             data: {
               courseId: scCourseId,
               fileName: st.fileName,
@@ -690,6 +691,14 @@ export async function POST(request: NextRequest) {
             },
           });
           syllabusFilesImported++;
+          try {
+            const vector = await generateEmbedding(pdfText);
+            await db.$executeRaw`
+              UPDATE "CourseMaterial"
+              SET embedding = ${JSON.stringify(vector)}::vector
+              WHERE id = ${material.id}
+            `;
+          } catch { /* embedding failure never blocks import */ }
         }
       }
 
@@ -731,7 +740,7 @@ export async function POST(request: NextRequest) {
             try {
               const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
               const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
-              await db.courseMaterial.create({
+              const material = await db.courseMaterial.create({
                 data: {
                   courseId: scCourseId,
                   fileName: mt.fileName,
@@ -743,6 +752,14 @@ export async function POST(request: NextRequest) {
                 },
               });
               importedFileNames.add(mt.fileName);
+              try {
+                const vector = await generateEmbedding(pdfText);
+                await db.$executeRaw`
+                  UPDATE "CourseMaterial"
+                  SET embedding = ${JSON.stringify(vector)}::vector
+                  WHERE id = ${material.id}
+                `;
+              } catch { /* embedding failure never blocks import */ }
               dbg.materials.push({ fileName: mt.fileName, detectedType: analysis.detectedType, chars: pdfText.length });
             } catch {
               // Don't fail the whole import if one material analysis errors

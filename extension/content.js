@@ -377,7 +377,16 @@ function extractScheduleSection(html) {
           try {
             const doc = new DOMParser().parseFromString(htmlToScan, "text/html");
             for (const a of doc.querySelectorAll("a[href]")) {
-              const href = a.href; // absolute URL (DOMParser resolves relative to page)
+              // Use getAttribute to get the raw href value — DOMParser documents
+              // have base URL "about:blank" so a.href may not resolve root-relative
+              // Canvas paths (e.g. /courses/123/files/456) into valid https:// URLs.
+              const rawHref = a.getAttribute("href") ?? "";
+              // Resolve root-relative paths manually against the current Canvas origin.
+              const href = rawHref.startsWith("http")
+                ? rawHref
+                : rawHref.startsWith("/")
+                  ? window.location.origin + rawHref
+                  : rawHref;
               if (!href) continue;
               // Canvas inline file: /courses/:id/files/:fileId[/download]
               const canvasMatch = href.match(/\/courses\/\d+\/files\/(\d+)/);
@@ -386,7 +395,14 @@ function extractScheduleSection(html) {
                 if (seenIds.has(fileId)) continue;
                 seenIds.add(fileId);
                 try {
-                  const [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
+                  // Try course-scoped endpoint first (students often can't access
+                  // the global /files/:id endpoint), then fall back to global.
+                  let fileInfo;
+                  try {
+                    [fileInfo] = await fetchAll(`${BASE}/courses/${course.id}/files/${fileId}`);
+                  } catch {
+                    [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
+                  }
                   // Canvas returns various content-type values for PDFs:
                   // "application/pdf", "application/pdf; charset=binary",
                   // "application/octet-stream", or sometimes nothing.

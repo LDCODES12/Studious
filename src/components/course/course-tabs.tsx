@@ -10,6 +10,7 @@ import { MaterialUploader, type UploadedMaterial } from "./material-uploader";
 import { QuizSection } from "./quiz-section";
 import { GradeBreakdown } from "./grade-breakdown";
 import { CourseOverview } from "./course-overview";
+import { CourseChat } from "./course-chat";
 
 interface Assignment {
   id: string;
@@ -585,6 +586,7 @@ export function CourseTabs({
         <TabsTrigger value="content">Content</TabsTrigger>
         <TabsTrigger value="materials">Materials</TabsTrigger>
         <TabsTrigger value="quiz">Quiz</TabsTrigger>
+        <TabsTrigger value="study">Study</TabsTrigger>
       </TabsList>
 
       {/* ── Overview Tab ── */}
@@ -790,6 +792,11 @@ export function CourseTabs({
       {/* ── Quiz Tab ── */}
       <TabsContent value="quiz">
         <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
+      </TabsContent>
+
+      {/* ── Study Tab ── */}
+      <TabsContent value="study">
+        <CourseChat courseId={courseId} />
       </TabsContent>
     </Tabs>
   );
