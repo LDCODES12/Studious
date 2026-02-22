@@ -615,6 +615,7 @@ export async function POST(request: NextRequest) {
 
   // Collect per-course debug info for a single summary log
   const debugRows: string[] = [];
+  const scheduleRows: string[] = [];
 
   await Promise.all(
     courses.map(async (c) => {
@@ -827,8 +828,8 @@ export async function POST(request: NextRequest) {
             if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
           }
 
-          console.log(
-            `[import] classSchedule ${c.name}: ${classScheduleSource}` +
+          scheduleRows.push(
+            `${c.name}: ${classScheduleSource}` +
             (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
           );
 
@@ -839,7 +840,7 @@ export async function POST(request: NextRequest) {
             });
           }
         } else {
-          console.log(`[import] classSchedule ${c.name}: already set — skip`);
+          scheduleRows.push(`${c.name}: already set`);
         }
       } catch {
         // Don't fail the whole import on this optional enrichment
@@ -945,6 +946,9 @@ export async function POST(request: NextRequest) {
 
   // Single log entry — read with `vercel logs -x --query "canvas/import"` to see full output
   console.log("[canvas-import] syllabus summary:\n" + debugRows.join("\n"));
+  if (scheduleRows.length > 0) {
+    console.log("[canvas-import] classSchedule summary:\n" + scheduleRows.join("\n"));
+  }
 
   // 10. Auto-generate tasks from assignments
   const tasksCreated = await generateTasksForUser(user.id);
