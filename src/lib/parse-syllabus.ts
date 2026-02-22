@@ -332,6 +332,107 @@ Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semeste
   }
 }
 
+// ─── Class Schedule from Canvas Calendar Events ───────────────────────────────
+
+const DOW_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"] as const;
+
+/**
+ * Infers a ClassMeeting schedule from raw Canvas calendar events.
+ * No AI — purely deterministic grouping by (time slot × day-of-week).
+ *
+ * Strategy:
+ *  1. For each event, extract local startTime/endTime from the ISO string
+ *     (avoids UTC conversion issues) and day-of-week from the date portion.
+ *  2. Group by (startTime, endTime, dayOfWeek) key.
+ *     A slot that appears ≥2 times is a confirmed recurring meeting.
+ *  3. Merge recurring slots by (startTime, endTime) → one ClassMeeting per
+ *     distinct time block, with days[] listing all days it recurs on.
+ *  4. Infer label from event title ("Lab", "Discussion", "Lecture", etc.).
+ */
+export function extractScheduleFromCalendarEvents(
+  events: { title: string; startAt: string; endAt: string; location: string | null }[],
+  termStartAt?: string | null,
+  termEndAt?: string | null,
+): ExtractedClassSchedule | null {
+  // Extract HH:MM directly from ISO string to avoid UTC offset shifting times
+  function isoTime(iso: string): string {
+    const m = iso.match(/T(\d{2}):(\d{2})/);
+    return m ? `${m[1]}:${m[2]}` : "00:00";
+  }
+  // Get day-of-week (0=Sun) from the date portion of an ISO string
+  function isoDow(iso: string): number {
+    const date = iso.split("T")[0]; // "YYYY-MM-DD"
+    return new Date(`${date}T12:00:00Z`).getDay();
+  }
+
+  // Count how many times each (startTime, endTime, dayOfWeek) slot appears
+  const slotCount = new Map<string, { count: number; locations: string[]; title: string }>();
+  for (const ev of events) {
+    if (!ev.startAt || !ev.endAt) continue;
+    const key = `${isoTime(ev.startAt)}~${isoTime(ev.endAt)}~${isoDow(ev.startAt)}`;
+    const existing = slotCount.get(key) ?? { count: 0, locations: [], title: ev.title };
+    existing.count++;
+    if (ev.location) existing.locations.push(ev.location);
+    slotCount.set(key, existing);
+  }
+
+  // Keep only recurring slots (count ≥ 2) and group by (startTime, endTime)
+  const timeGroups = new Map<string, { days: Set<number>; locations: string[]; title: string }>();
+  for (const [key, { count, locations, title }] of slotCount) {
+    if (count < 2) continue;
+    const [startTime, endTime, dowStr] = key.split("~");
+    const timeKey = `${startTime}~${endTime}`;
+    const tg = timeGroups.get(timeKey) ?? { days: new Set<number>(), locations: [], title };
+    tg.days.add(Number(dowStr));
+    for (const loc of locations) tg.locations.push(loc);
+    timeGroups.set(timeKey, tg);
+  }
+
+  if (timeGroups.size === 0) return null;
+
+  const meetings: ClassMeeting[] = [];
+  for (const [timeKey, { days, locations, title }] of timeGroups) {
+    const [startTime, endTime] = timeKey.split("~");
+
+    // Infer label from event title
+    const label = /\blab\b/i.test(title) ? "Lab"
+      : /\bdiscuss/i.test(title) ? "Discussion"
+      : /\brecit/i.test(title) ? "Recitation"
+      : /\blecture|lec\b/i.test(title) ? "Lecture"
+      : "";
+
+    // Most common location
+    const locationCounts = new Map<string, number>();
+    for (const l of locations) locationCounts.set(l, (locationCounts.get(l) ?? 0) + 1);
+    const location = locations.length > 0
+      ? [...locationCounts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+      : "";
+
+    meetings.push({
+      label,
+      days: [...days].sort().map((d) => DOW_CODES[d]),
+      startTime,
+      endTime,
+      location,
+    });
+  }
+
+  // Sort: lectures / unlabeled first, then labs/discussions, then by start time
+  meetings.sort((a, b) => {
+    const aMain = a.label === "" || a.label === "Lecture";
+    const bMain = b.label === "" || b.label === "Lecture";
+    if (aMain && !bMain) return -1;
+    if (!aMain && bMain) return 1;
+    return a.startTime.localeCompare(b.startTime);
+  });
+
+  return {
+    meetings,
+    semesterStart: termStartAt ? termStartAt.split("T")[0] : null,
+    semesterEnd:   termEndAt   ? termEndAt.split("T")[0]   : null,
+  };
+}
+
 // ─── Role 3 — Extractor ───────────────────────────────────────────────────────
 
 /**

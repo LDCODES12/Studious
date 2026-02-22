@@ -182,6 +182,11 @@ function extractScheduleSection(html) {
         materialCandidates: [],
         // Populated below: PDFs to actually download (1 auto/module + requested)
         materialFileUrls: [],
+        // Term dates for classSchedule semesterStart/End
+        termStartAt: c.term?.start_at ?? null,
+        termEndAt: c.term?.end_at ?? null,
+        // Populated below: 3-week window of Canvas calendar events (class schedule fallback)
+        calendarEvents: [],
       }));
 
     const payload = { courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
@@ -316,6 +321,35 @@ function extractScheduleSection(html) {
           course.gradingScheme = courseDetail.grading_standard.grading_scheme;
         }
       } catch { /* grading standard not available */ }
+
+      // ── Canvas Calendar Events (class meeting times fallback) ─────────────
+      // Fetches a 3-week window from the course calendar so the server can
+      // detect recurring meeting patterns (days/times) when the syllabus PDF
+      // doesn't explicitly state them. Silent on error — purely additive.
+      try {
+        const now = new Date();
+        const termStart = course.termStartAt ? new Date(course.termStartAt) : now;
+        // Start from the later of: term start OR 7 days ago (handles ongoing terms)
+        const scanFrom = new Date(Math.max(termStart.getTime(), now.getTime() - 7 * 86400_000));
+        const scanTo   = new Date(scanFrom.getTime() + 21 * 86400_000); // 3-week window
+        const startStr = scanFrom.toISOString().split("T")[0];
+        const endStr   = scanTo.toISOString().split("T")[0];
+        const calEvents = await fetchAll(
+          `${BASE}/calendar_events?context_codes[]=course_${course.id}&type=event` +
+          `&start_date=${startStr}&end_date=${endStr}&per_page=100`
+        );
+        course.calendarEvents = calEvents
+          .filter((e) => e.start_at && e.end_at)
+          .map((e) => ({
+            title: e.title ?? "",
+            startAt: e.start_at,
+            endAt: e.end_at,
+            location: e.location_name ?? null,
+          }));
+        if (course.calendarEvents.length > 0) {
+          console.log(`[scout] ${course.name} | calendarEvents: ${course.calendarEvents.length}`);
+        }
+      } catch { /* calendar events unavailable or restricted */ }
 
       // ── Syllabus PDF URLs ──────────────────────────────────────────────────
       // We collect download URLs here; the offscreen document (background.js)

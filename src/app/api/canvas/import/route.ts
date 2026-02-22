@@ -7,6 +7,7 @@ import {
   needsAudit,
   extractDropRules,
   extractClassSchedule,
+  extractScheduleFromCalendarEvents,
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
@@ -54,6 +55,12 @@ interface CanvasCourse {
   materialTexts?: SyllabusText[];
   /** All PDF file metadata from non-orientation modules — stored as candidates for student selection */
   materialCandidates?: MaterialCandidate[];
+  /** ISO start date of the course term (e.g. "2026-01-13T00:00:00Z") */
+  termStartAt?: string | null;
+  /** ISO end date of the course term */
+  termEndAt?: string | null;
+  /** 3-week window of Canvas calendar events — used as fallback for class schedule when syllabus lacks times */
+  calendarEvents?: { title: string; startAt: string; endAt: string; location: string | null }[];
 }
 
 interface CanvasAssignment {
@@ -791,24 +798,44 @@ export async function POST(request: NextRequest) {
       // Extracts recurring meeting patterns (days, times, room) so students
       // can add class times to Google Calendar with one click.
       // Only runs if the course doesn't already have a classSchedule stored.
-      if (syllabusText.length >= 200) {
-        try {
-          const existingCourse = await db.course.findUnique({
-            where: { id: scCourseId },
-            select: { classSchedule: true },
-          });
-          if (!existingCourse?.classSchedule) {
-            const classSchedule = await extractClassSchedule(syllabusText);
+      // Source priority:
+      //   1. Syllabus text (AI extraction) — most descriptive, has room info
+      //   2. Canvas calendar events (deterministic) — reliable fallback when
+      //      the syllabus doesn't mention meeting times
+      try {
+        const existingCourse = await db.course.findUnique({
+          where: { id: scCourseId },
+          select: { classSchedule: true },
+        });
+        if (!existingCourse?.classSchedule) {
+          let classSchedule = null;
+
+          // Source 1: syllabus text (AI)
+          if (syllabusText.length >= 200) {
+            classSchedule = await extractClassSchedule(syllabusText);
+          }
+
+          // Source 2: Canvas calendar events (deterministic fallback)
+          if (!classSchedule && c.calendarEvents && c.calendarEvents.length > 0) {
+            classSchedule = extractScheduleFromCalendarEvents(
+              c.calendarEvents,
+              c.termStartAt,
+              c.termEndAt,
+            );
             if (classSchedule) {
-              await db.course.update({
-                where: { id: scCourseId },
-                data: { classSchedule: classSchedule as object },
-              });
+              console.log(`[import] classSchedule from calendarEvents for ${c.name}: ${classSchedule.meetings.length} meeting(s)`);
             }
           }
-        } catch {
-          // Don't fail the whole import on this optional enrichment
+
+          if (classSchedule) {
+            await db.course.update({
+              where: { id: scCourseId },
+              data: { classSchedule: classSchedule as object },
+            });
+          }
         }
+      } catch {
+        // Don't fail the whole import on this optional enrichment
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
