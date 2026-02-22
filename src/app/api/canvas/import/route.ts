@@ -14,7 +14,7 @@ import crypto from "crypto";
 import { generateTasksForUser } from "@/lib/tasks";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
 
-export const maxDuration = 120; // allow up to 2 min for parallel AI syllabus parsing
+export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
 
 // ─── Types mirroring what the extension sends ────────────────────────────────
 
