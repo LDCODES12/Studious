@@ -641,14 +641,16 @@ export async function POST(request: NextRequest) {
       if (c.syllabusBody) {
         const bodyText = htmlToText(c.syllabusBody);
         if (bodyText.length >= 100) {
-          candidates.push({ text: bodyText, score: scheduleScore(bodyText), label: "html-body" });
+          // Score the best window — short HTML bodies are scored whole; large ones find densest slice
+          candidates.push({ text: bodyText, score: scheduleScore(bestWindow(bodyText)), label: "html-body" });
         }
       }
 
       for (const st of syllabusTexts) {
         const pdfText = st.text.trim();
         if (pdfText.length >= 100) {
-          candidates.push({ text: pdfText, score: scheduleScore(pdfText), label: st.fileName });
+          // Score using bestWindow so large PDFs with a dense schedule section aren't penalized by dilution
+          candidates.push({ text: pdfText, score: scheduleScore(bestWindow(pdfText)), label: st.fileName });
         }
 
         // Save as CourseMaterial (visible in the Materials tab)
@@ -887,7 +889,15 @@ export async function POST(request: NextRequest) {
           const hint   = `${src.label}, format: ${fmt}`;
           const raw    = await parseSyllabusTopics(win, hint);
           const result = sanitizeSchedule(raw).filter(isContentfulTopic);
-          if (result.length > 0) {
+
+          // Accept if: has weeks AND at least 40% of them have real topics/readings
+          // (not just "No Topics Listed" filler from an exam-dates-only HTML body)
+          const richWeeks = result.filter(
+            (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0
+          ).length;
+          const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
+
+          if (isGoodResult) {
             topics     = result;
             usedFormat = fmt;
             usedWindow = win;
