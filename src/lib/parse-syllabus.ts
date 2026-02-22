@@ -366,13 +366,17 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
 - "html-list" → bullet or numbered list items are individual schedule entries
 - "paragraph text" → schedule may be embedded in prose; look harder for patterns
 - "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)" →
-    This is a physical calendar grid. After PDF text extraction the 7 columns are interleaved in reading order.
-    Strategy: find the day-name header row (Sunday Monday Tuesday ... Saturday), then read subsequent rows
-    where each group of 7 date-cells forms one week. The meaningful content is in the cells that have both a
-    date and an event label (e.g. "Jan 26 Lecture 1", "Jan 27 Experiment 1: Gas constant [ABC]").
-    Group all events from the same 7-cell row as ONE week entry. Set startDate to the Monday of that row.
-    weekLabel should summarize the main lecture/experiment topic(s) for that week (e.g. "Lecture 1 / Experiment 1: Gas constant").
-    If a cell only has a date with no event name, skip it. If a cell says "No experiment" or "MLK day: no classes", record that as notes.
+    PDF text extraction destroys the 7-column grid structure — do NOT try to find exact grid rows.
+    Use this proximity-scan strategy instead:
+    1. Find ALL named events in the text: look for patterns like "Experiment 1", "Experiment 2", "Lecture 1",
+       "Lab 1", "Quiz 1", "Unit 1", or any numbered/named recurring event.
+    2. For each event, find the nearest date string in the surrounding ±200 characters (e.g. "Jan 14", "Feb 3").
+    3. Use that date to determine the week (Mon–Sun). Set startDate to that Monday as YYYY-MM-DD.
+    4. weekLabel = the event name(s) for that week (e.g. "Experiment 1: Gas Constant").
+    5. Group multiple events that fall in the same Mon–Sun week into ONE week entry.
+    6. If a cell says "No experiment", "No class", "MLK Day", or similar, record it as notes for that week.
+    CRITICAL: Even if the structure is ambiguous or garbled, ALWAYS extract whatever named events you can find
+    with their approximate dates. Return an empty array ONLY if there are literally zero event names in the text.
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly
@@ -380,7 +384,7 @@ IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Date-based: Individual class session dates → calculate week numbers from the dates
 - Module/unit-based: Group modules into sequential weeks
 - Table format: Many syllabi use schedule tables — read every row
-- Calendar grid: 7-column Sun-Sat physical calendar → each row of 7 cells = one week; extract events from cells that have content beyond just a date
+- Calendar grid: 7-column Sun-Sat physical calendar → PDF garbles the structure; use proximity-scan to find named events near dates
 
 WHAT TO EXTRACT:
 - Every topic title, subtopic, and specific concept explicitly listed in the schedule

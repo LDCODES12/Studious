@@ -159,8 +159,8 @@ function toDateOnly(iso: string | null): string | null {
 function scheduleScore(text: string): number {
   if (!text || text.length < 50) return 0;
   const t = text.toLowerCase();
-  // Strong indicators: explicit week/lecture markers with numbers
-  const weekHits   = (t.match(/\b(week|lecture|class|session|module)\s*\d+/g) ?? []).length;
+  // Strong indicators: explicit week/lecture/experiment/lab markers with numbers
+  const weekHits   = (t.match(/\b(week|lecture|class|session|module|experiment|lab|unit)\s*\d+/g) ?? []).length;
   // Medium: date patterns (Jan 13, 1/13, 01/13)
   const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
   // Medium: topic indicators
