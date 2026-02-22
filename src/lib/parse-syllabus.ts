@@ -373,6 +373,7 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
     2. For each event, find the nearest date string in the surrounding ±200 characters (e.g. "Jan 14", "Feb 3").
     3. Use that date to determine the week (Mon–Sun). Set startDate to that Monday as YYYY-MM-DD.
     4. weekLabel = the event name(s) for that week (e.g. "Experiment 1: Gas Constant").
+       Also add each event name to topics[] — e.g. topics: ["Experiment 1: Gas Constant"].
     5. Group multiple events that fall in the same Mon–Sun week into ONE week entry.
     6. If a cell says "No experiment", "No class", "MLK Day", or similar, record it as notes for that week.
     CRITICAL: Even if the structure is ambiguous or garbled, ALWAYS extract whatever named events you can find

@@ -826,16 +826,19 @@ export async function POST(request: NextRequest) {
         let topics: ReturnType<typeof sanitizeSchedule> = [];
         let usedLabel = bestLabel;
         let usedFormat = bestFormat;
+        let usedWindow = bestWindow(best?.text ?? ""); // track the actual text window the extractor used
 
         for (let ci = 0; ci < candidates.length; ci++) {
           const src    = candidates[ci];
+          const win    = bestWindow(src.text);
           const fmt    = detectSourceFormat(src.text);
           const hint   = `${src.label}, format: ${fmt}`;
-          const raw    = await parseSyllabusTopics(bestWindow(src.text), hint);
+          const raw    = await parseSyllabusTopics(win, hint);
           const result = sanitizeSchedule(raw).filter(isContentfulTopic);
           if (result.length > 0) {
             topics     = result;
             usedFormat = fmt;
+            usedWindow = win;
             usedLabel  = ci === 0
               ? bestLabel
               : `${src.label}(retry${ci},score=${src.score.toFixed(3)},${src.text.length}c)`;
@@ -851,10 +854,12 @@ export async function POST(request: NextRequest) {
         // ── Role 5: Auditor ───────────────────────────────────────────────
         // Second AI pass — only fires when the result looks partial or messy.
         // Corrects week labels, removes hallucinated topics, fixes date order.
+        // Passes the same bestWindow the extractor used — critical for calendar grid
+        // PDFs where the calendar is in the middle/end, not the first 6k chars.
         const preAuditCount = topics.length;
         const auditFired = needsAudit(topics);
         if (auditFired) {
-          const audited = await auditSchedule(topics, syllabusText);
+          const audited = await auditSchedule(topics, usedWindow);
           if (audited.length > 0) {
             topics    = audited;
             usedLabel = usedLabel + `+audited(${preAuditCount}→${audited.length})`;
