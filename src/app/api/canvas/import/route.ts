@@ -707,7 +707,7 @@ export async function POST(request: NextRequest) {
               detectedType: "syllabus",
               summary: "Syllabus automatically imported from Canvas.",
               relatedTopics: [],
-              rawText: pdfText.slice(0, 10_000),
+              rawText: pdfText.slice(0, 25_000),
               storedForAI: false,
             },
           });
@@ -768,7 +768,7 @@ export async function POST(request: NextRequest) {
                   detectedType: analysis.detectedType,
                   summary: analysis.summary,
                   relatedTopics: analysis.relatedTopics,
-                  rawText: pdfText.slice(0, 10_000),
+                  rawText: pdfText.slice(0, 25_000),
                   storedForAI,
                 },
               });

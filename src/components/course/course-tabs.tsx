@@ -11,6 +11,7 @@ import { QuizSection } from "./quiz-section";
 import { GradeBreakdown } from "./grade-breakdown";
 import { CourseOverview } from "./course-overview";
 import { CourseChat } from "./course-chat";
+import { FlashcardSection } from "./flashcard-section";
 
 interface Assignment {
   id: string;
@@ -401,7 +402,15 @@ function DeadlinesSection({
 
 // ── MaterialGroupSection ──────────────────────────────────────────────────────
 
-function MaterialGroupSection({ groupName, items }: { groupName: string; items: CourseMaterial[] }) {
+function MaterialGroupSection({
+  groupName,
+  items,
+  onToggleStoredForAI,
+}: {
+  groupName: string;
+  items: CourseMaterial[];
+  onToggleStoredForAI: (materialId: string, storedForAI: boolean) => Promise<void>;
+}) {
   const [open, setOpen] = useState(true);
   return (
     <div>
@@ -422,9 +431,58 @@ function MaterialGroupSection({ groupName, items }: { groupName: string; items: 
       {open && (
         <div className="space-y-2 pl-2">
           {items.map((m) => (
-            <MaterialCard key={m.id} material={m} />
+            <MaterialCard key={m.id} material={m} onToggleStoredForAI={onToggleStoredForAI} />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Study Tab (Quiz + AI Chat sub-tabs) ─────────────────────────────────────
+
+function StudyTab({
+  courseId,
+  hasStudyMaterials,
+  materials,
+}: {
+  courseId: string;
+  hasStudyMaterials: boolean;
+  materials: CourseMaterial[];
+}) {
+  const [activeSubTab, setActiveSubTab] = useState<"quiz" | "flashcards" | "chat">("quiz");
+
+  const subTabs = [
+    { key: "quiz" as const, label: "Quiz Me" },
+    { key: "flashcards" as const, label: "Flashcards" },
+    { key: "chat" as const, label: "Ask AI" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1 rounded-lg bg-muted p-1 w-fit">
+        {subTabs.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveSubTab(tab.key)}
+            className={cn(
+              "rounded-md px-4 py-1.5 text-sm font-medium transition-colors",
+              activeSubTab === tab.key
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeSubTab === "quiz" ? (
+        <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
+      ) : activeSubTab === "flashcards" ? (
+        <FlashcardSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
+      ) : (
+        <CourseChat courseId={courseId} />
       )}
     </div>
   );
@@ -543,6 +601,19 @@ export function CourseTabs({
     setMaterials((prev) => [material, ...prev]);
   };
 
+  const handleToggleStoredForAI = async (materialId: string, storedForAI: boolean) => {
+    const res = await fetch(`/api/courses/${courseId}/materials`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ materialId, storedForAI }),
+    });
+    if (res.ok) {
+      setMaterials((prev) =>
+        prev.map((m) => (m.id === materialId ? { ...m, storedForAI } : m))
+      );
+    }
+  };
+
   const handleProgressUpdate = (topicId: string, completed: string[]) => {
     setTopics((prev) =>
       prev.map((t) => (t.id === topicId ? { ...t, completedTopics: completed } : t))
@@ -585,7 +656,6 @@ export function CourseTabs({
         <TabsTrigger value="grades">Grades</TabsTrigger>
         <TabsTrigger value="content">Content</TabsTrigger>
         <TabsTrigger value="materials">Materials</TabsTrigger>
-        <TabsTrigger value="quiz">Quiz</TabsTrigger>
         <TabsTrigger value="study">Study</TabsTrigger>
       </TabsList>
 
@@ -680,9 +750,14 @@ export function CourseTabs({
           {/* Uploaded materials */}
           <div className="space-y-4">
             <div className="flex items-start justify-between gap-4">
-              <p className="text-[13px] text-muted-foreground">
-                Upload course PDFs — AI will classify and map them to your content timeline.
-              </p>
+              <div>
+                <p className="text-[13px] text-muted-foreground">
+                  Upload course PDFs — AI will classify and map them to your content timeline.
+                </p>
+                <p className="mt-1 text-[11px] text-muted-foreground/70">
+                  Lecture notes, slides, and textbooks are automatically marked <span className="font-medium text-emerald-600">Quiz-ready</span>. Click the badge on any material to change this.
+                </p>
+              </div>
               <MaterialUploader courseId={courseId} onUploadComplete={handleUploadComplete} />
             </div>
             {materials.length === 0 ? (
@@ -710,7 +785,7 @@ export function CourseTabs({
                 return (
                   <div className="space-y-3">
                     {materials.map((m) => (
-                      <MaterialCard key={m.id} material={m} />
+                      <MaterialCard key={m.id} material={m} onToggleStoredForAI={handleToggleStoredForAI} />
                     ))}
                   </div>
                 );
@@ -718,7 +793,7 @@ export function CourseTabs({
               return (
                 <div className="space-y-4">
                   {entries.map(([groupName, items]) => (
-                    <MaterialGroupSection key={groupName} groupName={groupName} items={items} />
+                    <MaterialGroupSection key={groupName} groupName={groupName} items={items} onToggleStoredForAI={handleToggleStoredForAI} />
                   ))}
                 </div>
               );
@@ -789,14 +864,9 @@ export function CourseTabs({
         </div>
       </TabsContent>
 
-      {/* ── Quiz Tab ── */}
-      <TabsContent value="quiz">
-        <QuizSection courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
-      </TabsContent>
-
-      {/* ── Study Tab ── */}
+      {/* ── Study Tab (Quiz + AI Chat) ── */}
       <TabsContent value="study">
-        <CourseChat courseId={courseId} />
+        <StudyTab courseId={courseId} hasStudyMaterials={hasStudyMaterials} materials={materials} />
       </TabsContent>
     </Tabs>
   );

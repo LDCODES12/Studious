@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import { format, parseISO } from "date-fns";
 import { cn } from "@/lib/utils";
 
@@ -28,7 +31,25 @@ const typeBadgeColor: Record<string, string> = {
   other: "bg-gray-100 text-gray-600",
 };
 
-export function MaterialCard({ material }: { material: CourseMaterial }) {
+export function MaterialCard({
+  material,
+  onToggleStoredForAI,
+}: {
+  material: CourseMaterial;
+  onToggleStoredForAI?: (materialId: string, storedForAI: boolean) => Promise<void>;
+}) {
+  const [toggling, setToggling] = useState(false);
+
+  const handleToggle = async () => {
+    if (!onToggleStoredForAI || toggling) return;
+    setToggling(true);
+    try {
+      await onToggleStoredForAI(material.id, !material.storedForAI);
+    } finally {
+      setToggling(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
@@ -49,11 +70,19 @@ export function MaterialCard({ material }: { material: CourseMaterial }) {
           >
             {typeLabels[material.detectedType] ?? "Other"}
           </span>
-          {material.storedForAI && (
-            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-700">
-              Study material
-            </span>
-          )}
+          <button
+            onClick={handleToggle}
+            disabled={toggling}
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors",
+              material.storedForAI
+                ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                : "bg-gray-100 text-gray-500 hover:bg-gray-200",
+              toggling && "opacity-50 cursor-wait"
+            )}
+          >
+            {material.storedForAI ? "Quiz-ready" : "Not in quizzes"}
+          </button>
         </div>
       </div>
 

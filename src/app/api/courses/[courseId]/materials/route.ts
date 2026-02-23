@@ -47,7 +47,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       detectedType: analysis.detectedType,
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
-      rawText: text.slice(0, 10000),
+      rawText: text.slice(0, 25000),
       storedForAI,
     },
   });
@@ -65,6 +65,42 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     },
     { status: 201 }
   );
+}
+
+export async function PATCH(request: NextRequest, { params }: RouteParams) {
+  const { courseId } = await params;
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await request.json();
+  const { materialId, storedForAI } = body as { materialId?: string; storedForAI?: boolean };
+
+  if (!materialId || typeof storedForAI !== "boolean") {
+    return NextResponse.json(
+      { error: "materialId and storedForAI (boolean) are required" },
+      { status: 400 }
+    );
+  }
+
+  const material = await db.courseMaterial.findFirst({
+    where: { id: materialId, courseId, course: { userId: session.user.id } },
+  });
+
+  if (!material) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const updated = await db.courseMaterial.update({
+    where: { id: materialId },
+    data: { storedForAI },
+  });
+
+  return NextResponse.json({
+    id: updated.id,
+    storedForAI: updated.storedForAI,
+  });
 }
 
 export async function GET(request: NextRequest, { params }: RouteParams) {

@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
           detectedType: analysis.detectedType,
           summary: analysis.summary,
           relatedTopics: analysis.relatedTopics,
-          rawText: file.text.slice(0, 10000),
+          rawText: file.text.slice(0, 25000),
           storedForAI: analysis.storedForAI,
         },
       });

@@ -80,13 +80,13 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     ));
   }
 
-  // Concatenate rawText up to 24k chars
+  // Concatenate rawText up to 60k chars
   let combinedText = "";
   for (const m of materials) {
-    if (combinedText.length >= 24000) break;
+    if (combinedText.length >= 60000) break;
     combinedText += `\n\n--- ${m.fileName} ---\n${m.rawText}`;
   }
-  combinedText = combinedText.slice(0, 24000);
+  combinedText = combinedText.slice(0, 60000);
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
