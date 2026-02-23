@@ -71,11 +71,11 @@ const COURSE_BG_LIGHT: Record<string, string> = {
 };
 
 const COURSE_BG_SOLID: Record<string, string> = {
-  blue: "bg-blue-500 text-white",
-  green: "bg-green-500 text-white",
-  purple: "bg-purple-500 text-white",
-  orange: "bg-orange-500 text-white",
-  rose: "bg-rose-500 text-white",
+  blue: "bg-blue-500 text-white border-l-blue-700",
+  green: "bg-green-500 text-white border-l-green-700",
+  purple: "bg-purple-500 text-white border-l-purple-700",
+  orange: "bg-orange-500 text-white border-l-orange-700",
+  rose: "bg-rose-500 text-white border-l-rose-700",
 };
 
 const HOURS = Array.from({ length: 17 }, (_, i) => i + 6); // 6 AM → 10 PM
@@ -233,44 +233,42 @@ export function ScheduleView() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex gap-8">
+    <div className="flex min-h-0 flex-1 gap-6">
       {/* Main calendar area */}
-      <div className="min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Header toolbar */}
-        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
           <div className="flex items-center gap-1">
             <button
               onClick={goToday}
-              className="rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-accent transition-colors"
+              className="rounded border border-border px-2.5 py-1 text-[12px] hover:bg-muted"
             >
               Today
             </button>
             <button
               onClick={goPrev}
-              className="rounded-lg p-2 hover:bg-accent transition-colors"
+              className="rounded p-1.5 hover:bg-muted"
               aria-label="Previous"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronLeft className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={goNext}
-              className="rounded-lg p-2 hover:bg-accent transition-colors"
+              className="rounded p-1.5 hover:bg-muted"
               aria-label="Next"
             >
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-3.5 w-3.5" />
             </button>
           </div>
 
-          <h2 className="min-w-[180px] text-base font-semibold">{headerLabel}</h2>
+          <h2 className="text-[15px] font-medium">{headerLabel}</h2>
 
-          <div className="ml-auto flex rounded-lg bg-muted/50 p-0.5">
+          <div className="ml-auto flex gap-0.5">
             <button
               onClick={() => setView("week")}
               className={cn(
-                "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
-                view === "week"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
+                "rounded px-2.5 py-1 text-[11px]",
+                view === "week" ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground"
               )}
             >
               Week
@@ -278,10 +276,8 @@ export function ScheduleView() {
             <button
               onClick={() => setView("month")}
               className={cn(
-                "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
-                view === "month"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
+                "rounded px-2.5 py-1 text-[11px]",
+                view === "month" ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground"
               )}
             >
               Month
@@ -292,24 +288,23 @@ export function ScheduleView() {
         {!googleConnected && !loading && (
           <a
             href="/api/auth/google?returnTo=%2Fschedule"
-            className="mb-4 flex items-center gap-3 rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4 transition-colors hover:bg-primary/10 hover:border-primary/50 lg:hidden"
+            className="mb-3 flex items-center gap-2.5 rounded-lg border border-dashed border-border p-3 hover:bg-muted/50 lg:hidden"
           >
-            <CalendarPlus className="h-5 w-5 shrink-0 text-primary" />
+            <CalendarPlus className="h-4 w-4 text-muted-foreground" />
             <div>
-              <p className="text-[13px] font-medium">Connect Google Calendar</p>
-              <p className="text-[11px] text-muted-foreground">
-                See your events alongside assignments
-              </p>
+              <p className="text-[12px] font-medium">Connect Google Calendar</p>
+              <p className="text-[11px] text-muted-foreground">See your events</p>
             </div>
           </a>
         )}
 
         {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+          <div className="flex flex-1 items-center justify-center py-20">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground" />
           </div>
         ) : view === "week" ? (
-          <WeekView
+          <div className="min-h-0 flex-1">
+            <WeekView
             weekStart={weekStart}
             assignments={assignments}
             calendarEvents={calendarEvents}
@@ -318,6 +313,7 @@ export function ScheduleView() {
             eventsForDay={eventsForDay}
             onSelectEvent={setSelectedEvent}
           />
+          </div>
         ) : (
           <MonthView
             currentDate={currentDate}
@@ -337,20 +333,16 @@ export function ScheduleView() {
         {!googleConnected && (
           <a
             href="/api/auth/google?returnTo=%2Fschedule"
-            className="flex items-center gap-3 rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4 transition-colors hover:bg-primary/10 hover:border-primary/50"
+            className="flex items-center gap-2.5 rounded-lg border border-dashed border-border p-3 hover:bg-muted/50"
           >
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-              <CalendarPlus className="h-5 w-5 text-primary" />
-            </div>
+            <CalendarPlus className="h-4 w-4 text-muted-foreground" />
             <div>
-              <p className="text-[13px] font-medium">Connect Google Calendar</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                See your events alongside assignments
-              </p>
+              <p className="text-[12px] font-medium">Connect Google Calendar</p>
+              <p className="text-[11px] text-muted-foreground">See your events</p>
             </div>
           </a>
         )}
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <div className="rounded-lg border border-border bg-card p-3">
           <MiniCalendar
             currentDate={currentDate}
             onSelectDate={(d) => {
@@ -361,9 +353,9 @@ export function ScheduleView() {
         </div>
 
         {/* Upcoming deadlines */}
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-          <h3 className="mb-3 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
-            <Clock className="h-3.5 w-3.5" />
+        <div className="rounded-lg border border-border bg-card p-3">
+          <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Clock className="h-3 w-3" />
             Upcoming
           </h3>
           <UpcomingList assignments={assignments} />
@@ -371,19 +363,19 @@ export function ScheduleView() {
 
         {/* AI Suggestions */}
         {(suggestionsLoading || suggestions.length > 0) && (
-          <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-            <h3 className="mb-3 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
-              <Sparkles className="h-3.5 w-3.5" />
+          <div className="rounded-lg border border-border bg-card p-3">
+            <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+              <Sparkles className="h-3 w-3" />
               Study Suggestions
             </h3>
             {suggestionsLoading ? (
-              <p className="text-[12px] text-muted-foreground">Generating...</p>
+              <p className="text-[11px] text-muted-foreground">Generating...</p>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 {suggestions.map((s, i) => (
                   <div
                     key={i}
-                    className="rounded-lg border border-border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
+                    className="rounded border border-border bg-muted/30 p-2 hover:bg-muted/50"
                   >
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {format(new Date(s.day + "T12:00:00"), "EEE, MMM d")} · {s.time}
@@ -442,27 +434,25 @@ function WeekView({
   const todayIndex = days.findIndex((d) => isToday(d));
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border bg-card">
       {/* Day headers */}
-      <div className="grid border-b border-border bg-muted/30" style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}>
-        <div className="border-r border-border py-2" />
+      <div className="grid shrink-0 border-b border-border" style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}>
+        <div className="border-r border-border py-1.5" />
         {days.map((day) => (
           <div
             key={day.toISOString()}
             className={cn(
-              "border-r border-border px-2 py-3 text-center last:border-r-0",
-              isToday(day) && "bg-primary/5"
+              "border-r border-border px-1 py-2 text-center last:border-r-0",
+              isToday(day) && "bg-muted/50"
             )}
           >
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="text-[10px] text-muted-foreground">
               {format(day, "EEE")}
             </div>
             <div
               className={cn(
-                "mx-auto mt-1 flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold transition-colors",
-                isToday(day)
-                  ? "bg-primary text-primary-foreground"
-                  : "text-foreground"
+                "mt-0.5 text-[13px] font-medium",
+                isToday(day) ? "text-foreground" : "text-muted-foreground"
               )}
             >
               {format(day, "d")}
@@ -474,27 +464,23 @@ function WeekView({
       {/* All-day events row */}
       <AllDayRow days={days} assignmentsForDay={assignmentsForDay} eventsForDay={eventsForDay} />
 
-      {/* Time grid — scrollable with momentum on touch devices */}
+      {/* Time grid — single scroll context, no nested scroll */}
       <div
         ref={gridRef}
-        className="relative overflow-y-auto overscroll-contain"
-        style={{
-          minHeight: 320,
-          maxHeight: "min(calc(100vh - 260px), 720px)",
-          WebkitOverflowScrolling: "touch",
-        }}
+        className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        style={{ WebkitOverflowScrolling: "touch" }}
       >
-        <div className="relative" style={{ height: HOURS.length * HOUR_HEIGHT }}>
+        <div className="relative" style={{ height: HOURS.length * HOUR_HEIGHT, paddingTop: 4, paddingBottom: 24 }}>
           {/* Hour lines */}
           {HOURS.map((hour) => (
             <div
               key={hour}
               className="absolute w-full"
-              style={{ top: (hour - 6) * HOUR_HEIGHT }}
+              style={{ top: 4 + (hour - 6) * HOUR_HEIGHT }}
             >
-              <div className="grid" style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}>
-                <div className="relative border-r border-border pr-2">
-                  <span className="absolute -top-2.5 right-2 text-[10px] font-medium text-muted-foreground">
+              <div className="grid" style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}>
+                <div className="relative border-r border-border pr-1.5">
+                  <span className="absolute -top-2 right-1 text-[10px] text-muted-foreground">
                     {hour < 12 ? `${hour === 0 ? 12 : hour} AM` : `${hour === 12 ? 12 : hour - 12} PM`}
                   </span>
                 </div>
@@ -517,14 +503,14 @@ function WeekView({
             <div
               className="absolute z-20 pointer-events-none"
               style={{
-                top: nowTop,
-                left: `calc(60px + ${todayIndex} * (100% - 60px) / 7)`,
-                width: `calc((100% - 60px) / 7)`,
+                top: 4 + nowTop,
+                left: `calc(56px + ${todayIndex} * (100% - 56px) / 7)`,
+                width: `calc((100% - 56px) / 7)`,
               }}
             >
               <div className="flex items-center">
-                <div className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
-                <div className="h-px flex-1 bg-red-500" />
+                <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500/90" />
+                <div className="h-px flex-1 bg-red-500/60" />
               </div>
             </div>
           )}
@@ -541,8 +527,8 @@ function WeekView({
                 key={day.toISOString()}
                 className="absolute top-0"
                 style={{
-                  left: `calc(60px + ${dayIndex} * (100% - 60px) / 7)`,
-                  width: `calc((100% - 60px) / 7)`,
+                  left: `calc(56px + ${dayIndex} * (100% - 56px) / 7)`,
+                  width: `calc((100% - 56px) / 7)`,
                   height: "100%",
                 }}
               >
@@ -551,20 +537,20 @@ function WeekView({
                   const start = parseEventTime(event.start);
                   const end = parseEventTime(event.end);
                   if (!start || !end) return null;
-                  const top = getEventTop(start);
+                  const top = 4 + getEventTop(start);
                   const height = getEventHeight(start, end);
                   return (
                     <button
                       key={event.id}
                       onClick={() => onSelectEvent(event)}
-                      className="absolute left-1 right-1 z-10 cursor-pointer overflow-hidden rounded-md border border-indigo-200/80 bg-indigo-50 px-2 py-1 text-left transition-all hover:bg-indigo-100 hover:shadow-sm"
-                      style={{ top, height: Math.max(height, 24) }}
+                      className="absolute left-1 right-1 z-10 cursor-pointer overflow-hidden rounded-sm border-l-2 border-l-slate-400 bg-slate-100/90 px-1.5 py-0.5 text-left hover:bg-slate-200/90 dark:border-l-slate-500 dark:bg-slate-800/60 dark:hover:bg-slate-700/60"
+                      style={{ top, height: Math.max(height, 22) }}
                     >
-                      <p className="truncate text-[10px] font-medium text-indigo-800">
+                      <p className="truncate text-[10px] text-slate-800 dark:text-slate-200">
                         {event.summary}
                       </p>
-                      {height >= 40 && (
-                        <p className="mt-0.5 text-[9px] text-indigo-600">
+                      {height >= 36 && (
+                        <p className="mt-0.5 text-[9px] text-slate-600 dark:text-slate-400">
                           {format(start, "h:mm a")} – {format(end, "h:mm a")}
                         </p>
                       )}
@@ -574,16 +560,16 @@ function WeekView({
 
                 {/* Assignment deadlines */}
                 {dayAssignments.map((a, ai) => {
-                  const top = 2 + ai * 24;
+                  const top = 6 + ai * 22;
                   return (
                     <button
                       key={a.id}
                       onClick={() => onSelectEvent(a)}
                       className={cn(
-                        "absolute left-1 right-1 z-10 cursor-pointer truncate rounded-md px-2 py-1 text-left text-[10px] font-medium transition-all hover:shadow-sm",
+                        "absolute left-1 right-1 z-10 cursor-pointer truncate rounded-sm border-l-2 px-1.5 py-0.5 text-left text-[10px] hover:opacity-90",
                         COURSE_BG_SOLID[a.course.color] ?? "bg-gray-500 text-white"
                       )}
-                      style={{ top, height: 22 }}
+                      style={{ top, height: 20 }}
                       title={`${a.title} — ${a.course.shortName ?? a.course.name}`}
                     >
                       {a.title}
@@ -619,20 +605,20 @@ function AllDayRow({
 
   return (
     <div
-      className="grid border-b border-border bg-muted/20"
-      style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}
+      className="grid border-b border-border"
+      style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}
     >
-      <div className="flex items-center justify-center border-r border-border py-2">
-        <span className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">All day</span>
+      <div className="flex items-center border-r border-border py-1 pl-1">
+        <span className="text-[9px] text-muted-foreground">All day</span>
       </div>
       {days.map((day) => {
         const allDay = eventsForDay(day).filter((e) => isAllDayEvent(e.start, e.end));
         return (
-          <div key={day.toISOString()} className="min-h-[28px] border-r border-border px-1 py-0.5 last:border-r-0">
+          <div key={day.toISOString()} className="min-h-[24px] border-r border-border px-1 py-0.5 last:border-r-0">
             {allDay.map((e) => (
               <div
                 key={e.id}
-                className="truncate rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium text-indigo-700"
+                className="truncate rounded-sm border-l-2 border-l-slate-400 bg-slate-100 px-1 py-0.5 text-[10px] text-slate-800 dark:bg-slate-800/60 dark:text-slate-200"
               >
                 {e.summary}
               </div>
@@ -673,13 +659,13 @@ function MonthView({
   const MAX_VISIBLE = 3;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <div className="overflow-hidden rounded-md border border-border bg-card">
       {/* Day-of-week headers */}
-      <div className="grid grid-cols-7 border-b border-border bg-muted/30">
+      <div className="grid grid-cols-7 border-b border-border">
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
           <div
             key={d}
-            className="border-r border-border px-2 py-2.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted-foreground last:border-r-0"
+            className="border-r border-border px-1 py-2 text-center text-[10px] text-muted-foreground last:border-r-0"
           >
             {d}
           </div>
@@ -705,24 +691,20 @@ function MonthView({
                 key={day.toISOString()}
                 onClick={() => onDayClick(day)}
                 className={cn(
-                  "group relative min-h-[110px] border-r border-border p-2 text-left transition-colors hover:bg-accent/50 last:border-r-0",
+                  "group relative min-h-[100px] border-r border-border p-1.5 text-left hover:bg-muted/40 last:border-r-0",
                   !inMonth && "bg-muted/20"
                 )}
               >
                 <div
                   className={cn(
-                    "mb-1.5 flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-semibold transition-colors",
-                    isToday(day)
-                      ? "bg-primary text-primary-foreground"
-                      : inMonth
-                        ? "text-foreground"
-                        : "text-muted-foreground/40"
+                    "mb-1 text-[13px] font-medium",
+                    isToday(day) ? "text-foreground" : inMonth ? "text-foreground/90" : "text-muted-foreground/50"
                   )}
                 >
                   {format(day, "d")}
                 </div>
 
-                <div className="space-y-1">
+                <div className="space-y-0.5">
                   {visible.map((entry, i) => {
                     if (entry.type === "assignment") {
                       const a = entry.item as Assignment;
@@ -730,7 +712,7 @@ function MonthView({
                         <div
                           key={a.id}
                           className={cn(
-                            "truncate rounded px-1.5 py-0.5 text-[10px] font-medium",
+                            "truncate rounded-sm px-1 py-px text-[10px]",
                             COURSE_BG_LIGHT[a.course.color] ?? "bg-gray-100 text-gray-700"
                           )}
                         >
@@ -742,15 +724,15 @@ function MonthView({
                     return (
                       <div
                         key={e.id}
-                        className="truncate rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700"
+                        className="truncate rounded-sm border-l-2 border-l-slate-400 bg-slate-100 px-1 py-px text-[10px] text-slate-800 dark:bg-slate-800/60 dark:text-slate-200"
                       >
                         {e.summary}
                       </div>
                     );
                   })}
                   {overflow > 0 && (
-                    <div className="text-[10px] font-medium text-muted-foreground">
-                      +{overflow} more
+                    <div className="text-[10px] text-muted-foreground">
+                      +{overflow}
                     </div>
                   )}
                 </div>
@@ -903,10 +885,10 @@ function EventPopover({
   const isAssignment = "course" in event;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
       <div
         ref={ref}
-        className="w-[360px] rounded-2xl border border-border bg-card p-6 shadow-2xl"
+        className="w-[340px] rounded-lg border border-border bg-card p-5 shadow-lg"
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
