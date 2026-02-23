@@ -471,7 +471,20 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 if (lower.includes("graded")) status = "graded";
                 else if (lower.includes("submitted") && status !== "graded") status = "submitted";
               }
-              results.push({ title, score, maxScore, status, gradescopeAssignmentId });
+
+              // Extract due date from <time datetime="..."> elements in the row.
+              // Gradescope rows can have multiple time tags (released, due).
+              // The due date is typically the last one.
+              let dueDate = null;
+              const timeTags = row.querySelectorAll("time[datetime]");
+              if (timeTags.length > 0) {
+                const dt = timeTags[timeTags.length - 1].getAttribute("datetime");
+                if (dt) {
+                  try { dueDate = new Date(dt).toISOString().split("T")[0]; } catch { /* skip */ }
+                }
+              }
+
+              results.push({ title, score, maxScore, status, gradescopeAssignmentId, dueDate });
             }
             return results;
           },

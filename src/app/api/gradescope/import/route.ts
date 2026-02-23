@@ -47,6 +47,7 @@ interface GradescopeAssignment {
   maxScore: number | null;
   status: string;
   gradescopeAssignmentId: string | null;
+  dueDate: string | null;
 }
 
 interface GradescopeCourse {
@@ -84,7 +85,7 @@ export async function POST(request: NextRequest) {
       name: true,
       gradescopeCourseId: true,
       assignments: {
-        select: { id: true, title: true, score: true, gradescopeId: true },
+        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true },
       },
     },
   });
@@ -117,7 +118,7 @@ export async function POST(request: NextRequest) {
       s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 
     for (const gsAssignment of gsCourse.assignments) {
-      const { title, score, maxScore, status, gradescopeAssignmentId } = gsAssignment;
+      const { title, score, maxScore, status, gradescopeAssignmentId, dueDate } = gsAssignment;
 
       // 1. Exact GS assignment ID match (best — already linked from a prior sync)
       if (gradescopeAssignmentId) {
@@ -125,11 +126,16 @@ export async function POST(request: NextRequest) {
           (a) => a.gradescopeId === gradescopeAssignmentId,
         );
         if (existing) {
+          const data: Record<string, unknown> = {};
           if (score !== null && maxScore !== null) {
-            await db.assignment.update({
-              where: { id: existing.id },
-              data: { gradescopeScore: score, gradescopeMaxScore: maxScore },
-            });
+            data.gradescopeScore = score;
+            data.gradescopeMaxScore = maxScore;
+          }
+          if (dueDate && !existing.dueDate) {
+            data.dueDate = dueDate;
+          }
+          if (Object.keys(data).length > 0) {
+            await db.assignment.update({ where: { id: existing.id }, data });
             updated++;
             courseUpdated++;
           }
@@ -144,14 +150,18 @@ export async function POST(request: NextRequest) {
       );
 
       if (canvasMatch) {
-        await db.assignment.update({
-          where: { id: canvasMatch.id },
-          data: {
-            ...(score !== null && maxScore !== null ? { gradescopeScore: score, gradescopeMaxScore: maxScore } : {}),
-            ...(gradescopeAssignmentId ? { gradescopeId: gradescopeAssignmentId } : {}),
-          },
-        });
-        if (score !== null && maxScore !== null) { updated++; courseUpdated++; }
+        const data: Record<string, unknown> = {};
+        if (score !== null && maxScore !== null) {
+          data.gradescopeScore = score;
+          data.gradescopeMaxScore = maxScore;
+        }
+        if (gradescopeAssignmentId) data.gradescopeId = gradescopeAssignmentId;
+        if (dueDate && !canvasMatch.dueDate) data.dueDate = dueDate;
+
+        if (Object.keys(data).length > 0) {
+          await db.assignment.update({ where: { id: canvasMatch.id }, data });
+          if (score !== null && maxScore !== null) { updated++; courseUpdated++; }
+        }
         continue;
       }
 
@@ -169,6 +179,7 @@ export async function POST(request: NextRequest) {
           courseId,
           title,
           type: inferType(title),
+          dueDate: dueDate ?? null,
           status: status === "graded" ? "graded" : status === "submitted" ? "submitted" : "not_started",
           gradescopeId: gradescopeAssignmentId,
           gradescopeScore: score,
