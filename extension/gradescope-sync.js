@@ -16,6 +16,34 @@
 (async () => {
   const LOG = "[gs-full-sync]";
 
+  // Direct-to-server logging so we can debug without opening the tab's console.
+  // Reads the server URL from chrome.storage.local (set during extension setup).
+  let _serverUrl = null;
+  let _apiToken = null;
+  try {
+    const s = await chrome.storage.local.get(["scUrl", "apiToken"]);
+    _serverUrl = s.scUrl;
+    _apiToken = s.apiToken;
+  } catch { /* best-effort */ }
+
+  const _gsLogs = [];
+  function gsLog(step, detail) {
+    const entry = { t: Date.now(), step, ...detail };
+    _gsLogs.push(entry);
+    console.log(`${LOG} ${step}`, detail || "");
+  }
+
+  async function flushGsLogs() {
+    if (!_serverUrl || _gsLogs.length === 0) return;
+    try {
+      await fetch(`https://${_serverUrl}/api/extension-log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ..._apiToken ? { Authorization: `Bearer ${_apiToken}` } : {} },
+        body: JSON.stringify(_gsLogs.map(e => ({ source: "gs-sync", ...e }))),
+      });
+    } catch { /* best-effort */ }
+  }
+
   function courseNameFromTitle(title) {
     if (!title) return "";
     const stripped = title.replace(/\s*[-|]\s*Gradescope\s*$/i, "").trim();
@@ -77,20 +105,25 @@
   }
 
   try {
+    gsLog("script_started", { url: location.href });
+
     // ── Step 1: Fetch the Gradescope dashboard ──────────────────────────────
-    // Same-origin fetch uses the user's session cookies automatically.
     const dashResp = await fetch("https://www.gradescope.com/", {
       credentials: "same-origin",
       headers: { Accept: "text/html" },
     });
 
+    gsLog("dashboard_fetched", { status: dashResp.status, ok: dashResp.ok, url: dashResp.url });
+
     if (!dashResp.ok) {
-      console.warn(`${LOG} dashboard fetch failed: ${dashResp.status}`);
+      gsLog("dashboard_fail", { status: dashResp.status });
+      await flushGsLogs();
       chrome.runtime.sendMessage({ type: "GS_SYNC_DATA", courses: [] });
       return;
     }
 
     const dashHtml = await dashResp.text();
+    gsLog("dashboard_html", { length: dashHtml.length, snippet: dashHtml.slice(0, 200) });
     const dashDoc = new DOMParser().parseFromString(dashHtml, "text/html");
 
     // ── Step 2: Discover all courses ────────────────────────────────────────
@@ -108,13 +141,14 @@
       if (name && name.length > 1) courseMap.set(courseId, name);
     }
 
+    gsLog("courses_discovered", { count: courseMap.size, ids: [...courseMap.keys()] });
+
     if (courseMap.size === 0) {
-      console.log(`${LOG} no courses found on dashboard (not logged in?)`);
+      gsLog("no_courses");
+      await flushGsLogs();
       chrome.runtime.sendMessage({ type: "GS_SYNC_DATA", courses: [] });
       return;
     }
-
-    console.log(`${LOG} found ${courseMap.size} courses on dashboard`);
 
     // ── Step 3: Scrape assignments for each course ──────────────────────────
     const courses = [];
@@ -152,11 +186,15 @@
       }
     }
 
-    console.log(`${LOG} done: ${courses.length} courses with assignments`);
+    gsLog("scraping_done", { courseCount: courses.length });
+    await flushGsLogs();
     chrome.runtime.sendMessage({ type: "GS_SYNC_DATA", courses });
 
   } catch (err) {
-    console.error(`${LOG} fatal error:`, err);
-    chrome.runtime.sendMessage({ type: "GS_SYNC_DATA", courses: [] });
+    gsLog("fatal_error", { error: err?.message ?? String(err), stack: err?.stack?.slice(0, 300) });
+    await flushGsLogs();
+    try {
+      chrome.runtime.sendMessage({ type: "GS_SYNC_DATA", courses: [] });
+    } catch { /* sendMessage itself failed */ }
   }
 })();
