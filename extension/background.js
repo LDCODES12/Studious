@@ -331,27 +331,37 @@ async function syncGradescope(scUrl, apiToken) {
     try {
       const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
       createdTab = true;
-      syncLog("gs_tab_created", { tabId: tab.id });
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Gradescope took too long to load")), 15_000);
-        chrome.tabs.onUpdated.addListener(function listener(id, info) {
-          if (id === tab.id && info.status === "complete") {
-            clearTimeout(timeout);
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        });
-      });
       gsTabId = tab.id;
-      syncLog("gs_tab_loaded", { tabId: gsTabId });
+      syncLog("gs_tab_created", { tabId: tab.id });
     } catch (err) {
       syncLog("gs_tab_error", { error: err?.message });
       return null;
     }
   }
 
+  // Helper: navigate the GS tab and wait for page load + SPA render
+  async function navigateGsTab(url) {
+    await chrome.tabs.update(gsTabId, { url });
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(new Error("page load timeout"));
+      }, 15_000);
+      function listener(id, info) {
+        if (id === gsTabId && info.status === "complete") {
+          clearTimeout(timeout);
+          chrome.tabs.onUpdated.removeListener(listener);
+          setTimeout(resolve, 800);
+        }
+      }
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+  }
+
   try {
-    syncLog("gs_execute", { tabId: gsTabId });
+    // Always navigate to the dashboard first, regardless of where the tab currently is
+    syncLog("gs_nav_dashboard", { tabId: gsTabId });
+    await navigateGsTab("https://www.gradescope.com/");
 
     // Phase 1: Scrape the dashboard for course IDs and names (rendered DOM).
     const [dashResult] = await chrome.scripting.executeScript({
@@ -394,25 +404,7 @@ async function syncGradescope(scUrl, apiToken) {
 
     for (const [cid, dashName] of courseEntries) {
       try {
-        // Navigate the tab to the course assignments page
-        await chrome.tabs.update(gsTabId, { url: `https://www.gradescope.com/courses/${cid}` });
-
-        // Wait for the page to fully load
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error("page load timeout"));
-          }, 12_000);
-          function listener(id, info) {
-            if (id === gsTabId && info.status === "complete") {
-              clearTimeout(timeout);
-              chrome.tabs.onUpdated.removeListener(listener);
-              // Small delay for SPA rendering after "complete" fires
-              setTimeout(resolve, 800);
-            }
-          }
-          chrome.tabs.onUpdated.addListener(listener);
-        });
+        await navigateGsTab(`https://www.gradescope.com/courses/${cid}`);
 
         // Scrape the rendered assignments from the live DOM
         const [courseResult] = await chrome.scripting.executeScript({
