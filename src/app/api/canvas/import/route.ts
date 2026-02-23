@@ -64,6 +64,8 @@ interface CanvasCourse {
   termEndAt?: string | null;
   /** 3-week window of Canvas calendar events — used as fallback for class schedule when syllabus lacks times */
   calendarEvents?: { title: string; startAt: string; endAt: string; location: string | null }[];
+  /** Gradescope course ID extracted from the Canvas LTI tab link */
+  gradescopeCourseId?: string | null;
 }
 
 interface CanvasAssignment {
@@ -358,6 +360,7 @@ export async function POST(request: NextRequest) {
         where: { id: existing.id },
         data: {
           canvasCourseId: canvasId,
+          gradescopeCourseId: c.gradescopeCourseId ?? undefined,
           instructor: c.instructor ?? undefined,
           term: c.term ?? undefined,
           shortName: c.courseCode ?? undefined,
@@ -376,6 +379,7 @@ export async function POST(request: NextRequest) {
         data: {
           userId: user.id,
           canvasCourseId: canvasId,
+          gradescopeCourseId: c.gradescopeCourseId ?? null,
           name: c.name,
           shortName: c.courseCode ?? null,
           instructor: c.instructor ?? null,

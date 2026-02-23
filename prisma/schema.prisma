@@ -70,7 +70,8 @@ model Course {
   color          String           @default("blue")
   schedule       String?
   location       String?
-  canvasCourseId String?          // Canvas course ID for upsert sync
+  canvasCourseId     String?       // Canvas course ID for upsert sync
+  gradescopeCourseId String?       // Gradescope course ID (from Canvas LTI tab link)
   currentGrade   String?          // Letter grade from Canvas (e.g. "A-")
   currentScore   Float?           // Numeric score from Canvas (e.g. 91.4)
   gradingScheme  Json?            // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard

@@ -5,16 +5,15 @@
  *   Phase 1: clear window.__sc_selectedIds → inject content.js → receives CANVAS_COURSES
  *            → sends COURSE_SELECTION to popup for user to pick
  *   Phase 2: popup sends SYNC_SELECTED → set window.__sc_selectedIds → re-inject content.js
- *            → receives CANVAS_DATA → extract PDF text via offscreen doc → POST to Study Circle
- *            → scrape Gradescope (all courses) → POST to gradescope/import → SYNC_COMPLETE
+ *            → receives CANVAS_DATA → resolve Gradescope IDs from Canvas LTI tabs
+ *            → extract PDF text via offscreen doc → POST canvas/import
+ *            → scrape Gradescope assignments (linked courses only) → POST gradescope/import
+ *            → SYNC_COMPLETE
  *
- * Phase info is passed via window.__sc_selectedIds (set by inline executeScript),
- * not chrome.storage.session, to avoid MV3 service worker dormancy timing issues.
- *
- * PDF extraction: content.js sends PDF URLs (not binary data). We create a
- * Chrome Offscreen Document that runs pdfjs-dist to fetch + extract text from
- * each URL, then we include the extracted text in the payload sent to the server.
- * The server does zero PDF processing — it receives plain text only.
+ * Gradescope integration: content.js discovers Gradescope LTI tabs in Canvas
+ * navigation. This background worker navigates to each Canvas LTI URL and reads
+ * the Gradescope iframe URL to get the actual course ID — deterministic matching,
+ * no fuzzy name heuristics.
  */
 
 // ── Alarm for auto-sync ───────────────────────────────────────────────────────
@@ -175,10 +174,55 @@ async function startPhase2(selectedIds) {
 // ── Handle full Canvas payload → extract PDFs → POST to Study Circle ──────────
 async function handleCanvasData(payload) {
   try {
-    const { scUrl, apiToken } = await chrome.storage.local.get(["scUrl", "apiToken"]);
+    const { scUrl, apiToken, canvasUrl } = await chrome.storage.local.get(["scUrl", "apiToken", "canvasUrl"]);
 
-    // ── Step 1: Extract text from all PDF URLs via the offscreen document ─────
-    // Count total PDFs across all courses so we can show accurate progress.
+    // ── Step 1: Resolve Gradescope course IDs from Canvas LTI tab URLs ───────
+    // content.js stores gradescopeTabUrl (a Canvas LTI page URL) per course.
+    // We navigate a tab to each LTI URL and read the Gradescope iframe's URL
+    // to get the actual Gradescope course ID — zero fuzzy matching needed.
+    const coursesWithGsTab = payload.courses.filter((c) => c.gradescopeTabUrl);
+    if (coursesWithGsTab.length > 0) {
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 86, label: "Discovering Gradescope links…" });
+      syncLog("gs_resolve_start", { count: coursesWithGsTab.length });
+
+      let gsTabId = null;
+      let createdGsTab = false;
+      try {
+        const existingTabs = await chrome.tabs.query({ url: `https://${canvasUrl}/*` });
+        if (existingTabs.length > 0) {
+          gsTabId = existingTabs[0].id;
+        } else {
+          const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
+          createdGsTab = true;
+          gsTabId = tab.id;
+          await waitForTabLoad(gsTabId);
+        }
+
+        for (const course of coursesWithGsTab) {
+          try {
+            const gsId = await resolveGradescopeCourseId(gsTabId, course.gradescopeTabUrl);
+            if (gsId) {
+              course.gradescopeCourseId = gsId;
+              syncLog("gs_resolved", { canvas: course.name, gsId });
+            } else {
+              syncLog("gs_resolve_fail", { canvas: course.name, tabUrl: course.gradescopeTabUrl });
+            }
+          } catch (err) {
+            syncLog("gs_resolve_err", { canvas: course.name, error: err?.message });
+          }
+        }
+        if (createdGsTab) {
+          try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
+        }
+      } catch (err) {
+        syncLog("gs_resolve_tab_err", { error: err?.message });
+      }
+    }
+
+    // Clean up gradescopeTabUrl — server doesn't need it
+    for (const c of payload.courses) delete c.gradescopeTabUrl;
+
+    // ── Step 2: Extract text from all PDF URLs via the offscreen document ─────
     const totalPdfs = payload.courses.reduce(
       (sum, c) => (sum + (c.syllabusFileUrls?.length ?? 0) + (c.materialFileUrls?.length ?? 0)), 0
     );
@@ -190,10 +234,6 @@ async function handleCanvasData(payload) {
         label: `Extracting text from ${totalPdfs} syllabus PDF${totalPdfs !== 1 ? "s" : ""}…`,
       });
 
-      // Flatten all PDFs from all courses into one ordered list so the pdfjs
-      // worker processes exactly one document at a time. Running multiple pdfjs
-      // documents concurrently in the shared worker causes "Invalid page request"
-      // errors mid-document because the worker crashes under memory pressure.
       for (const course of payload.courses) {
         course.syllabusTexts = [];
         course.materialTexts = [];
@@ -235,7 +275,6 @@ async function handleCanvasData(payload) {
         delete course.materialFileUrls;
       }
     } else {
-      // No PDFs — still clean up fields so the server type is consistent
       for (const course of payload.courses) {
         course.syllabusTexts = [];
         course.materialTexts = [];
@@ -244,7 +283,7 @@ async function handleCanvasData(payload) {
       }
     }
 
-    // ── Step 2: Let user know AI analysis is starting ─────────────────────────
+    // ── Step 3: POST the enriched payload to Study Circle ────────────────────
     const courseCount = payload.courses?.length ?? 0;
     broadcastToPopup({
       type: "SYNC_PROGRESS",
@@ -254,7 +293,6 @@ async function handleCanvasData(payload) {
         : "Saving to Study Circle…",
     });
 
-    // ── Step 3: POST the enriched payload to Study Circle ────────────────────
     const res = await fetch(`https://${scUrl}/api/canvas/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
@@ -268,29 +306,29 @@ async function handleCanvasData(payload) {
 
     const result = await res.json();
 
-    // Persist full debug info so it survives popup close.
     if (result.debug) {
       await chrome.storage.local.set({ lastSyncDebug: result.debug });
-      console.log("[worker] sync debug saved to chrome.storage.local (key: lastSyncDebug)");
     }
 
     syncLog("canvas_import_done", { status: res.status });
-    syncLog("gs_start");
 
-    // ── Step 4: Scrape Gradescope (all courses) ──────────────────────────────
-    // Runs after canvas/import so courses exist in Study Circle for matching.
-    // Failure here is non-fatal — Canvas data is already saved.
-    try {
-      const gsResult = await syncGradescope(scUrl, apiToken);
-      if (gsResult) {
-        result.gradescope = gsResult;
-        syncLog("gs_done", gsResult);
-      } else {
-        syncLog("gs_skipped", { reason: "null result" });
+    // ── Step 4: Scrape Gradescope assignments for linked courses ─────────────
+    // Only scrapes courses where we successfully resolved a Gradescope ID.
+    const gsLinkedCourses = payload.courses.filter((c) => c.gradescopeCourseId);
+    if (gsLinkedCourses.length > 0) {
+      syncLog("gs_scrape_start", { count: gsLinkedCourses.length });
+      try {
+        const gsResult = await scrapeGradescopeAssignments(scUrl, apiToken, gsLinkedCourses);
+        if (gsResult) {
+          result.gradescope = gsResult;
+          syncLog("gs_done", gsResult);
+        }
+      } catch (err) {
+        syncLog("gs_error", { error: err?.message ?? String(err) });
+        console.warn("[worker] Gradescope sync failed (non-fatal):", err?.message ?? err);
       }
-    } catch (err) {
-      syncLog("gs_error", { error: err?.message ?? String(err) });
-      console.warn("[worker] Gradescope sync failed (non-fatal):", err?.message ?? err);
+    } else {
+      syncLog("gs_skipped", { reason: "no linked courses" });
     }
 
     await flushSyncLog(scUrl, apiToken);
@@ -310,103 +348,82 @@ async function handleCanvasData(payload) {
   }
 }
 
-// ── Gradescope sync (runs after canvas/import during full sync) ───────────────
+// ── Gradescope helpers ────────────────────────────────────────────────────────
+
+/** Navigate a tab and wait for it to finish loading. */
+function waitForTabLoad(tabId, timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("page load timeout"));
+    }, timeoutMs);
+    function listener(id, info) {
+      if (id === tabId && info.status === "complete") {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        setTimeout(resolve, 600);
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
 
 /**
- * Find or create a Gradescope tab, inject the scraper, wait for data,
- * then POST to the gradescope/import API. Returns the API response or null.
+ * Navigate to a Canvas LTI external tool page and extract the Gradescope
+ * course ID from the embedded iframe. Canvas opens Gradescope via LTI in
+ * an iframe — we inject into all frames to find the gradescope.com URL.
  */
-async function syncGradescope(scUrl, apiToken) {
-  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Checking Gradescope…" });
+async function resolveGradescopeCourseId(tabId, canvasTabUrl) {
+  await chrome.tabs.update(tabId, { url: canvasTabUrl });
+  await waitForTabLoad(tabId);
+
+  // The LTI iframe may still be redirecting — poll a few times
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => window.location.href,
+    });
+
+    for (const frame of results) {
+      const url = frame?.result ?? "";
+      const m = url.match(/gradescope\.com\/courses\/(\d+)/);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+/**
+ * Scrape Gradescope assignments for courses with known Gradescope IDs.
+ * Navigates to each course page and reads the rendered DOM.
+ */
+async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
+  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Syncing Gradescope grades…" });
 
   let gsTabId = null;
   let createdTab = false;
 
   const tabs = await chrome.tabs.query({ url: "https://www.gradescope.com/*" });
-  syncLog("gs_tab_query", { existingTabs: tabs.length });
-
   if (tabs.length > 0) {
     gsTabId = tabs[0].id;
   } else {
-    try {
-      const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
-      createdTab = true;
-      gsTabId = tab.id;
-      syncLog("gs_tab_created", { tabId: tab.id });
-    } catch (err) {
-      syncLog("gs_tab_error", { error: err?.message });
-      return null;
-    }
-  }
-
-  // Helper: navigate the GS tab and wait for page load + SPA render
-  async function navigateGsTab(url) {
-    await chrome.tabs.update(gsTabId, { url });
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        reject(new Error("page load timeout"));
-      }, 15_000);
-      function listener(id, info) {
-        if (id === gsTabId && info.status === "complete") {
-          clearTimeout(timeout);
-          chrome.tabs.onUpdated.removeListener(listener);
-          setTimeout(resolve, 800);
-        }
-      }
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
+    createdTab = true;
+    gsTabId = tab.id;
+    await waitForTabLoad(gsTabId);
   }
 
   try {
-    // Always navigate to the dashboard first, regardless of where the tab currently is
-    syncLog("gs_nav_dashboard", { tabId: gsTabId });
-    await navigateGsTab("https://www.gradescope.com/");
-
-    // Phase 1: Scrape the dashboard for course IDs and names (rendered DOM).
-    const [dashResult] = await chrome.scripting.executeScript({
-      target: { tabId: gsTabId },
-      func: () => {
-        const logs = [];
-        function log(s, d) { logs.push({ step: s, ...d }); }
-
-        log("dash_start", { url: location.href });
-
-        // Scrape the RENDERED dashboard DOM (not a fetch) — Gradescope is an SPA
-        const courseMap = {};
-        for (const a of document.querySelectorAll('a[href*="/courses/"]')) {
-          const href = a.getAttribute("href") ?? "";
-          const match = href.match(/\/courses\/(\d+)/);
-          if (!match) continue;
-          const cid = match[1];
-          if (courseMap[cid]) continue;
-          const name = a.textContent?.trim();
-          if (name && name.length > 1) courseMap[cid] = name;
-        }
-
-        log("dash_done", { courseCount: Object.keys(courseMap).length });
-        return { courseMap, logs };
-      },
-    });
-
-    const dashData = dashResult?.result;
-    const courseEntries = dashData?.courseMap ? Object.entries(dashData.courseMap) : [];
-    syncLog("gs_dash", { courseCount: courseEntries.length, logs: dashData?.logs ?? [] });
-
-    if (courseEntries.length === 0) {
-      syncLog("gs_no_courses", { reason: "empty dashboard" });
-      return null;
-    }
-
-    // Phase 2: Navigate to each course's assignments page and scrape the rendered DOM.
-    // We reuse the same tab, navigating sequentially.
     const allCourses = [];
 
-    for (const [cid, dashName] of courseEntries) {
+    for (const course of linkedCourses) {
+      const cid = course.gradescopeCourseId;
       try {
-        await navigateGsTab(`https://www.gradescope.com/courses/${cid}`);
+        await chrome.tabs.update(gsTabId, { url: `https://www.gradescope.com/courses/${cid}` });
+        await waitForTabLoad(gsTabId);
 
-        // Scrape the rendered assignments from the live DOM
         const [courseResult] = await chrome.scripting.executeScript({
           target: { tabId: gsTabId },
           func: () => {
@@ -440,38 +457,23 @@ async function syncGradescope(scUrl, apiToken) {
               }
               results.push({ title, score, maxScore, status, gradescopeAssignmentId });
             }
-
-            const pageTitle = document.title
-              ?.replace(/\s*[-|]\s*Gradescope\s*$/i, "")
-              .replace(/\s*Dashboard\s*$/i, "")
-              .trim() || "";
-            return { assignments: results, pageTitle };
+            return results;
           },
         });
 
-        const cResult = courseResult?.result;
-        const courseName = (cResult?.pageTitle && cResult.pageTitle !== "Your Courses")
-          ? cResult.pageTitle : dashName;
-        const assignments = cResult?.assignments ?? [];
-
-        syncLog("gs_course", { cid, name: courseName, assignments: assignments.length });
-        allCourses.push({ name: courseName, gradescopeCourseId: cid, assignments });
-
+        const assignments = courseResult?.result ?? [];
+        syncLog("gs_course", { cid, canvas: course.name, assignments: assignments.length });
+        allCourses.push({ gradescopeCourseId: cid, assignments });
       } catch (err) {
-        syncLog("gs_course_err", { cid, dashName, error: err?.message });
+        syncLog("gs_course_err", { cid, error: err?.message });
       }
     }
 
-    syncLog("gs_exec_result", { hasResult: true, courseCount: allCourses.length });
-
-    if (allCourses.length === 0) {
-      syncLog("gs_no_courses_scraped");
-      return null;
-    }
+    if (allCourses.length === 0) return null;
 
     syncLog("gs_scraped", {
       courseCount: allCourses.length,
-      courses: allCourses.map(c => ({ name: c.name, assignments: c.assignments?.length ?? 0 })),
+      courses: allCourses.map((c) => ({ gsId: c.gradescopeCourseId, assignments: c.assignments?.length ?? 0 })),
     });
 
     const gsRes = await fetch(`https://${scUrl}/api/gradescope/import`, {
@@ -488,7 +490,6 @@ async function syncGradescope(scUrl, apiToken) {
     const gsResult = await gsRes.json();
     syncLog("gs_api_ok", gsResult);
     return gsResult;
-
   } finally {
     if (createdTab && gsTabId) {
       try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }

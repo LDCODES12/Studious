@@ -3,7 +3,6 @@ import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
 import crypto from "crypto";
 
-/** CORS: allow requests from Gradescope (content script) and extension background. */
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -32,58 +31,6 @@ async function authedUser(request: NextRequest) {
   return db.user.findUnique({ where: { apiTokenHash: hash }, select: { id: true } });
 }
 
-/** Words that appear in many course names but carry no identity. */
-const STOP_WORDS = new Set([
-  "spring", "fall", "summer", "winter", "sp", "fl", "fa", "su",
-  "2024", "2025", "2026", "2027",
-  "section", "lecture", "recitation", "lab", "dashboard",
-  "a", "b", "c", "01", "02", "03",
-]);
-
-/** Normalize a string: lowercase, strip punctuation, collapse spaces, remove stop-words. */
-function normalize(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter((w) => w && !STOP_WORDS.has(w))
-    .join(" ");
-}
-
-/** Word-overlap ratio between two normalized strings (0–1). */
-function wordOverlap(a: string, b: string): number {
-  const wa = new Set(a.split(" ").filter(Boolean));
-  const wb = new Set(b.split(" ").filter(Boolean));
-  if (wa.size === 0 || wb.size === 0) return 0;
-  let shared = 0;
-  for (const w of wa) if (wb.has(w)) shared++;
-  return shared / Math.max(wa.size, wb.size);
-}
-
-/**
- * Extract a course code like "CHEM1752" or "CHEM 1752" from a string.
- * Gradescope names often look like "Spring 2026.CHEM.1752.A".
- * Canvas shortName is usually "CHEM 1752".
- *
- * Skips semester prefixes (SPRING, FALL, etc.) so we don't match "SPRING2026".
- */
-const SEMESTER_WORDS = /^(SPRING|FALL|SUMMER|WINTER|SP|FL|FA|SU)$/;
-function extractCourseCode(s: string): string | null {
-  const re = /\b([A-Z]{2,6})\s*[.\-]?\s*(\d{3,4})\b/g;
-  let m;
-  while ((m = re.exec(s)) !== null) {
-    if (SEMESTER_WORDS.test(m[1])) continue;
-    return `${m[1]}${m[2]}`;
-  }
-  return null;
-}
-
-/**
- * Infer assignment type from title keywords.
- * Used when creating Gradescope-only assignments that have no Canvas equivalent.
- */
 function inferType(title: string): string {
   const t = title.toLowerCase();
   if (/(exam|midterm|final)/.test(t)) return "exam";
@@ -103,8 +50,7 @@ interface GradescopeAssignment {
 }
 
 interface GradescopeCourse {
-  name: string;
-  gradescopeCourseId?: string;
+  gradescopeCourseId: string;
   assignments: GradescopeAssignment[];
 }
 
@@ -130,57 +76,35 @@ export async function POST(request: NextRequest) {
 
   log.info("import started", { gsCourses: courses.length });
 
-  // Fetch all user courses with assignments
+  // Look up all user courses that have a Gradescope ID — direct, deterministic matching
   const userCourses = await db.course.findMany({
-    where: { userId: user.id },
+    where: { userId: user.id, gradescopeCourseId: { not: null } },
     select: {
       id: true,
       name: true,
-      shortName: true,
+      gradescopeCourseId: true,
       assignments: {
-        select: {
-          id: true,
-          title: true,
-          score: true,
-          gradescopeId: true,
-        },
+        select: { id: true, title: true, score: true, gradescopeId: true },
       },
     },
   });
 
+  const courseByGsId = new Map(
+    userCourses.map((c) => [c.gradescopeCourseId!, c]),
+  );
+
   let updated = 0;
   let created = 0;
-  const debugCourses: { gsName: string; matched: string | null; updated: number; created: number }[] = [];
+  const debugCourses: { gsId: string; matched: string | null; updated: number; created: number }[] = [];
 
   for (const gsCourse of courses) {
-    // ── Match Gradescope course → Canvas course ──────────────────────────────
-    // Strategy 1: extract "SUBJ####" from both names and compare
-    const gsCode = extractCourseCode(gsCourse.name.toUpperCase());
+    const { gradescopeCourseId } = gsCourse;
+    if (!gradescopeCourseId) continue;
 
-    let matchedCourse = gsCode
-      ? userCourses.find((uc) => {
-          const ucCode =
-            extractCourseCode((uc.shortName ?? "").toUpperCase()) ||
-            extractCourseCode(uc.name.toUpperCase());
-          return ucCode !== null && ucCode === gsCode;
-        })
-      : undefined;
-
-    // Strategy 2: word-overlap fallback (threshold raised to 0.5 to avoid false positives)
+    const matchedCourse = courseByGsId.get(gradescopeCourseId);
     if (!matchedCourse) {
-      const gsNorm = normalize(gsCourse.name);
-      if (gsNorm) {
-        matchedCourse = userCourses.find(
-          (uc) =>
-            wordOverlap(normalize(uc.name), gsNorm) >= 0.5 ||
-            (uc.shortName && wordOverlap(normalize(uc.shortName), gsNorm) >= 0.5)
-        );
-      }
-    }
-
-    if (!matchedCourse) {
-      log.warn("no match for GS course", { gsName: gsCourse.name, available: userCourses.map((c) => c.name) });
-      debugCourses.push({ gsName: gsCourse.name, matched: null, updated: 0, created: 0 });
+      log.warn("no match for GS course", { gsId: gradescopeCourseId });
+      debugCourses.push({ gsId: gradescopeCourseId, matched: null, updated: 0, created: 0 });
       continue;
     }
 
@@ -188,16 +112,19 @@ export async function POST(request: NextRequest) {
     let courseUpdated = 0;
     let courseCreated = 0;
 
+    // Normalize title for fuzzy assignment matching within a course
+    const normalize = (s: string) =>
+      s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
     for (const gsAssignment of gsCourse.assignments) {
       const { title, score, maxScore, status, gradescopeAssignmentId } = gsAssignment;
 
-      // ── 1. Exact GS ID match (best case — already created on a prior run) ──
+      // 1. Exact GS assignment ID match (best — already linked from a prior sync)
       if (gradescopeAssignmentId) {
         const existing = matchedCourse.assignments.find(
-          (a) => a.gradescopeId === gradescopeAssignmentId
+          (a) => a.gradescopeId === gradescopeAssignmentId,
         );
         if (existing) {
-          // Update score if we now have one
           if (score !== null && maxScore !== null) {
             await db.assignment.update({
               where: { id: existing.id },
@@ -210,42 +137,27 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // ── 2. Canvas title fuzzy match ──────────────────────────────────────────
-      const gsNormTitle = normalize(title);
+      // 2. Title match within the same course (safe — course is already confirmed)
+      const gsNorm = normalize(title);
       const canvasMatch = matchedCourse.assignments.find(
-        (a) =>
-          !a.gradescopeId && // skip GS-only assignments we already created
-          wordOverlap(normalize(a.title), gsNormTitle) >= 0.6
+        (a) => !a.gradescopeId && normalize(a.title) === gsNorm,
       );
 
       if (canvasMatch) {
-        // Link the GS ID so future runs use Strategy 1
-        if (score !== null && maxScore !== null && canvasMatch.score === null) {
-          await db.assignment.update({
-            where: { id: canvasMatch.id },
-            data: {
-              gradescopeScore: score,
-              gradescopeMaxScore: maxScore,
-              ...(gradescopeAssignmentId ? { gradescopeId: gradescopeAssignmentId } : {}),
-            },
-          });
-          updated++;
-          courseUpdated++;
-        } else if (gradescopeAssignmentId && !canvasMatch.gradescopeId) {
-          // At least save the GS ID even if we have no new score
-          await db.assignment.update({
-            where: { id: canvasMatch.id },
-            data: { gradescopeId: gradescopeAssignmentId },
-          });
-        }
+        await db.assignment.update({
+          where: { id: canvasMatch.id },
+          data: {
+            ...(score !== null && maxScore !== null ? { gradescopeScore: score, gradescopeMaxScore: maxScore } : {}),
+            ...(gradescopeAssignmentId ? { gradescopeId: gradescopeAssignmentId } : {}),
+          },
+        });
+        if (score !== null && maxScore !== null) { updated++; courseUpdated++; }
         continue;
       }
 
-      // ── 3. No match → CREATE a new Gradescope-only assignment ───────────────
-      // Only create if we have a GS assignment ID (to avoid duplicates on retry)
+      // 3. No match → create a Gradescope-only assignment
       if (!gradescopeAssignmentId) continue;
 
-      // Check if we already created this one (race condition guard)
       const alreadyCreated = await db.assignment.findFirst({
         where: { courseId, gradescopeId: gradescopeAssignmentId },
         select: { id: true },
@@ -269,8 +181,13 @@ export async function POST(request: NextRequest) {
       courseCreated++;
     }
 
-    log.info("course matched", { gsName: gsCourse.name, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
-    debugCourses.push({ gsName: gsCourse.name, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
+    log.info("course matched", {
+      gsId: gradescopeCourseId,
+      matched: matchedCourse.name,
+      updated: courseUpdated,
+      created: courseCreated,
+    });
+    debugCourses.push({ gsId: gradescopeCourseId, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
   }
 
   return log.respond(

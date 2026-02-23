@@ -202,6 +202,15 @@ function extractScheduleSection(html) {
       const pct = 15 + Math.floor((i / total) * 70);
       progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
 
+      // ── Gradescope tab detection (Canvas LTI link) ────────────────────────
+      try {
+        const navTabs = await fetchAll(`${BASE}/courses/${course.id}/tabs`);
+        const gsTab = navTabs.find((t) => /gradescope/i.test(t.label ?? ""));
+        if (gsTab) {
+          course.gradescopeTabUrl = gsTab.html_url || gsTab.url || null;
+        }
+      } catch { /* tabs API may 401 for some courses */ }
+
       // ── Assignments ────────────────────────────────────────────────────────
       try {
         const rawAssignments = await fetchAll(
