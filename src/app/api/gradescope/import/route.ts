@@ -192,6 +192,46 @@ export async function POST(request: NextRequest) {
       courseCreated++;
     }
 
+    // ── Post-processing: fill dates from syllabus events ─────────────────
+    // Cross-source reconciliation: if an assignment has no due date, check
+    // the AI-extracted syllabus events for a matching title.
+    const undated = await db.assignment.findMany({
+      where: { courseId, dueDate: null },
+      select: { id: true, title: true },
+    });
+
+    if (undated.length > 0) {
+      const course = await db.course.findUnique({
+        where: { id: courseId },
+        select: { syllabusEvents: true },
+      });
+
+      const events = Array.isArray(course?.syllabusEvents)
+        ? (course.syllabusEvents as { title: string; dueDate: string; type: string }[])
+        : [];
+
+      if (events.length > 0) {
+        const normalizeTitle = (s: string) =>
+          s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+        const eventsByNorm = new Map(
+          events.filter((e) => e.dueDate).map((e) => [normalizeTitle(e.title), e.dueDate]),
+        );
+
+        for (const a of undated) {
+          const match = eventsByNorm.get(normalizeTitle(a.title));
+          if (match) {
+            await db.assignment.update({
+              where: { id: a.id },
+              data: { dueDate: match },
+            });
+            courseUpdated++;
+            log.info("filled date from syllabus", { title: a.title, dueDate: match });
+          }
+        }
+      }
+    }
+
     log.info("course matched", {
       gsId: gradescopeCourseId,
       matched: matchedCourse.name,

@@ -10,6 +10,7 @@ import {
   extractDropRules,
   extractClassSchedule,
   extractScheduleFromCalendarEvents,
+  parseSyllabusText,
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import crypto from "crypto";
@@ -924,6 +925,36 @@ export async function POST(request: NextRequest) {
         }
       } catch {
         // Don't fail the whole import on this optional enrichment
+      }
+
+      // ── d-pre3) Extract dated events for cross-source reconciliation ────────
+      // Runs parseSyllabusText to find exam/assignment dates in the syllabus.
+      // Stored on the Course so gradescope/import can fill in dates on assignments
+      // that Gradescope doesn't date (e.g. exams).
+      if (syllabusText.length >= 500) {
+        try {
+          const existingSyllabusEvents = await db.course.findUnique({
+            where: { id: scCourseId },
+            select: { syllabusEvents: true },
+          });
+          if (!existingSyllabusEvents?.syllabusEvents) {
+            const events = await parseSyllabusText(syllabusText);
+            if (events.length > 0) {
+              const storable = events.map((e) => ({
+                title: e.title,
+                dueDate: e.dueDate,
+                type: e.type,
+              }));
+              await db.course.update({
+                where: { id: scCourseId },
+                data: { syllabusEvents: storable as object[] },
+              });
+              console.log(`[sync] ${c.name}: extracted ${storable.length} syllabus events`);
+            }
+          }
+        } catch {
+          // Non-fatal — dates from syllabus are a bonus
+        }
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
