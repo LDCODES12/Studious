@@ -322,7 +322,6 @@ async function syncGradescope(scUrl, apiToken) {
   let gsTabId = null;
   let createdTab = false;
 
-  // Look for an existing Gradescope tab
   const tabs = await chrome.tabs.query({ url: "https://www.gradescope.com/*" });
   syncLog("gs_tab_query", { existingTabs: tabs.length });
 
@@ -352,33 +351,126 @@ async function syncGradescope(scUrl, apiToken) {
   }
 
   try {
-    syncLog("gs_inject_script", { tabId: gsTabId });
-    await chrome.scripting.executeScript({ target: { tabId: gsTabId }, files: ["gradescope-sync.js"] });
-    syncLog("gs_inject_done");
+    syncLog("gs_execute", { tabId: gsTabId });
 
-    const data = await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        chrome.runtime.onMessage.removeListener(listener);
-        syncLog("gs_data_timeout");
-        resolve(null);
-      }, 30_000);
+    // Use executeScript with an inline func that RETURNS the data directly.
+    // This avoids the chrome.runtime.sendMessage channel which was silently failing.
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: gsTabId },
+      func: async () => {
+        const LOG = "[gs-sync]";
+        const logs = [];
+        function log(step, d) { logs.push({ step, ...d }); console.log(`${LOG} ${step}`, d || ""); }
 
-      function listener(msg) {
-        if (msg.type !== "GS_SYNC_DATA") return;
-        chrome.runtime.onMessage.removeListener(listener);
-        clearTimeout(timer);
-        resolve(msg);
-      }
+        function courseNameFromTitle(title) {
+          if (!title) return "";
+          return title.replace(/\s*[-|]\s*Gradescope\s*$/i, "").trim().split("|").pop().trim();
+        }
 
-      chrome.runtime.onMessage.addListener(listener);
+        function extractAssignments(doc) {
+          const rows = doc.querySelectorAll(
+            "table.table--assignments tbody tr, table.js-assignmentsTable tbody tr, " +
+            "table.table tbody tr, table.js-assignmentTable tbody tr, tbody tr"
+          );
+          const results = [];
+          for (const row of rows) {
+            const titleLink = row.querySelector("th a");
+            const titleCell = row.querySelector("th");
+            const title = titleLink?.textContent?.trim() || titleCell?.textContent?.trim();
+            if (!title) continue;
+
+            const gradescopeAssignmentId =
+              row.dataset?.assignmentId ||
+              row.id?.replace(/^assignment-/, "") ||
+              (titleLink ? titleLink.getAttribute("href")?.match(/\/assignments\/(\d+)/)?.[1] : null) ||
+              null;
+
+            const cells = Array.from(row.querySelectorAll("td"));
+            let score = null, maxScore = null, status = "unsubmitted";
+            for (const cell of cells) {
+              const ct = cell.textContent?.trim() ?? "";
+              const m = ct.match(/([\d.]+)\s*\/\s*([\d.]+)/);
+              if (m) { score = parseFloat(m[1]); maxScore = parseFloat(m[2]); status = "graded"; break; }
+              const lower = ct.toLowerCase();
+              if (lower.includes("graded")) status = "graded";
+              else if (lower.includes("submitted") && status !== "graded") status = "submitted";
+            }
+            results.push({ title, score, maxScore, status, gradescopeAssignmentId });
+          }
+          return results;
+        }
+
+        try {
+          log("start", { url: location.href });
+
+          const dashResp = await fetch("https://www.gradescope.com/", {
+            credentials: "same-origin", headers: { Accept: "text/html" },
+          });
+          log("dash_fetch", { status: dashResp.status, ok: dashResp.ok, redirected: dashResp.redirected, url: dashResp.url });
+
+          if (!dashResp.ok) return { courses: [], logs };
+
+          const dashHtml = await dashResp.text();
+          log("dash_html", { len: dashHtml.length, snippet: dashHtml.slice(0, 300) });
+          const dashDoc = new DOMParser().parseFromString(dashHtml, "text/html");
+
+          const courseMap = new Map();
+          for (const a of dashDoc.querySelectorAll('a[href*="/courses/"]')) {
+            const href = a.getAttribute("href") ?? "";
+            const match = href.match(/\/courses\/(\d+)/);
+            if (!match) continue;
+            const cid = match[1];
+            if (courseMap.has(cid)) continue;
+            const name = a.textContent?.trim();
+            if (name && name.length > 1) courseMap.set(cid, name);
+          }
+
+          log("courses_found", { count: courseMap.size, ids: [...courseMap.keys()] });
+          if (courseMap.size === 0) return { courses: [], logs };
+
+          const courses = [];
+          for (const [cid, dashName] of courseMap) {
+            try {
+              const resp = await fetch(`/courses/${cid}/assignments`, {
+                credentials: "same-origin", headers: { Accept: "text/html" },
+              });
+              if (!resp.ok) { log("course_fail", { cid, status: resp.status }); continue; }
+              const html = await resp.text();
+              const doc = new DOMParser().parseFromString(html, "text/html");
+              const courseName = courseNameFromTitle(doc.querySelector("title")?.textContent) || dashName;
+              const assignments = extractAssignments(doc);
+              log("course_ok", { cid, name: courseName, assignments: assignments.length });
+              courses.push({ name: courseName, gradescopeCourseId: cid, assignments });
+            } catch (err) {
+              log("course_err", { cid, error: err?.message });
+            }
+          }
+
+          log("done", { courseCount: courses.length });
+          return { courses, logs };
+        } catch (err) {
+          log("fatal", { error: err?.message, stack: err?.stack?.slice(0, 300) });
+          return { courses: [], logs };
+        }
+      },
+    });
+
+    const data = result?.result;
+    syncLog("gs_exec_result", {
+      hasResult: !!data,
+      courseCount: data?.courses?.length ?? 0,
+      scriptLogs: data?.logs ?? [],
     });
 
     if (!data?.courses?.length) {
-      syncLog("gs_no_courses", { hasData: !!data, reason: data ? "empty or not logged in" : "timeout" });
+      syncLog("gs_no_courses", { reason: data ? "empty" : "no result" });
       return null;
     }
 
-    syncLog("gs_scraped", { courseCount: data.courses.length, courses: data.courses.map(c => ({ name: c.name, assignments: c.assignments?.length ?? 0 })) });
+    syncLog("gs_scraped", {
+      courseCount: data.courses.length,
+      courses: data.courses.map(c => ({ name: c.name, assignments: c.assignments?.length ?? 0 })),
+    });
 
     const gsRes = await fetch(`https://${scUrl}/api/gradescope/import`, {
       method: "POST",
