@@ -326,6 +326,9 @@ export async function POST(request: NextRequest) {
     modules: modules.length,
     announcements: announcements.length,
     assignmentGroups: rawGroups.length,
+    gradescopeLinks: courses
+      .filter((c) => c.gradescopeCourseId)
+      .map((c) => ({ name: c.name, gsId: c.gradescopeCourseId })),
   });
 
   // 3. Load existing courses for color + fuzzy matching

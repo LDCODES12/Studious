@@ -176,51 +176,77 @@ async function handleCanvasData(payload) {
   try {
     const { scUrl, apiToken, canvasUrl } = await chrome.storage.local.get(["scUrl", "apiToken", "canvasUrl"]);
 
-    // ── Step 1: Resolve Gradescope course IDs from Canvas LTI tab URLs ───────
-    // content.js stores gradescopeTabUrl (a Canvas LTI page URL) per course.
-    // We navigate a tab to each LTI URL and read the Gradescope iframe's URL
-    // to get the actual Gradescope course ID — zero fuzzy matching needed.
-    const coursesWithGsTab = payload.courses.filter((c) => c.gradescopeTabUrl);
-    if (coursesWithGsTab.length > 0) {
-      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 86, label: "Discovering Gradescope links…" });
-      syncLog("gs_resolve_start", { count: coursesWithGsTab.length });
+    // ── Step 1: Resolve Gradescope course IDs ──────────────────────────────
+    // content.js provides three possible signals per course:
+    //   gradescopeCourseId — direct ID from assignment external_tool URL (best case)
+    //   gradescopeToolUrl  — Gradescope LTI callback URL (has "gradescope" but no course ID)
+    //   gradescopeTabUrl   — Canvas LTI page URL (needs iframe resolution)
+    // For courses with only a tool/tab URL, we navigate to resolve the actual ID.
 
-      let gsTabId = null;
-      let createdGsTab = false;
+    const coursesNeedingResolve = payload.courses.filter(
+      (c) => !c.gradescopeCourseId && (c.gradescopeTabUrl || c.gradescopeToolUrl)
+    );
+
+    // Log discovery state for debugging
+    syncLog("gs_detection", {
+      total: payload.courses.length,
+      directId: payload.courses.filter((c) => c.gradescopeCourseId).length,
+      tabUrl: payload.courses.filter((c) => c.gradescopeTabUrl).length,
+      toolUrl: payload.courses.filter((c) => c.gradescopeToolUrl).length,
+      needResolve: coursesNeedingResolve.length,
+      details: payload.courses.map((c) => ({
+        name: c.name,
+        gsId: c.gradescopeCourseId ?? null,
+        tabUrl: c.gradescopeTabUrl ?? null,
+        toolUrl: c.gradescopeToolUrl ?? null,
+      })),
+    });
+
+    if (coursesNeedingResolve.length > 0) {
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 86, label: "Discovering Gradescope links…" });
+      syncLog("gs_resolve_start", { count: coursesNeedingResolve.length });
+
+      let resolveTabId = null;
+      let createdResolveTab = false;
       try {
+        // Use a Canvas-domain tab for Canvas LTI pages
         const existingTabs = await chrome.tabs.query({ url: `https://${canvasUrl}/*` });
         if (existingTabs.length > 0) {
-          gsTabId = existingTabs[0].id;
+          resolveTabId = existingTabs[0].id;
         } else {
           const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
-          createdGsTab = true;
-          gsTabId = tab.id;
-          await waitForTabLoad(gsTabId);
+          createdResolveTab = true;
+          resolveTabId = tab.id;
+          await waitForTabLoad(resolveTabId);
         }
 
-        for (const course of coursesWithGsTab) {
+        for (const course of coursesNeedingResolve) {
+          const urlToResolve = course.gradescopeTabUrl || course.gradescopeToolUrl;
           try {
-            const gsId = await resolveGradescopeCourseId(gsTabId, course.gradescopeTabUrl);
+            const gsId = await resolveGradescopeCourseId(resolveTabId, urlToResolve);
             if (gsId) {
               course.gradescopeCourseId = gsId;
               syncLog("gs_resolved", { canvas: course.name, gsId });
             } else {
-              syncLog("gs_resolve_fail", { canvas: course.name, tabUrl: course.gradescopeTabUrl });
+              syncLog("gs_resolve_fail", { canvas: course.name, url: urlToResolve });
             }
           } catch (err) {
             syncLog("gs_resolve_err", { canvas: course.name, error: err?.message });
           }
         }
-        if (createdGsTab) {
-          try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
+        if (createdResolveTab) {
+          try { await chrome.tabs.remove(resolveTabId); } catch { /* already closed */ }
         }
       } catch (err) {
         syncLog("gs_resolve_tab_err", { error: err?.message });
       }
     }
 
-    // Clean up gradescopeTabUrl — server doesn't need it
-    for (const c of payload.courses) delete c.gradescopeTabUrl;
+    // Clean up temporary fields — server doesn't need these
+    for (const c of payload.courses) {
+      delete c.gradescopeTabUrl;
+      delete c.gradescopeToolUrl;
+    }
 
     // ── Step 2: Extract text from all PDF URLs via the offscreen document ─────
     const totalPdfs = payload.courses.reduce(
