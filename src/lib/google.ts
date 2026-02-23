@@ -21,12 +21,14 @@ export function getOAuth2Client() {
   );
 }
 
-export function getAuthUrl() {
+export function getAuthUrl(returnTo?: string) {
   const client = getOAuth2Client();
+  const state = returnTo ? Buffer.from(JSON.stringify({ returnTo })).toString("base64url") : undefined;
   return client.generateAuthUrl({
     access_type: "offline",
     scope: SCOPES,
     prompt: "consent",
+    state,
   });
 }
 

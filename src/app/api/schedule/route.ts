@@ -33,10 +33,12 @@ export async function GET(request: NextRequest) {
 
   // Fetch GCal events if connected
   let calendarEvents: { id: string; summary: string; start: string; end: string }[] = [];
+  let googleConnected = false;
   const tokensCookie = request.cookies.get("google_tokens");
   let updatedGoogleTokens = null;
   let originalTokens: Record<string, unknown> = {};
   if (tokensCookie) {
+    googleConnected = true;
     try {
       originalTokens = JSON.parse(tokensCookie.value);
       const { calendar, getUpdatedTokens } = getRefreshedCalendarClient(originalTokens);
@@ -46,7 +48,7 @@ export async function GET(request: NextRequest) {
         timeMax: new Date(`${end}T23:59:59`).toISOString(),
         singleEvents: true,
         orderBy: "startTime",
-        maxResults: 100,
+        maxResults: 250,
       });
       calendarEvents = (gcalRes.data.items ?? []).map((e) => ({
         id: e.id ?? "",
@@ -56,7 +58,7 @@ export async function GET(request: NextRequest) {
       }));
       updatedGoogleTokens = getUpdatedTokens();
     } catch {
-      // Silently ignore GCal errors
+      googleConnected = false;
     }
   }
 
@@ -70,6 +72,7 @@ export async function GET(request: NextRequest) {
       course: a.course,
     })),
     calendarEvents,
+    googleConnected,
   });
   applyRefreshedTokensCookie(res, originalTokens, updatedGoogleTokens);
   return res;

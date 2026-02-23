@@ -19,7 +19,7 @@ import {
   getHours,
   getMinutes,
 } from "date-fns";
-import { ChevronLeft, ChevronRight, Calendar, Clock, Sparkles } from "lucide-react";
+import { ChevronLeft, ChevronRight, Calendar, Clock, Sparkles, CalendarPlus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -117,8 +117,16 @@ export function ScheduleView() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [googleConnected, setGoogleConnected] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<Assignment | CalendarEvent | null>(null);
   const weekGridRef = useRef<HTMLDivElement>(null);
+
+  // Clean URL after OAuth return (remove ?google=connected)
+  useEffect(() => {
+    if (typeof window !== "undefined" && new URL(window.location.href).searchParams.get("google") === "connected") {
+      window.history.replaceState({}, "", "/schedule");
+    }
+  }, []);
 
   const weekStart = useMemo(
     () => startOfWeek(currentDate, { weekStartsOn: 0 }),
@@ -155,6 +163,7 @@ export function ScheduleView() {
         const e = data.calendarEvents ?? [];
         setAssignments(a);
         setCalendarEvents(e);
+        setGoogleConnected(data.googleConnected ?? false);
         setLoading(false);
 
         if (a.length > 0 && view === "week") {
@@ -224,42 +233,43 @@ export function ScheduleView() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex gap-6">
+    <div className="flex gap-8">
       {/* Main calendar area */}
       <div className="min-w-0 flex-1">
         {/* Header toolbar */}
-        <div className="mb-4 flex items-center gap-3">
-          <button
-            onClick={goToday}
-            className="rounded-lg border border-border px-3 py-1.5 text-[13px] font-medium hover:bg-accent transition-colors"
-          >
-            Today
-          </button>
-
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
           <div className="flex items-center gap-1">
             <button
+              onClick={goToday}
+              className="rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-accent transition-colors"
+            >
+              Today
+            </button>
+            <button
               onClick={goPrev}
-              className="rounded-lg p-1.5 hover:bg-accent transition-colors"
+              className="rounded-lg p-2 hover:bg-accent transition-colors"
+              aria-label="Previous"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
             <button
               onClick={goNext}
-              className="rounded-lg p-1.5 hover:bg-accent transition-colors"
+              className="rounded-lg p-2 hover:bg-accent transition-colors"
+              aria-label="Next"
             >
               <ChevronRight className="h-4 w-4" />
             </button>
           </div>
 
-          <h2 className="text-lg font-semibold">{headerLabel}</h2>
+          <h2 className="min-w-[180px] text-base font-semibold">{headerLabel}</h2>
 
-          <div className="ml-auto flex rounded-lg border border-border p-0.5">
+          <div className="ml-auto flex rounded-lg bg-muted/50 p-0.5">
             <button
               onClick={() => setView("week")}
               className={cn(
-                "rounded-md px-3 py-1 text-[12px] font-medium transition-colors",
+                "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
                 view === "week"
-                  ? "bg-foreground text-background"
+                  ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -268,9 +278,9 @@ export function ScheduleView() {
             <button
               onClick={() => setView("month")}
               className={cn(
-                "rounded-md px-3 py-1 text-[12px] font-medium transition-colors",
+                "rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors",
                 view === "month"
-                  ? "bg-foreground text-background"
+                  ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -278,6 +288,21 @@ export function ScheduleView() {
             </button>
           </div>
         </div>
+
+        {!googleConnected && !loading && (
+          <a
+            href="/api/auth/google?returnTo=%2Fschedule"
+            className="mb-4 flex items-center gap-3 rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4 transition-colors hover:bg-primary/10 hover:border-primary/50 lg:hidden"
+          >
+            <CalendarPlus className="h-5 w-5 shrink-0 text-primary" />
+            <div>
+              <p className="text-[13px] font-medium">Connect Google Calendar</p>
+              <p className="text-[11px] text-muted-foreground">
+                See your events alongside assignments
+              </p>
+            </div>
+          </a>
+        )}
 
         {loading ? (
           <div className="flex items-center justify-center py-20">
@@ -308,18 +333,36 @@ export function ScheduleView() {
       </div>
 
       {/* Right sidebar */}
-      <div className="hidden w-[280px] shrink-0 lg:block">
-        <MiniCalendar
-          currentDate={currentDate}
-          onSelectDate={(d) => {
-            setCurrentDate(d);
-            if (view === "month") setView("week");
-          }}
-        />
+      <div className="hidden w-[280px] shrink-0 space-y-6 lg:block">
+        {!googleConnected && (
+          <a
+            href="/api/auth/google?returnTo=%2Fschedule"
+            className="flex items-center gap-3 rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4 transition-colors hover:bg-primary/10 hover:border-primary/50"
+          >
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+              <CalendarPlus className="h-5 w-5 text-primary" />
+            </div>
+            <div>
+              <p className="text-[13px] font-medium">Connect Google Calendar</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                See your events alongside assignments
+              </p>
+            </div>
+          </a>
+        )}
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+          <MiniCalendar
+            currentDate={currentDate}
+            onSelectDate={(d) => {
+              setCurrentDate(d);
+              if (view === "month") setView("week");
+            }}
+          />
+        </div>
 
         {/* Upcoming deadlines */}
-        <div className="mt-5">
-          <h3 className="mb-2.5 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+          <h3 className="mb-3 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
             <Clock className="h-3.5 w-3.5" />
             Upcoming
           </h3>
@@ -328,8 +371,8 @@ export function ScheduleView() {
 
         {/* AI Suggestions */}
         {(suggestionsLoading || suggestions.length > 0) && (
-          <div className="mt-5">
-            <h3 className="mb-2.5 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+            <h3 className="mb-3 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
               <Sparkles className="h-3.5 w-3.5" />
               Study Suggestions
             </h3>
@@ -340,7 +383,7 @@ export function ScheduleView() {
                 {suggestions.map((s, i) => (
                   <div
                     key={i}
-                    className="rounded-lg border border-border bg-card p-3"
+                    className="rounded-lg border border-border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
                   >
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {format(new Date(s.day + "T12:00:00"), "EEE, MMM d")} · {s.time}
@@ -399,26 +442,26 @@ function WeekView({
   const todayIndex = days.findIndex((d) => isToday(d));
 
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden">
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       {/* Day headers */}
-      <div className="grid border-b border-border" style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}>
-        <div className="border-r border-border" />
+      <div className="grid border-b border-border bg-muted/30" style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}>
+        <div className="border-r border-border py-2" />
         {days.map((day) => (
           <div
             key={day.toISOString()}
             className={cn(
-              "border-r border-border px-2 py-2.5 text-center last:border-r-0",
-              isToday(day) && "bg-blue-50/50"
+              "border-r border-border px-2 py-3 text-center last:border-r-0",
+              isToday(day) && "bg-primary/5"
             )}
           >
-            <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               {format(day, "EEE")}
             </div>
             <div
               className={cn(
-                "mx-auto mt-0.5 flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold",
+                "mx-auto mt-1 flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold transition-colors",
                 isToday(day)
-                  ? "bg-blue-600 text-white"
+                  ? "bg-primary text-primary-foreground"
                   : "text-foreground"
               )}
             >
@@ -431,11 +474,15 @@ function WeekView({
       {/* All-day events row */}
       <AllDayRow days={days} assignmentsForDay={assignmentsForDay} eventsForDay={eventsForDay} />
 
-      {/* Time grid */}
+      {/* Time grid — scrollable with momentum on touch devices */}
       <div
         ref={gridRef}
-        className="relative overflow-y-auto"
-        style={{ maxHeight: "calc(100vh - 240px)" }}
+        className="relative overflow-y-auto overscroll-contain"
+        style={{
+          minHeight: 320,
+          maxHeight: "min(calc(100vh - 260px), 720px)",
+          WebkitOverflowScrolling: "touch",
+        }}
       >
         <div className="relative" style={{ height: HOURS.length * HOUR_HEIGHT }}>
           {/* Hour lines */}
@@ -445,10 +492,10 @@ function WeekView({
               className="absolute w-full"
               style={{ top: (hour - 6) * HOUR_HEIGHT }}
             >
-              <div className="grid" style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}>
-                <div className="relative border-r border-border">
-                  <span className="absolute -top-2 right-2 text-[10px] text-muted-foreground">
-                    {hour === 0 ? "12 AM" : hour < 12 ? `${hour} AM` : hour === 12 ? "12 PM" : `${hour - 12} PM`}
+              <div className="grid" style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}>
+                <div className="relative border-r border-border pr-2">
+                  <span className="absolute -top-2.5 right-2 text-[10px] font-medium text-muted-foreground">
+                    {hour < 12 ? `${hour === 0 ? 12 : hour} AM` : `${hour === 12 ? 12 : hour - 12} PM`}
                   </span>
                 </div>
                 {days.map((day, i) => (
@@ -471,14 +518,13 @@ function WeekView({
               className="absolute z-20 pointer-events-none"
               style={{
                 top: nowTop,
-                left: `calc(56px + ${(todayIndex / 7) * 100}% * 7 / 7)`,
-                width: `calc(100% / 7)`,
-                marginLeft: `calc(${todayIndex} * (100% - 56px) / 7)`,
+                left: `calc(60px + ${todayIndex} * (100% - 60px) / 7)`,
+                width: `calc((100% - 60px) / 7)`,
               }}
             >
-              <div className="relative" style={{ left: 0, right: 0 }}>
-                <div className="absolute -left-1.5 -top-1.5 h-3 w-3 rounded-full bg-red-500" />
-                <div className="h-px bg-red-500" style={{ marginLeft: 0 }} />
+              <div className="flex items-center">
+                <div className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
+                <div className="h-px flex-1 bg-red-500" />
               </div>
             </div>
           )}
@@ -495,8 +541,8 @@ function WeekView({
                 key={day.toISOString()}
                 className="absolute top-0"
                 style={{
-                  left: `calc(56px + ${dayIndex} * (100% - 56px) / 7)`,
-                  width: `calc((100% - 56px) / 7)`,
+                  left: `calc(60px + ${dayIndex} * (100% - 60px) / 7)`,
+                  width: `calc((100% - 60px) / 7)`,
                   height: "100%",
                 }}
               >
@@ -511,14 +557,14 @@ function WeekView({
                     <button
                       key={event.id}
                       onClick={() => onSelectEvent(event)}
-                      className="absolute left-1 right-1 z-10 cursor-pointer overflow-hidden rounded-md border border-indigo-200 bg-indigo-100 px-1.5 py-0.5 text-left transition-shadow hover:shadow-md"
-                      style={{ top, height: Math.max(height, 20) }}
+                      className="absolute left-1 right-1 z-10 cursor-pointer overflow-hidden rounded-md border border-indigo-200/80 bg-indigo-50 px-2 py-1 text-left transition-all hover:bg-indigo-100 hover:shadow-sm"
+                      style={{ top, height: Math.max(height, 24) }}
                     >
                       <p className="truncate text-[10px] font-medium text-indigo-800">
                         {event.summary}
                       </p>
-                      {height >= 36 && (
-                        <p className="text-[9px] text-indigo-600">
+                      {height >= 40 && (
+                        <p className="mt-0.5 text-[9px] text-indigo-600">
                           {format(start, "h:mm a")} – {format(end, "h:mm a")}
                         </p>
                       )}
@@ -526,18 +572,18 @@ function WeekView({
                   );
                 })}
 
-                {/* Assignment deadlines (shown as small markers at the due time or top of day) */}
+                {/* Assignment deadlines */}
                 {dayAssignments.map((a, ai) => {
-                  const top = 2 + ai * 22;
+                  const top = 2 + ai * 24;
                   return (
                     <button
                       key={a.id}
                       onClick={() => onSelectEvent(a)}
                       className={cn(
-                        "absolute left-1 right-1 z-10 cursor-pointer truncate rounded-md px-1.5 py-0.5 text-left text-[10px] font-medium transition-shadow hover:shadow-md",
+                        "absolute left-1 right-1 z-10 cursor-pointer truncate rounded-md px-2 py-1 text-left text-[10px] font-medium transition-all hover:shadow-sm",
                         COURSE_BG_SOLID[a.course.color] ?? "bg-gray-500 text-white"
                       )}
-                      style={{ top, height: 20 }}
+                      style={{ top, height: 22 }}
                       title={`${a.title} — ${a.course.shortName ?? a.course.name}`}
                     >
                       {a.title}
@@ -573,11 +619,11 @@ function AllDayRow({
 
   return (
     <div
-      className="grid border-b border-border"
-      style={{ gridTemplateColumns: "56px repeat(7, 1fr)" }}
+      className="grid border-b border-border bg-muted/20"
+      style={{ gridTemplateColumns: "60px repeat(7, 1fr)" }}
     >
-      <div className="flex items-center justify-center border-r border-border py-1">
-        <span className="text-[9px] text-muted-foreground">ALL DAY</span>
+      <div className="flex items-center justify-center border-r border-border py-2">
+        <span className="text-[9px] font-medium uppercase tracking-wider text-muted-foreground">All day</span>
       </div>
       {days.map((day) => {
         const allDay = eventsForDay(day).filter((e) => isAllDayEvent(e.start, e.end));
@@ -627,13 +673,13 @@ function MonthView({
   const MAX_VISIBLE = 3;
 
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden">
+    <div className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       {/* Day-of-week headers */}
-      <div className="grid grid-cols-7 border-b border-border">
+      <div className="grid grid-cols-7 border-b border-border bg-muted/30">
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
           <div
             key={d}
-            className="border-r border-border px-2 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-muted-foreground last:border-r-0"
+            className="border-r border-border px-2 py-2.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted-foreground last:border-r-0"
           >
             {d}
           </div>
@@ -659,24 +705,24 @@ function MonthView({
                 key={day.toISOString()}
                 onClick={() => onDayClick(day)}
                 className={cn(
-                  "group relative min-h-[100px] border-r border-border p-1.5 text-left transition-colors hover:bg-accent/50 last:border-r-0",
-                  !inMonth && "bg-muted/30"
+                  "group relative min-h-[110px] border-r border-border p-2 text-left transition-colors hover:bg-accent/50 last:border-r-0",
+                  !inMonth && "bg-muted/20"
                 )}
               >
                 <div
                   className={cn(
-                    "mb-1 flex h-6 w-6 items-center justify-center rounded-full text-[12px] font-medium",
+                    "mb-1.5 flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-semibold transition-colors",
                     isToday(day)
-                      ? "bg-blue-600 text-white"
+                      ? "bg-primary text-primary-foreground"
                       : inMonth
                         ? "text-foreground"
-                        : "text-muted-foreground/50"
+                        : "text-muted-foreground/40"
                   )}
                 >
                   {format(day, "d")}
                 </div>
 
-                <div className="space-y-0.5">
+                <div className="space-y-1">
                   {visible.map((entry, i) => {
                     if (entry.type === "assignment") {
                       const a = entry.item as Assignment;
@@ -684,7 +730,7 @@ function MonthView({
                         <div
                           key={a.id}
                           className={cn(
-                            "truncate rounded px-1 py-px text-[10px] font-medium",
+                            "truncate rounded px-1.5 py-0.5 text-[10px] font-medium",
                             COURSE_BG_LIGHT[a.course.color] ?? "bg-gray-100 text-gray-700"
                           )}
                         >
@@ -696,7 +742,7 @@ function MonthView({
                     return (
                       <div
                         key={e.id}
-                        className="truncate rounded bg-indigo-50 px-1 py-px text-[10px] font-medium text-indigo-700"
+                        className="truncate rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700"
                       >
                         {e.summary}
                       </div>
@@ -857,62 +903,61 @@ function EventPopover({
   const isAssignment = "course" in event;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
       <div
         ref={ref}
-        className="w-[340px] rounded-xl border border-border bg-card p-5 shadow-xl"
+        className="w-[360px] rounded-2xl border border-border bg-card p-6 shadow-2xl"
       >
-        <div className="mb-3 flex items-start justify-between">
+        <div className="mb-4 flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
-            <h3 className="text-[15px] font-semibold">
+            <h3 className="text-base font-semibold leading-snug">
               {isAssignment ? (event as Assignment).title : (event as CalendarEvent).summary}
             </h3>
             {isAssignment && (
-              <p className="mt-0.5 text-[12px] text-muted-foreground">
+              <p className="mt-1 text-[13px] text-muted-foreground">
                 {(event as Assignment).course.shortName ?? (event as Assignment).course.name}
               </p>
             )}
           </div>
           <button
             onClick={onClose}
-            className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            aria-label="Close"
           >
-            <span className="text-lg leading-none">&times;</span>
+            <span className="text-xl leading-none">&times;</span>
           </button>
         </div>
 
         {isAssignment ? (
-          <div className="space-y-2 text-[13px]">
-            <div className="flex items-center gap-2">
-              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+          <div className="space-y-3 text-[13px]">
+            <div className="flex items-center gap-2.5 rounded-lg bg-muted/50 px-3 py-2">
+              <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span>
                 {(event as Assignment).dueDate
                   ? format(parseISO((event as Assignment).dueDate!), "EEEE, MMMM d, yyyy")
                   : "No due date"}
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               <div
                 className={cn(
-                  "h-3 w-3 rounded-sm",
+                  "h-3 w-3 shrink-0 rounded-sm",
                   COURSE_BG[(event as Assignment).course.color] ?? "bg-gray-400"
                 )}
               />
-              <span className="text-muted-foreground">
+              <span className="text-muted-foreground capitalize">
                 {(event as Assignment).type}
               </span>
             </div>
           </div>
         ) : (
-          <div className="space-y-2 text-[13px]">
-            <div className="flex items-center gap-2">
-              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-              <span>
-                {(event as CalendarEvent).start.includes("T")
-                  ? `${format(new Date((event as CalendarEvent).start), "h:mm a")} – ${format(new Date((event as CalendarEvent).end), "h:mm a")}`
-                  : format(new Date((event as CalendarEvent).start + "T12:00:00"), "EEEE, MMMM d")}
-              </span>
-            </div>
+          <div className="flex items-center gap-2.5 rounded-lg bg-muted/50 px-3 py-2 text-[13px]">
+            <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span>
+              {(event as CalendarEvent).start.includes("T")
+                ? `${format(new Date((event as CalendarEvent).start), "h:mm a")} – ${format(new Date((event as CalendarEvent).end), "h:mm a")}`
+                : format(new Date((event as CalendarEvent).start + "T12:00:00"), "EEEE, MMMM d")}
+            </span>
           </div>
         )}
       </div>
