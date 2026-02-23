@@ -32,9 +32,24 @@ async function authedUser(request: NextRequest) {
   return db.user.findUnique({ where: { apiTokenHash: hash }, select: { id: true } });
 }
 
-/** Normalize a string: lowercase, strip punctuation, collapse spaces. */
+/** Words that appear in many course names but carry no identity. */
+const STOP_WORDS = new Set([
+  "spring", "fall", "summer", "winter", "sp", "fl", "fa", "su",
+  "2024", "2025", "2026", "2027",
+  "section", "lecture", "recitation", "lab", "dashboard",
+  "a", "b", "c", "01", "02", "03",
+]);
+
+/** Normalize a string: lowercase, strip punctuation, collapse spaces, remove stop-words. */
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((w) => w && !STOP_WORDS.has(w))
+    .join(" ");
 }
 
 /** Word-overlap ratio between two normalized strings (0–1). */
@@ -51,11 +66,18 @@ function wordOverlap(a: string, b: string): number {
  * Extract a course code like "CHEM1752" or "CHEM 1752" from a string.
  * Gradescope names often look like "Spring 2026.CHEM.1752.A".
  * Canvas shortName is usually "CHEM 1752".
+ *
+ * Skips semester prefixes (SPRING, FALL, etc.) so we don't match "SPRING2026".
  */
+const SEMESTER_WORDS = /^(SPRING|FALL|SUMMER|WINTER|SP|FL|FA|SU)$/;
 function extractCourseCode(s: string): string | null {
-  const m = s.match(/\b([A-Z]{2,6})\s*[.\-]?\s*(\d{3,4})\b/);
-  if (!m) return null;
-  return `${m[1]}${m[2]}`; // e.g. "CHEM1752"
+  const re = /\b([A-Z]{2,6})\s*[.\-]?\s*(\d{3,4})\b/g;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (SEMESTER_WORDS.test(m[1])) continue;
+    return `${m[1]}${m[2]}`;
+  }
+  return null;
 }
 
 /**
@@ -144,14 +166,16 @@ export async function POST(request: NextRequest) {
         })
       : undefined;
 
-    // Strategy 2: word-overlap fallback
+    // Strategy 2: word-overlap fallback (threshold raised to 0.5 to avoid false positives)
     if (!matchedCourse) {
       const gsNorm = normalize(gsCourse.name);
-      matchedCourse = userCourses.find(
-        (uc) =>
-          wordOverlap(normalize(uc.name), gsNorm) >= 0.4 ||
-          (uc.shortName && wordOverlap(normalize(uc.shortName), gsNorm) >= 0.4)
-      );
+      if (gsNorm) {
+        matchedCourse = userCourses.find(
+          (uc) =>
+            wordOverlap(normalize(uc.name), gsNorm) >= 0.5 ||
+            (uc.shortName && wordOverlap(normalize(uc.shortName), gsNorm) >= 0.5)
+        );
+      }
     }
 
     if (!matchedCourse) {

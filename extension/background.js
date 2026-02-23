@@ -449,7 +449,10 @@ async function syncGradescope(scUrl, apiToken) {
               results.push({ title, score, maxScore, status, gradescopeAssignmentId });
             }
 
-            const pageTitle = document.title?.replace(/\s*[-|]\s*Gradescope\s*$/i, "").trim() || "";
+            const pageTitle = document.title
+              ?.replace(/\s*[-|]\s*Gradescope\s*$/i, "")
+              .replace(/\s*Dashboard\s*$/i, "")
+              .trim() || "";
             return { assignments: results, pageTitle };
           },
         });
