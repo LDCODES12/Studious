@@ -20,11 +20,10 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const entries: unknown[] = Array.isArray(body) ? body : [body];
 
-    for (const entry of entries) {
-      console.log(
-        JSON.stringify({ ts: new Date().toISOString(), source: "extension", ...(entry as Record<string, unknown>) }),
-      );
-    }
+    // Single log line with the full array — avoids Vercel truncation issues
+    console.log(
+      JSON.stringify({ ts: new Date().toISOString(), source: "extension", count: entries.length, entries }),
+    );
 
     return NextResponse.json({ ok: true }, { headers: CORS_HEADERS });
   } catch {

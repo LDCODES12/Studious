@@ -275,12 +275,12 @@ async function handleCanvasData(payload) {
     }
 
     syncLog("canvas_import_done", { status: res.status });
+    syncLog("gs_start");
 
     // ── Step 4: Scrape Gradescope (all courses) ──────────────────────────────
     // Runs after canvas/import so courses exist in Study Circle for matching.
     // Failure here is non-fatal — Canvas data is already saved.
     try {
-      syncLog("gs_start");
       const gsResult = await syncGradescope(scUrl, apiToken);
       if (gsResult) {
         result.gradescope = gsResult;
