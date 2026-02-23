@@ -274,24 +274,36 @@ async function handleCanvasData(payload) {
       console.log("[worker] sync debug saved to chrome.storage.local (key: lastSyncDebug)");
     }
 
+    syncLog("canvas_import_done", { status: res.status });
+
     // ── Step 4: Scrape Gradescope (all courses) ──────────────────────────────
     // Runs after canvas/import so courses exist in Study Circle for matching.
     // Failure here is non-fatal — Canvas data is already saved.
     try {
+      syncLog("gs_start");
       const gsResult = await syncGradescope(scUrl, apiToken);
       if (gsResult) {
         result.gradescope = gsResult;
-        console.log("[worker] Gradescope sync:", JSON.stringify(gsResult));
+        syncLog("gs_done", gsResult);
+      } else {
+        syncLog("gs_skipped", { reason: "null result" });
       }
     } catch (err) {
+      syncLog("gs_error", { error: err?.message ?? String(err) });
       console.warn("[worker] Gradescope sync failed (non-fatal):", err?.message ?? err);
     }
 
+    await flushSyncLog(scUrl, apiToken);
     await chrome.storage.session.set({ syncRunning: false });
     await chrome.storage.session.remove(["pendingCourses"]);
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {
+    syncLog("sync_fatal_error", { error: err?.message ?? String(err) });
+    try {
+      const { scUrl: u, apiToken: t } = await chrome.storage.local.get(["scUrl", "apiToken"]);
+      if (u && t) await flushSyncLog(u, t);
+    } catch { /* best-effort */ }
     await closeOffscreen();
     await chrome.storage.session.set({ syncRunning: false });
     handleError(err.message ?? String(err));
@@ -312,14 +324,15 @@ async function syncGradescope(scUrl, apiToken) {
 
   // Look for an existing Gradescope tab
   const tabs = await chrome.tabs.query({ url: "https://www.gradescope.com/*" });
+  syncLog("gs_tab_query", { existingTabs: tabs.length });
+
   if (tabs.length > 0) {
     gsTabId = tabs[0].id;
   } else {
-    // Open one in the background — if user isn't logged in the scraper finds
-    // no courses and bails, which is the expected graceful-skip path.
     try {
       const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
       createdTab = true;
+      syncLog("gs_tab_created", { tabId: tab.id });
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("Gradescope took too long to load")), 15_000);
         chrome.tabs.onUpdated.addListener(function listener(id, info) {
@@ -331,20 +344,22 @@ async function syncGradescope(scUrl, apiToken) {
         });
       });
       gsTabId = tab.id;
+      syncLog("gs_tab_loaded", { tabId: gsTabId });
     } catch (err) {
-      console.warn("[worker] Could not open Gradescope tab:", err?.message);
+      syncLog("gs_tab_error", { error: err?.message });
       return null;
     }
   }
 
   try {
-    // Inject the all-courses scraper
+    syncLog("gs_inject_script", { tabId: gsTabId });
     await chrome.scripting.executeScript({ target: { tabId: gsTabId }, files: ["gradescope-sync.js"] });
+    syncLog("gs_inject_done");
 
-    // Wait for GS_SYNC_DATA (30s timeout — scraping multiple courses is fast but not instant)
     const data = await new Promise((resolve) => {
       const timer = setTimeout(() => {
         chrome.runtime.onMessage.removeListener(listener);
+        syncLog("gs_data_timeout");
         resolve(null);
       }, 30_000);
 
@@ -359,13 +374,12 @@ async function syncGradescope(scUrl, apiToken) {
     });
 
     if (!data?.courses?.length) {
-      console.log("[worker] Gradescope: no courses found —", data ? "user may not be logged in" : "timeout");
+      syncLog("gs_no_courses", { hasData: !!data, reason: data ? "empty or not logged in" : "timeout" });
       return null;
     }
 
-    console.log(`[worker] Gradescope: scraped ${data.courses.length} course(s), posting to API…`);
+    syncLog("gs_scraped", { courseCount: data.courses.length, courses: data.courses.map(c => ({ name: c.name, assignments: c.assignments?.length ?? 0 })) });
 
-    // POST to the gradescope import endpoint
     const gsRes = await fetch(`https://${scUrl}/api/gradescope/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiToken}` },
@@ -373,14 +387,15 @@ async function syncGradescope(scUrl, apiToken) {
     });
 
     if (!gsRes.ok) {
-      console.warn("[worker] Gradescope import API error:", gsRes.status);
+      syncLog("gs_api_error", { status: gsRes.status });
       return null;
     }
 
-    return await gsRes.json();
+    const gsResult = await gsRes.json();
+    syncLog("gs_api_ok", gsResult);
+    return gsResult;
 
   } finally {
-    // Clean up: close the tab if we created it (don't close user's existing tab)
     if (createdTab && gsTabId) {
       try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
     }
@@ -394,4 +409,32 @@ function handleError(message) {
 
 function broadcastToPopup(msg) {
   chrome.runtime.sendMessage(msg).catch(() => { /* popup may be closed */ });
+}
+
+// ── Persistent sync log ──────────────────────────────────────────────────────
+// Accumulates breadcrumbs during a sync, persists to chrome.storage.local,
+// and POSTs to the server so logs appear in Vercel for remote debugging.
+
+const _syncLog = [];
+
+function syncLog(step, detail) {
+  const entry = { t: Date.now(), step, ...detail };
+  _syncLog.push(entry);
+  console.log(`[sync-log] ${step}`, detail ? JSON.stringify(detail) : "");
+}
+
+async function flushSyncLog(scUrl, apiToken) {
+  if (_syncLog.length === 0) return;
+  const logs = [..._syncLog];
+  _syncLog.length = 0;
+
+  await chrome.storage.local.set({ lastSyncLog: logs });
+
+  try {
+    await fetch(`https://${scUrl}/api/extension-log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiToken}` },
+      body: JSON.stringify(logs),
+    });
+  } catch { /* best-effort */ }
 }
