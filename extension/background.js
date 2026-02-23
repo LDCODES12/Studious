@@ -176,29 +176,24 @@ async function handleCanvasData(payload) {
   try {
     const { scUrl, apiToken, canvasUrl } = await chrome.storage.local.get(["scUrl", "apiToken", "canvasUrl"]);
 
-    // ── Step 1: Resolve Gradescope course IDs ──────────────────────────────
-    // content.js provides three possible signals per course:
-    //   gradescopeCourseId — direct ID from assignment external_tool URL (best case)
-    //   gradescopeToolUrl  — Gradescope LTI callback URL (has "gradescope" but no course ID)
-    //   gradescopeTabUrl   — Canvas LTI page URL (needs iframe resolution)
-    // For courses with only a tool/tab URL, we navigate to resolve the actual ID.
+    // ── Step 1: Resolve Gradescope course IDs from Canvas LTI tab URLs ───────
+    // content.js stores gradescopeTabUrl (absolute Canvas URL) for courses with
+    // a Gradescope navigation tab. We navigate to each URL — Canvas LTI redirects
+    // to gradescope.com/courses/XXXX — and read the resulting URL to get the ID.
 
     const coursesNeedingResolve = payload.courses.filter(
-      (c) => !c.gradescopeCourseId && (c.gradescopeTabUrl || c.gradescopeToolUrl)
+      (c) => !c.gradescopeCourseId && c.gradescopeTabUrl,
     );
 
-    // Log discovery state for debugging
     syncLog("gs_detection", {
       total: payload.courses.length,
       directId: payload.courses.filter((c) => c.gradescopeCourseId).length,
       tabUrl: payload.courses.filter((c) => c.gradescopeTabUrl).length,
-      toolUrl: payload.courses.filter((c) => c.gradescopeToolUrl).length,
       needResolve: coursesNeedingResolve.length,
       details: payload.courses.map((c) => ({
         name: c.name,
         gsId: c.gradescopeCourseId ?? null,
         tabUrl: c.gradescopeTabUrl ?? null,
-        toolUrl: c.gradescopeToolUrl ?? null,
       })),
     });
 
@@ -209,7 +204,6 @@ async function handleCanvasData(payload) {
       let resolveTabId = null;
       let createdResolveTab = false;
       try {
-        // Use a Canvas-domain tab for Canvas LTI pages
         const existingTabs = await chrome.tabs.query({ url: `https://${canvasUrl}/*` });
         if (existingTabs.length > 0) {
           resolveTabId = existingTabs[0].id;
@@ -221,14 +215,13 @@ async function handleCanvasData(payload) {
         }
 
         for (const course of coursesNeedingResolve) {
-          const urlToResolve = course.gradescopeTabUrl || course.gradescopeToolUrl;
           try {
-            const gsId = await resolveGradescopeCourseId(resolveTabId, urlToResolve);
+            const gsId = await resolveGradescopeCourseId(resolveTabId, course.gradescopeTabUrl);
             if (gsId) {
               course.gradescopeCourseId = gsId;
               syncLog("gs_resolved", { canvas: course.name, gsId });
             } else {
-              syncLog("gs_resolve_fail", { canvas: course.name, url: urlToResolve });
+              syncLog("gs_resolve_fail", { canvas: course.name, url: course.gradescopeTabUrl });
             }
           } catch (err) {
             syncLog("gs_resolve_err", { canvas: course.name, error: err?.message });
@@ -242,11 +235,8 @@ async function handleCanvasData(payload) {
       }
     }
 
-    // Clean up temporary fields — server doesn't need these
-    for (const c of payload.courses) {
-      delete c.gradescopeTabUrl;
-      delete c.gradescopeToolUrl;
-    }
+    // Clean up — server doesn't need these
+    for (const c of payload.courses) delete c.gradescopeTabUrl;
 
     // ── Step 2: Extract text from all PDF URLs via the offscreen document ─────
     const totalPdfs = payload.courses.reduce(

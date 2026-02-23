@@ -202,6 +202,22 @@ function extractScheduleSection(html) {
       const pct = 15 + Math.floor((i / total) * 70);
       progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
 
+      // ── Gradescope tab detection (Canvas navigation sidebar) ──────────────
+      // The tabs API returns relative URLs — make them absolute for chrome.tabs.update
+      try {
+        const navTabs = await fetchAll(`${BASE}/courses/${course.id}/tabs`);
+        const gsTab = navTabs.find((t) => /gradescope/i.test(t.label ?? ""));
+        if (gsTab) {
+          const rawUrl = gsTab.full_url || gsTab.html_url || gsTab.url || "";
+          course.gradescopeTabUrl = rawUrl.startsWith("http")
+            ? rawUrl
+            : window.location.origin + rawUrl;
+          console.log(`[scout] ${course.name}: found Gradescope tab → ${course.gradescopeTabUrl}`);
+        }
+      } catch (err) {
+        console.warn(`[scout] ${course.name}: tabs API error — ${err?.message}`);
+      }
+
       // ── Assignments ────────────────────────────────────────────────────────
       try {
         const rawAssignments = await fetchAll(
@@ -233,32 +249,23 @@ function extractScheduleSection(html) {
             missing: a.submission?.missing ?? false,
             assignmentGroupId: a.assignment_group_id ?? null,
           });
+        }
 
-          // Detect Gradescope via LTI external tool assignment URLs
-          if (!course.gradescopeTabUrl && !course.gradescopeCourseId) {
+        // Fallback: if no Gradescope tab found, check assignment external tool URLs
+        if (!course.gradescopeTabUrl && !course.gradescopeCourseId) {
+          for (const a of rawAssignments) {
             const toolUrl = a.external_tool_tag_attributes?.url ?? "";
             if (/gradescope/i.test(toolUrl)) {
               const m = toolUrl.match(/\/courses\/(\d+)/) || toolUrl.match(/[?&]course_id=(\d+)/);
               if (m) {
                 course.gradescopeCourseId = m[1];
-              } else {
-                course.gradescopeToolUrl = toolUrl;
+                console.log(`[scout] ${course.name}: found Gradescope course ID from assignment → ${m[1]}`);
               }
+              break;
             }
           }
         }
       } catch { /* restricted — skip */ }
-
-      // ── Gradescope tab detection (Canvas navigation sidebar) ──────────────
-      if (!course.gradescopeCourseId && !course.gradescopeToolUrl) {
-        try {
-          const navTabs = await fetchAll(`${BASE}/courses/${course.id}/tabs`);
-          const gsTab = navTabs.find((t) => /gradescope/i.test(t.label ?? ""));
-          if (gsTab) {
-            course.gradescopeTabUrl = gsTab.html_url || gsTab.url || null;
-          }
-        } catch { /* tabs API may 401 for some courses */ }
-      }
 
       // ── Modules (fallback topic structure + source of file download URLs) ───
       // include[]=content_details gives us direct download URLs for File items —
