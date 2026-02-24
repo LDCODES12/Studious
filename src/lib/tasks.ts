@@ -43,8 +43,11 @@ export async function generateTasksForUser(userId: string): Promise<number> {
   for (const assignment of assignments) {
     const template = TEMPLATES[assignment.type] ?? TEMPLATES["assignment"];
 
-    // Calculate task due date (leadDays before assignment due date)
-    const assignmentDate = new Date(assignment.dueDate! + "T00:00:00");
+    // Calculate task due date (leadDays before assignment due date).
+    // `Assignment.dueDate` may be a date-only string ("YYYY-MM-DD") or a full
+    // ISO datetime from Canvas. Use the calendar date portion for task planning.
+    const dueDatePart = assignment.dueDate!.slice(0, 10);
+    const assignmentDate = new Date(`${dueDatePart}T00:00:00`);
     const taskDate = new Date(assignmentDate);
     taskDate.setDate(taskDate.getDate() - template.leadDays);
 
