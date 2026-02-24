@@ -98,11 +98,12 @@ function toSxEvents(
 
   for (const a of assignments) {
     if (!a.dueDate) continue;
+    const dueDay = a.dueDate.slice(0, 10);
     events.push({
       id: `assignment-${a.id}`,
       title: a.title,
-      start: Temporal.PlainDate.from(a.dueDate),
-      end: Temporal.PlainDate.from(a.dueDate),
+      start: Temporal.PlainDate.from(dueDay),
+      end: Temporal.PlainDate.from(dueDay),
       calendarId: a.course.color in COURSE_COLORS ? a.course.color : "blue",
       _type: "assignment",
       _originalId: a.id,
