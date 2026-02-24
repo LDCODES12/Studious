@@ -888,10 +888,22 @@ export async function POST(request: NextRequest) {
         let classSchedule = null;
         let classScheduleSource = "none";
 
-        // Source 1: syllabus text (AI) — first 6k chars where meeting info lives
+        // Source 1: best-scoring syllabus text (from topic extraction pipeline)
         if (syllabusText.length >= 200) {
           classSchedule = await extractClassSchedule(syllabusText);
           if (classSchedule) classScheduleSource = "syllabus-ai";
+        }
+
+        // Source 1b: raw syllabusBody HTML — handles courses where the meeting
+        // times are in a short Canvas Page/syllabus tab that doesn't score well
+        // in the topic pipeline (e.g. just "Meeting Times: MWF 1-1:50PM")
+        if (!classSchedule && c.syllabusBody) {
+          const rawBodyText = htmlToText(c.syllabusBody);
+          if (rawBodyText.length >= 50 && rawBodyText !== syllabusText) {
+            console.log(`[sync] ${c.name}: trying Source 1b (syllabusBody raw, ${rawBodyText.length}c)`);
+            classSchedule = await extractClassSchedule(rawBodyText);
+            if (classSchedule) classScheduleSource = "syllabus-body-raw";
+          }
         }
 
         // Source 2: Canvas calendar events (deterministic fallback)
