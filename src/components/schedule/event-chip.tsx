@@ -74,7 +74,7 @@ export function EventChip({
         if (!isDragging) onSelect(event);
       }}
       className={cn(
-        "group/chip absolute z-10 cursor-grab overflow-hidden rounded-lg border-l-[3px] px-2 py-1 text-left transition-shadow select-none active:cursor-grabbing",
+        "group/chip absolute z-10 cursor-pointer overflow-hidden rounded-lg border-l-[3px] px-2 py-1 text-left transition-shadow select-none",
         bgClass,
         borderClass,
         isDragging && "opacity-40 shadow-none"

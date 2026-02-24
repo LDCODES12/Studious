@@ -333,7 +333,7 @@ export function ScheduleView() {
       </div>
 
       {/* Sidebar */}
-      <aside className="hidden w-[272px] shrink-0 space-y-5 lg:block">
+      <aside className="hidden w-[272px] shrink-0 space-y-5 overflow-y-auto lg:block">
         {!googleConnected && !loading && (
           /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route, not a page */
           <a

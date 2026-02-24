@@ -30,7 +30,6 @@ import {
   pointerToGrid,
   gridPositionToCSS,
   minutesToY,
-  minutesToTimeStr,
   matchEventToCourse,
   TOTAL_GRID_HEIGHT,
 } from "./calendar-utils";
@@ -236,93 +235,18 @@ export function WeekView({
     [onEventResize]
   );
 
-  // --- Click-to-create ---
-  const [createBlock, setCreateBlock] = useState<{
-    dayIndex: number;
-    startMin: number;
-    endMin: number;
-  } | null>(null);
-  const createRef = useRef<{
-    dayIndex: number;
-    startMin: number;
-    started: boolean;
-    startClientY: number;
-  } | null>(null);
-
-  const handleGridPointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      if ((e.target as HTMLElement).closest("[data-event-chip]")) return;
-      if (!gridRef.current) return;
-
-      const rect = gridRef.current.getBoundingClientRect();
-      const pos = pointerToGrid(
-        e.clientX,
-        e.clientY,
-        rect,
-        gridRef.current.scrollTop
-      );
-      if (!pos) return;
-
-      createRef.current = {
-        dayIndex: pos.dayIndex,
-        startMin: pos.minutes,
-        started: false,
-        startClientY: e.clientY,
-      };
-    },
-    [gridRef]
-  );
-
   const handleGridPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (resizeRef.current) {
-        handleResizeMove(e);
-        return;
-      }
-      if (!createRef.current || !gridRef.current) return;
-
-      const dy = Math.abs(e.clientY - createRef.current.startClientY);
-      if (dy < 5 && !createRef.current.started) return;
-      createRef.current.started = true;
-
-      const rect = gridRef.current.getBoundingClientRect();
-      const pos = pointerToGrid(
-        e.clientX,
-        e.clientY,
-        rect,
-        gridRef.current.scrollTop
-      );
-      if (!pos) return;
-
-      const startMin = Math.min(createRef.current.startMin, pos.minutes);
-      const endMin = Math.max(
-        createRef.current.startMin + SNAP_MINUTES,
-        pos.minutes + SNAP_MINUTES
-      );
-      setCreateBlock({
-        dayIndex: createRef.current.dayIndex,
-        startMin,
-        endMin,
-      });
+      if (resizeRef.current) handleResizeMove(e);
     },
-    [gridRef, handleResizeMove]
+    [handleResizeMove]
   );
 
   const handleGridPointerUp = useCallback(
     (e: React.PointerEvent) => {
-      if (resizeRef.current) {
-        handleResizeEnd(e);
-        return;
-      }
-      if (createRef.current?.started && createBlock) {
-        setCreateBlock(null);
-        createRef.current = null;
-        return;
-      }
-      createRef.current = null;
-      setCreateBlock(null);
+      if (resizeRef.current) handleResizeEnd(e);
     },
-    [handleResizeEnd, createBlock]
+    [handleResizeEnd]
   );
 
   return (
@@ -380,7 +304,6 @@ export function WeekView({
         <div
           ref={gridRef}
           className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
-          onPointerDown={handleGridPointerDown}
           onPointerMove={handleGridPointerMove}
           onPointerUp={handleGridPointerUp}
         >
@@ -443,22 +366,7 @@ export function WeekView({
               />
             ))}
 
-            {/* Create block preview */}
-            {createBlock && (
-              <div
-                className="pointer-events-none absolute z-20 rounded-lg border-2 border-blue-400 bg-blue-500/10"
-                style={{
-                  ...gridPositionToCSS(createBlock.dayIndex),
-                  top: minutesToY(createBlock.startMin),
-                  height: minutesToY(createBlock.endMin - createBlock.startMin),
-                }}
-              >
-                <div className="px-2 pt-1 text-[11px] font-medium text-blue-600 dark:text-blue-400">
-                  {minutesToTimeStr(createBlock.startMin)} –{" "}
-                  {minutesToTimeStr(createBlock.endMin)}
-                </div>
-              </div>
-            )}
+           
           </div>
         </div>
       </div>
