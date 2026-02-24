@@ -341,6 +341,8 @@ function extractClassScheduleDeterministic(
   text: string
 ): ExtractedClassSchedule | null {
   const lines = text
+    .replace(/&ndash;|&mdash;/gi, "-")
+    .replace(/\u2013|\u2014/g, "-")
     .split(/\n+/)
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);

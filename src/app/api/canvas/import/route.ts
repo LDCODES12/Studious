@@ -274,6 +274,8 @@ function htmlToText(html: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&ndash;/gi, "-")
+    .replace(/&mdash;/gi, "-")
     .replace(/&nbsp;/g, " ")
     .replace(/&#\d+;/g, " ")
     .replace(/[ \t]+/g, " ")      // collapse horizontal whitespace only
@@ -1101,9 +1103,24 @@ export async function POST(request: NextRequest) {
               )
             )
           : null;
-        const strongAiCoverage = termWeeks && termWeeks > 0
+        const aiDatedWeeks = topics.filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)).length;
+        let aiDatesLookWeekly = false;
+        if (aiDatedWeeks >= 6) {
+          const dated = topics
+            .filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate))
+            .map((t) => new Date(`${t.startDate}T00:00:00Z`).getTime())
+            .sort((a, b) => a - b);
+          let weeklyishGaps = 0;
+          for (let i = 1; i < dated.length; i++) {
+            const days = Math.round((dated[i] - dated[i - 1]) / 86400_000);
+            if (days >= 5 && days <= 10) weeklyishGaps++;
+          }
+          aiDatesLookWeekly = weeklyishGaps >= Math.max(4, dated.length - 2);
+        }
+        const strongAiCoverage = (termWeeks && termWeeks > 0
           ? topics.length >= Math.max(8, Math.round(termWeeks * 0.6))
-          : topics.length >= 10;
+          : topics.length >= 10)
+          || (topics.length >= 8 && aiDatedWeeks >= 6 && aiDatesLookWeekly);
         const nonWeeklyModuleRx = /\b(unit|orientation|welcome|exam|quiz|aktiv|discussion module|module)\b/i;
         const nonWeeklyModuleCount = existingModuleTopics.filter((mt) => nonWeeklyModuleRx.test(mt.weekLabel)).length;
         const nonWeeklyModuleRatio = existingModuleTopics.length > 0
