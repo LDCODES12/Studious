@@ -1,5 +1,5 @@
 import { courseColors } from "@/lib/constants";
-import { formatDistanceToNow, parseISO } from "date-fns";
+import { formatDistanceToNow, isValid, parseISO } from "date-fns";
 
 interface Assignment {
   id: string;
@@ -32,7 +32,11 @@ export function UpcomingDeadlines({ assignments }: { assignments: Assignment[] }
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         {upcoming.map((assignment, i) => {
           const colors = courseColors[assignment.course.color ?? "blue"];
-          const due = assignment.dueDate ? formatDistanceToNow(parseISO(assignment.dueDate), { addSuffix: true }) : "";
+          const due = (() => {
+            if (!assignment.dueDate) return "";
+            const parsed = parseISO(assignment.dueDate);
+            return isValid(parsed) ? formatDistanceToNow(parsed, { addSuffix: true }) : "";
+          })();
 
           return (
             <div
