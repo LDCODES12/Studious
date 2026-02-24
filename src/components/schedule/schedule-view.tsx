@@ -132,15 +132,11 @@ export function ScheduleView() {
         /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route */
         <a
           href="/api/auth/google?returnTo=%2Fschedule"
-          className="mb-3 flex shrink-0 items-center gap-3 rounded-xl border border-dashed border-border/80 px-4 py-3 transition-colors hover:bg-muted/40"
+          className="mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-dashed border-border/60 px-3 py-1.5 text-[11px] transition-colors hover:bg-muted/40"
         >
-          <CalendarPlus className="h-4 w-4 text-muted-foreground" />
-          <div>
-            <p className="text-[13px] font-medium">Connect Google Calendar</p>
-            <p className="text-[12px] text-muted-foreground">
-              See your events alongside assignments
-            </p>
-          </div>
+          <CalendarPlus className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="font-medium">Connect Google Calendar</span>
+          <span className="text-muted-foreground">to see events alongside assignments</span>
         </a>
       )}
 
@@ -171,22 +167,22 @@ export function ScheduleView() {
 
 function LoadingSkeleton() {
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card">
       <div className="flex shrink-0 border-b border-border">
-        <div className="w-14 shrink-0" />
+        <div className="w-[52px] shrink-0" />
         {Array.from({ length: 7 }).map((_, i) => (
-          <div key={i} className="flex-1 border-l border-border px-2 py-3">
-            <div className="mx-auto h-3 w-6 animate-pulse rounded bg-muted" />
-            <div className="mx-auto mt-1.5 h-5 w-5 animate-pulse rounded-full bg-muted" />
+          <div key={i} className="flex-1 border-l border-border px-1.5 py-2">
+            <div className="mx-auto h-2.5 w-5 animate-pulse rounded bg-muted" />
+            <div className="mx-auto mt-1 h-4 w-4 animate-pulse rounded-full bg-muted" />
           </div>
         ))}
       </div>
-      <div className="flex-1 p-4">
-        <div className="space-y-8">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="flex gap-3">
-              <div className="h-3 w-10 animate-pulse rounded bg-muted" />
-              <div className="h-px flex-1 bg-border" />
+      <div className="flex-1 p-3">
+        <div className="space-y-6">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="flex gap-2">
+              <div className="h-2.5 w-8 animate-pulse rounded bg-muted" />
+              <div className="h-px flex-1 bg-border/50" />
             </div>
           ))}
         </div>

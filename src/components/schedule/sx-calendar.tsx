@@ -11,7 +11,6 @@ import type { CalendarEvent as SxCalendarEvent } from "@schedule-x/calendar";
 import { createEventsServicePlugin } from "@schedule-x/events-service";
 import { createDragAndDropPlugin } from "@schedule-x/drag-and-drop";
 import { createResizePlugin } from "@schedule-x/resize";
-import { createEventModalPlugin } from "@schedule-x/event-modal";
 import { createScrollControllerPlugin } from "@schedule-x/scroll-controller";
 import { createCurrentTimePlugin } from "@schedule-x/current-time";
 import { format } from "date-fns";
@@ -218,10 +217,10 @@ function QuickCreatePopover({
   return (
     <div
       ref={popoverRef}
-      className="fixed z-50 w-72 rounded-xl border border-border bg-card p-4 shadow-xl"
+      className="fixed z-50 w-64 rounded-lg border border-border/60 bg-card p-3 shadow-lg backdrop-blur-sm"
       style={{
-        left: Math.min(state.x, window.innerWidth - 310),
-        top: Math.min(state.y, window.innerHeight - 200),
+        left: Math.min(state.x, window.innerWidth - 280),
+        top: Math.min(state.y, window.innerHeight - 180),
       }}
     >
       <form onSubmit={handleSubmit}>
@@ -229,26 +228,26 @@ function QuickCreatePopover({
           ref={inputRef}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="Event title"
-          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[14px] outline-none transition-colors placeholder:text-muted-foreground focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          placeholder="Add title"
+          className="w-full border-b border-border bg-transparent px-1 py-1.5 text-[13px] outline-none placeholder:text-muted-foreground/60 focus:border-blue-500"
         />
-        <p className="mt-2 text-[12px] text-muted-foreground">
-          {dateLabel} · {timeLabel} — 1 hour
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          {dateLabel} · {timeLabel}
         </p>
-        <div className="mt-3 flex justify-end gap-2">
+        <div className="mt-2 flex justify-end gap-1.5">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted"
+            className="rounded-md px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={!title.trim()}
-            className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+            className="rounded-md bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
           >
-            Create
+            Save
           </button>
         </div>
       </form>
@@ -339,8 +338,13 @@ export function SxCalendar({
   const handleClickDateTime = useCallback(
     (dateTime: Temporal.ZonedDateTime, e?: UIEvent) => {
       const mouseEvt = e as MouseEvent | undefined;
+      const minute = dateTime.minute;
+      const snapped = Math.round(minute / 15) * 15;
+      const adjusted = dateTime.with({ minute: snapped % 60, second: 0 });
+      const final = snapped >= 60 ? adjusted.add({ hours: 1 }) : adjusted;
+
       setQuickCreate({
-        dateTime,
+        dateTime: final,
         x: mouseEvt?.clientX ?? 400,
         y: mouseEvt?.clientY ?? 300,
       });
@@ -392,9 +396,9 @@ export function SxCalendar({
     timezone: userTimezone,
     firstDayOfWeek: 7,
     weekOptions: {
-      gridHeight: 2400,
+      gridHeight: 1800,
       eventWidth: 95,
-      gridStep: 30,
+      gridStep: 15,
       timeAxisFormatOptions: { hour: "numeric" },
     },
     calendars,
@@ -410,7 +414,6 @@ export function SxCalendar({
       eventsService,
       createDragAndDropPlugin(15),
       createResizePlugin(15),
-      createEventModalPlugin(),
       createScrollControllerPlugin({ initialScroll: "07:00" }),
       createCurrentTimePlugin({ fullWeekWidth: true }),
     ],
