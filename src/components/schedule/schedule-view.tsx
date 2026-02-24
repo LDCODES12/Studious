@@ -5,15 +5,11 @@ import { format, addDays, startOfWeek, startOfMonth, endOfMonth } from "date-fns
 import { CalendarPlus } from "lucide-react";
 import { toast } from "sonner";
 import { SxCalendar } from "./sx-calendar";
-import { MiniCalendar } from "./mini-calendar";
-import { UpcomingList } from "./upcoming-list";
-import { SuggestionsPanel } from "./suggestions-panel";
 import { EventDetailPanel } from "./event-detail-panel";
 import type {
   Assignment,
   CalendarEvent,
   CourseRef,
-  Suggestion,
   ScheduleItem,
 } from "./calendar-types";
 
@@ -21,9 +17,7 @@ export function ScheduleView() {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loading, setLoading] = useState(true);
-  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<ScheduleItem | null>(null);
 
@@ -49,33 +43,13 @@ export function ScheduleView() {
 
   useEffect(() => {
     setLoading(true);
-    setSuggestions([]);
     fetch(`/api/schedule?start=${fetchRange.start}&end=${fetchRange.end}`)
       .then((r) => r.json())
-      .then(async (data) => {
-        const a = data.assignments ?? [];
-        const e = data.calendarEvents ?? [];
-        setAssignments(a);
-        setCalendarEvents(e);
+      .then((data) => {
+        setAssignments(data.assignments ?? []);
+        setCalendarEvents(data.calendarEvents ?? []);
         setGoogleConnected(data.googleConnected ?? false);
         setLoading(false);
-
-        if (a.length > 0) {
-          setSuggestionsLoading(true);
-          try {
-            const res = await fetch("/api/schedule/suggestions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ assignments: a, calendarEvents: e }),
-            });
-            const sData = await res.json();
-            setSuggestions(sData.suggestions ?? []);
-          } catch {
-            /* non-fatal */
-          } finally {
-            setSuggestionsLoading(false);
-          }
-        }
       })
       .catch(() => setLoading(false));
   }, [fetchRange]);
@@ -153,72 +127,37 @@ export function ScheduleView() {
   );
 
   return (
-    <div className="flex min-h-0 flex-1 gap-6 overflow-hidden">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {!googleConnected && !loading && (
-          /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route */
-          <a
-            href="/api/auth/google?returnTo=%2Fschedule"
-            className="mb-3 flex items-center gap-3 rounded-xl border border-dashed border-border/80 px-4 py-3 transition-colors hover:bg-muted/40 lg:hidden"
-          >
-            <CalendarPlus className="h-4 w-4 text-muted-foreground" />
-            <div>
-              <p className="text-[13px] font-medium">Connect Google Calendar</p>
-              <p className="text-[12px] text-muted-foreground">
-                See your events alongside assignments
-              </p>
-            </div>
-          </a>
-        )}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {!googleConnected && !loading && (
+        /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route */
+        <a
+          href="/api/auth/google?returnTo=%2Fschedule"
+          className="mb-3 flex shrink-0 items-center gap-3 rounded-xl border border-dashed border-border/80 px-4 py-3 transition-colors hover:bg-muted/40"
+        >
+          <CalendarPlus className="h-4 w-4 text-muted-foreground" />
+          <div>
+            <p className="text-[13px] font-medium">Connect Google Calendar</p>
+            <p className="text-[12px] text-muted-foreground">
+              See your events alongside assignments
+            </p>
+          </div>
+        </a>
+      )}
 
-        {loading ? (
-          <LoadingSkeleton />
-        ) : (
+      {loading ? (
+        <LoadingSkeleton />
+      ) : (
           <SxCalendar
             assignments={assignments}
             calendarEvents={calendarEvents}
             courses={courses}
             selectedDate={currentDate}
-            onSelectEvent={setSelectedEvent}
-            onEventUpdate={handleEventUpdate}
-            onEventCreate={handleEventCreate}
-            onDateChange={handleDateChange}
-          />
-        )}
-      </div>
-
-      {/* Sidebar */}
-      <aside className="hidden w-[272px] shrink-0 space-y-5 overflow-y-auto lg:block">
-        {!googleConnected && !loading && (
-          /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route */
-          <a
-            href="/api/auth/google?returnTo=%2Fschedule"
-            className="flex items-center gap-3 rounded-xl border border-dashed border-border/80 px-4 py-3 transition-colors hover:bg-muted/40"
-          >
-            <CalendarPlus className="h-4 w-4 text-muted-foreground" />
-            <div>
-              <p className="text-[13px] font-medium">Connect Google Calendar</p>
-              <p className="text-[12px] text-muted-foreground">See your events</p>
-            </div>
-          </a>
-        )}
-
-        <MiniCalendar
-          currentDate={currentDate}
-          assignments={assignments}
-          calendarEvents={calendarEvents}
-          onSelectDate={(d) => setCurrentDate(d)}
+          onSelectEvent={setSelectedEvent}
+          onEventUpdate={handleEventUpdate}
+          onEventCreate={handleEventCreate}
+          onDateChange={handleDateChange}
         />
-
-        <UpcomingList assignments={assignments} onSelect={setSelectedEvent} />
-
-        {(suggestionsLoading || suggestions.length > 0) && (
-          <SuggestionsPanel
-            suggestions={suggestions}
-            loading={suggestionsLoading}
-          />
-        )}
-      </aside>
+      )}
 
       {selectedEvent && (
         <EventDetailPanel

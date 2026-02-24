@@ -389,8 +389,12 @@ export function SxCalendar({
     locale: "en-US",
     timezone: userTimezone,
     firstDayOfWeek: 7,
+    dayBoundaries: {
+      start: "07:00",
+      end: "23:00",
+    },
     weekOptions: {
-      gridHeight: 2400,
+      gridHeight: 1600,
       eventWidth: 95,
       gridStep: 30,
       timeAxisFormatOptions: { hour: "numeric" },

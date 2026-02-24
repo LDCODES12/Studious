@@ -1,11 +1,3 @@
-export const ACCENT_DOT: Record<string, string> = {
-  blue: "bg-blue-500",
-  green: "bg-green-500",
-  purple: "bg-purple-500",
-  orange: "bg-orange-500",
-  rose: "bg-rose-500",
-};
-
 export const ACCENT_CHIP: Record<string, string> = {
   blue: "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
   green: "bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-300",
