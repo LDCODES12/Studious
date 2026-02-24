@@ -4,8 +4,9 @@ import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
 import {
   parseSyllabusTopics,
-  sanitizeSchedule,
-  auditSchedule,
+    sanitizeSchedule,
+    renumberSequentialWeeks,
+    auditSchedule,
   needsAudit,
   extractDropRules,
   extractClassSchedule,
@@ -1073,6 +1074,11 @@ export async function POST(request: NextRequest) {
             dbg.auditDelta = `${preAuditCount}→unchanged(audit returned 0)`;
           }
         }
+
+        // Renumber only after cross-source merge/audit so partial sources don't
+        // collide (e.g. a source that only covers weeks 9-14 should not be
+        // renumbered to 1-6 before merging).
+        topics = renumberSequentialWeeks(topics);
 
         // Fetch existing module-based topics to preserve those covering
         // weeks that no AI source extracted (merge, not replace).

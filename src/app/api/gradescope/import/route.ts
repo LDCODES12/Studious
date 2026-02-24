@@ -121,8 +121,15 @@ export async function POST(request: NextRequest) {
     for (const gsAssignment of gsCourse.assignments) {
       const { title, score, maxScore, status, gradescopeAssignmentId, dueDate } = gsAssignment;
 
-      const dbStatus = status === "graded" ? "graded" : status === "submitted" ? "submitted" : "not_started";
-      const isMissing = dbStatus === "not_started" && !!dueDate && new Date(dueDate) < now;
+      const dbStatus =
+        status === "graded"
+          ? "graded"
+          : status === "submitted"
+            ? "submitted"
+            : "not_started";
+      const isMissing =
+        status === "missing" ||
+        (dbStatus === "not_started" && !!dueDate && new Date(dueDate) < now);
 
       // 1. Exact GS assignment ID match (best — already linked from a prior sync)
       if (gradescopeAssignmentId) {

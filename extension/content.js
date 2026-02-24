@@ -43,8 +43,14 @@ function extractScheduleSection(html) {
           el = el.nextElementSibling;
         }
         const section = parts.join("\n");
-        // Return just the schedule section — smaller, more focused for AI
-        if (section.length > 200) return section;
+        // Preserve the top header chunk too so class meeting time/location text
+        // ("MWF 10:00-10:50", room, instructor header block) is not lost when a
+        // later schedule heading is found. This especially matters for text-only
+        // Canvas syllabus pages that do not have a separate PDF.
+        if (section.length > 200) {
+          const headerChunk = html.slice(0, 3000);
+          return `${headerChunk}\n${section}`;
+        }
       }
     }
   } catch { /* DOMParser unavailable */ }

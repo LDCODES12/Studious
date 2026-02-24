@@ -449,6 +449,15 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               ".assignments tbody tr, [data-testid='assignment-row'], tbody tr"
             );
             const results = [];
+            const seen = new Set();
+            const pushResult = (item) => {
+              const key = item.gradescopeAssignmentId
+                ? `id:${item.gradescopeAssignmentId}`
+                : `title:${(item.title || "").toLowerCase()}`;
+              if (!item.title || seen.has(key)) return;
+              seen.add(key);
+              results.push(item);
+            };
             for (const row of rows) {
               const titleLink = row.querySelector("th a, td a[href*='/assignments/']");
               const titleCell = row.querySelector("th, td:first-child");
@@ -468,6 +477,14 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 const m = ct.match(/([\d.]+)\s*\/\s*([\d.]+)/);
                 if (m) { score = parseFloat(m[1]); maxScore = parseFloat(m[2]); status = "graded"; break; }
                 const lower = ct.toLowerCase();
+                if (
+                  lower.includes("late due date passed") ||
+                  lower.includes("due date passed") ||
+                  lower.includes("no submission") ||
+                  lower.includes("missing")
+                ) {
+                  status = "missing";
+                }
                 if (lower.includes("graded")) status = "graded";
                 else if (lower.includes("submitted") && status !== "graded") status = "submitted";
               }
@@ -484,7 +501,46 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 }
               }
 
-              results.push({ title, score, maxScore, status, gradescopeAssignmentId, dueDate });
+              pushResult({ title, score, maxScore, status, gradescopeAssignmentId, dueDate });
+            }
+
+            // Fallback pass: some Gradescope variants don't render standard table rows
+            // (or hide rows behind different wrappers). Scan assignment links directly.
+            for (const a of document.querySelectorAll("a[href*='/assignments/']")) {
+              const href = a.getAttribute("href") || "";
+              const m = href.match(/\/assignments\/(\d+)/);
+              const title = a.textContent?.trim();
+              if (!m || !title || title.length < 2) continue;
+
+              const container =
+                a.closest("tr,[data-testid='assignment-row'],li,div") || a.parentElement;
+              const blob = (container?.textContent || "").toLowerCase();
+              let status = "unsubmitted";
+              if (blob.includes("late due date passed") || blob.includes("due date passed") || blob.includes("no submission") || blob.includes("missing")) {
+                status = "missing";
+              } else if (blob.includes("graded")) {
+                status = "graded";
+              } else if (blob.includes("submitted")) {
+                status = "submitted";
+              }
+
+              let dueDate = null;
+              const timeTags = container?.querySelectorAll?.("time[datetime]") || [];
+              if (timeTags.length > 0) {
+                const dt = timeTags[timeTags.length - 1].getAttribute("datetime");
+                if (dt) {
+                  try { dueDate = new Date(dt).toISOString().split("T")[0]; } catch { /* skip */ }
+                }
+              }
+
+              pushResult({
+                title,
+                score: null,
+                maxScore: null,
+                status,
+                gradescopeAssignmentId: m[1],
+                dueDate,
+              });
             }
             return results;
           },

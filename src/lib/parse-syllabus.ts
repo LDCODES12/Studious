@@ -125,6 +125,12 @@ export interface ParsedTopic {
   courseName: string;
 }
 
+export function renumberSequentialWeeks(weeks: ParsedTopic[]): ParsedTopic[] {
+  return [...weeks]
+    .sort((a, b) => a.weekNumber - b.weekNumber)
+    .map((w, i) => ({ ...w, weekNumber: i + 1 }));
+}
+
 // ─── Role 4 — Sanitizer ────────────────────────────────────────────────────────
 //
 // Code-only cleanup pass that runs immediately after AI extraction.
@@ -165,10 +171,8 @@ export function sanitizeSchedule(weeks: ParsedTopic[]): ParsedTopic[] {
       }
       return true;
     })
-    // 3. Sort ascending by weekNumber
-    .sort((a, b) => a.weekNumber - b.weekNumber)
-    // 4. Renumber sequentially to close gaps (e.g. 1,2,4,5 → 1,2,3,4)
-    .map((w, i) => ({ ...w, weekNumber: i + 1 }));
+    // 3. Sort ascending by weekNumber (preserve original numbering for cross-source merge)
+    .sort((a, b) => a.weekNumber - b.weekNumber);
 }
 
 // ─── Role 5 — Auditor ─────────────────────────────────────────────────────────
