@@ -33,8 +33,6 @@ export interface Suggestion {
   reason: string;
 }
 
-export type ViewMode = "month" | "week";
-
 export type ScheduleItem = Assignment | CalendarEvent;
 
 export function isAssignment(item: ScheduleItem): item is Assignment {
