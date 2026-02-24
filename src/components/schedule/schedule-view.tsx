@@ -107,7 +107,7 @@ const ACCENT_EVENT_TEXT: Record<string, string> = {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const HOURS = Array.from({ length: 18 }, (_, i) => i + 5); // 5 AM → 10 PM
+const HOURS = Array.from({ length: 24 }, (_, i) => i); // 12 AM → 11 PM (full day)
 const HOUR_HEIGHT = 64;
 const GUTTER_WIDTH = 52;
 
@@ -127,7 +127,7 @@ function isAllDayEvent(start: string, end: string): boolean {
 }
 
 function timeToY(date: Date): number {
-  return (getHours(date) - 5) * HOUR_HEIGHT + (getMinutes(date) / 60) * HOUR_HEIGHT;
+  return getHours(date) * HOUR_HEIGHT + (getMinutes(date) / 60) * HOUR_HEIGHT;
 }
 
 function eventHeight(start: Date, end: Date): number {
@@ -580,7 +580,7 @@ function WeekView({
         >
           {/* Hour gridlines */}
           {HOURS.map((hour) => {
-            const y = (hour - 5) * HOUR_HEIGHT;
+            const y = hour * HOUR_HEIGHT;
             return (
               <div key={hour} className="absolute w-full" style={{ top: y }}>
                 <div className="flex">
