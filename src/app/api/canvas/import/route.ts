@@ -276,6 +276,8 @@ function htmlToText(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&ndash;/gi, "-")
     .replace(/&mdash;/gi, "-")
+    .replace(/&#8211;|&#x2013;/gi, "-")
+    .replace(/&#8212;|&#x2014;/gi, "-")
     .replace(/&nbsp;/g, " ")
     .replace(/&#\d+;/g, " ")
     .replace(/[ \t]+/g, " ")      // collapse horizontal whitespace only

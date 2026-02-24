@@ -348,7 +348,7 @@ function extractClassScheduleDeterministic(
     .filter(Boolean);
 
   const timeRangeRx =
-    /(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)\s*[-–—]\s*(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)/;
+    /(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)\s*(?:[-–—]|to)?\s*(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)/;
 
   const meetings: ClassMeeting[] = [];
   const seen = new Set<string>();
@@ -357,6 +357,11 @@ function extractClassScheduleDeterministic(
     const line = lines[i];
     const m = line.match(timeRangeRx);
     if (!m) continue;
+    if (m.index != null && m.index > 0 && !/[-–—]|to/i.test(m[0])) {
+      // If there is no explicit separator, only accept when we also have clear day names
+      // to avoid false positives from unrelated "office hours" prose.
+      if (parseDaysFromText(line).length === 0) continue;
+    }
 
     const days = parseDaysFromText(line);
     if (days.length === 0) continue;
