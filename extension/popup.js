@@ -348,7 +348,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
-let _syncWatchdog = null;
+let _syncPoll = null;
 
 function setSyncing(active) {
   syncBtn.disabled       = active;
@@ -357,28 +357,17 @@ function setSyncing(active) {
   if (active) {
     progressFill.style.width = "5%";
     progressLabel.textContent = "Connecting to Canvas…";
-    // Watchdog: if still syncing after 90s, check live stats to detect silent completion
-    clearTimeout(_syncWatchdog);
-    _syncWatchdog = setTimeout(async () => {
+    clearInterval(_syncPoll);
+    _syncPoll = setInterval(async () => {
       const session = await chrome.storage.session.get(["syncRunning"]);
       if (!session.syncRunning) {
         setSyncing(false);
         refreshLiveStats();
-      } else {
-        // Still running — update label so user knows it's not frozen
-        if (!progressSection.hidden) {
-          progressLabel.textContent = "Still working… the server is processing your syllabi";
-        }
-        // Force-reset after another 210s — server maxDuration is 300s
-        _syncWatchdog = setTimeout(() => {
-          setSyncing(false);
-          refreshLiveStats();
-        }, 210_000);
       }
-    }, 90_000);
+    }, 3_000);
   } else {
-    clearTimeout(_syncWatchdog);
-    _syncWatchdog = null;
+    clearInterval(_syncPoll);
+    _syncPoll = null;
   }
 }
 
