@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useCalendarApp, ScheduleXCalendar } from "@schedule-x/react";
 import {
   createViewDay,
@@ -11,6 +11,7 @@ import type { CalendarEvent as SxCalendarEvent } from "@schedule-x/calendar";
 import { createEventsServicePlugin } from "@schedule-x/events-service";
 import { createDragAndDropPlugin } from "@schedule-x/drag-and-drop";
 import { createResizePlugin } from "@schedule-x/resize";
+import { createEventModalPlugin } from "@schedule-x/event-modal";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import "@schedule-x/theme-shadcn/dist/index.css";
@@ -147,6 +148,116 @@ function toSxEvents(
   return events;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Quick-create popover (click empty time slot → type title → save)  */
+/* ------------------------------------------------------------------ */
+
+interface QuickCreateState {
+  dateTime: Temporal.ZonedDateTime;
+  x: number;
+  y: number;
+}
+
+function QuickCreatePopover({
+  state,
+  onClose,
+  onSave,
+}: {
+  state: QuickCreateState;
+  onClose: () => void;
+  onSave: (title: string, start: string, end: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node))
+        onClose();
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
+  }, [onClose]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = title.trim();
+    if (!trimmed) return;
+
+    const startMs = state.dateTime.epochMilliseconds;
+    const endMs = state.dateTime.add({ hours: 1 }).epochMilliseconds;
+    const startISO = new Date(startMs).toISOString();
+    const endISO = new Date(endMs).toISOString();
+    onSave(trimmed, startISO, endISO);
+    onClose();
+  };
+
+  const timeLabel = new Date(state.dateTime.epochMilliseconds).toLocaleTimeString(
+    [],
+    { hour: "numeric", minute: "2-digit" }
+  );
+  const dateLabel = new Date(state.dateTime.epochMilliseconds).toLocaleDateString(
+    [],
+    { weekday: "short", month: "short", day: "numeric" }
+  );
+
+  return (
+    <div
+      ref={popoverRef}
+      className="fixed z-50 w-72 rounded-xl border border-border bg-card p-4 shadow-xl"
+      style={{
+        left: Math.min(state.x, window.innerWidth - 310),
+        top: Math.min(state.y, window.innerHeight - 200),
+      }}
+    >
+      <form onSubmit={handleSubmit}>
+        <input
+          ref={inputRef}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Event title"
+          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[14px] outline-none transition-colors placeholder:text-muted-foreground focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+        />
+        <p className="mt-2 text-[12px] text-muted-foreground">
+          {dateLabel} · {timeLabel} — 1 hour
+        </p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!title.trim()}
+            className="rounded-lg bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+          >
+            Create
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main calendar component                                           */
+/* ------------------------------------------------------------------ */
+
 interface SxCalendarProps {
   assignments: Assignment[];
   calendarEvents: CalendarEvent[];
@@ -154,6 +265,7 @@ interface SxCalendarProps {
   selectedDate: Date;
   onSelectEvent: (item: ScheduleItem) => void;
   onEventUpdate: (eventId: string, newStart: string, newEnd: string) => void;
+  onEventCreate?: (title: string, startISO: string, endISO: string) => void;
   onDateChange?: (date: Date) => void;
 }
 
@@ -164,9 +276,11 @@ export function SxCalendar({
   selectedDate,
   onSelectEvent,
   onEventUpdate,
+  onEventCreate,
   onDateChange,
 }: SxCalendarProps) {
   const [eventsService] = useState(() => createEventsServicePlugin());
+  const [quickCreate, setQuickCreate] = useState<QuickCreateState | null>(null);
 
   const calendars = useMemo(() => buildCalendarMap(courses), [courses]);
 
@@ -220,6 +334,43 @@ export function SxCalendar({
     [calendarEvents, onEventUpdate]
   );
 
+  const handleClickDateTime = useCallback(
+    (dateTime: Temporal.ZonedDateTime, e?: UIEvent) => {
+      const mouseEvt = e as MouseEvent | undefined;
+      setQuickCreate({
+        dateTime,
+        x: mouseEvt?.clientX ?? 400,
+        y: mouseEvt?.clientY ?? 300,
+      });
+    },
+    []
+  );
+
+  const handleQuickSave = useCallback(
+    (title: string, startISO: string, endISO: string) => {
+      if (onEventCreate) {
+        onEventCreate(title, startISO, endISO);
+      } else {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const startStr = format(new Date(startISO), "yyyy-MM-dd'T'HH:mm:ss");
+        const endStr = format(new Date(endISO), "yyyy-MM-dd'T'HH:mm:ss");
+
+        const tempId = `temp-${Date.now()}`;
+        eventsService.add({
+          id: tempId,
+          title,
+          start: Temporal.ZonedDateTime.from(`${startStr}[${tz}]`),
+          end: Temporal.ZonedDateTime.from(`${endStr}[${tz}]`),
+          calendarId: "blue",
+          _type: "calendar-event",
+          _originalId: tempId,
+        });
+        toast("Event created", { duration: 3000 });
+      }
+    },
+    [onEventCreate, eventsService]
+  );
+
   const sxSelectedDate = useMemo(
     () => Temporal.PlainDate.from(format(selectedDate, "yyyy-MM-dd")),
     [selectedDate]
@@ -248,11 +399,17 @@ export function SxCalendar({
     callbacks: {
       onEventClick: handleEventClick,
       onEventUpdate: handleEventUpdate,
+      onClickDateTime: handleClickDateTime,
       onSelectedDateUpdate: (date: Temporal.PlainDate) => {
         onDateChange?.(new Date(date.toString() + "T12:00:00"));
       },
     },
-    plugins: [eventsService, createDragAndDropPlugin(15), createResizePlugin(15)],
+    plugins: [
+      eventsService,
+      createDragAndDropPlugin(15),
+      createResizePlugin(15),
+      createEventModalPlugin(),
+    ],
   });
 
   const sxEvents = useMemo(
@@ -267,6 +424,13 @@ export function SxCalendar({
   return (
     <div className="sx-calendar-wrapper">
       <ScheduleXCalendar calendarApp={calendar} />
+      {quickCreate && (
+        <QuickCreatePopover
+          state={quickCreate}
+          onClose={() => setQuickCreate(null)}
+          onSave={handleQuickSave}
+        />
+      )}
     </div>
   );
 }

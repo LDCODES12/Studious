@@ -16,6 +16,7 @@
     "@prisma/client": "^6.19.2",
     "@schedule-x/calendar": "3.7.3",
     "@schedule-x/drag-and-drop": "3.7.3",
+    "@schedule-x/event-modal": "3.7.3",
     "@schedule-x/events-service": "3.7.3",
     "@schedule-x/react": "3.7.0",
     "@schedule-x/resize": "3.7.3",

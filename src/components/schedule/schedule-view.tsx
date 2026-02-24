@@ -116,6 +116,42 @@ export function ScheduleView() {
     setCurrentDate(date);
   }, []);
 
+  const handleEventCreate = useCallback(
+    async (title: string, startISO: string, endISO: string) => {
+      const tempEvent: CalendarEvent = {
+        id: `local-${Date.now()}`,
+        summary: title,
+        start: startISO,
+        end: endISO,
+      };
+      setCalendarEvents((prev) => [...prev, tempEvent]);
+      toast("Event created", { duration: 3000 });
+
+      if (googleConnected) {
+        try {
+          const res = await fetch("/api/calendar/events", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ summary: title, start: startISO, end: endISO }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setCalendarEvents((prev) =>
+              prev.map((e) =>
+                e.id === tempEvent.id
+                  ? { ...e, id: data.eventId ?? e.id }
+                  : e
+              )
+            );
+          }
+        } catch {
+          /* local event persists even if API fails */
+        }
+      }
+    },
+    [googleConnected]
+  );
+
   return (
     <div className="flex min-h-0 flex-1 gap-6 overflow-hidden">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -145,6 +181,7 @@ export function ScheduleView() {
             selectedDate={currentDate}
             onSelectEvent={setSelectedEvent}
             onEventUpdate={handleEventUpdate}
+            onEventCreate={handleEventCreate}
             onDateChange={handleDateChange}
           />
         )}
