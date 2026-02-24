@@ -1,0 +1,81 @@
+---
+description: How to use Vercel CLI to view production logs, monitor deployments, and debug the Study Circle application
+alwaysApply: true
+---
+
+# Vercel Logging & Monitoring
+
+This project deploys to Vercel with structured JSON logging. Use the Vercel CLI to inspect production behavior.
+
+## Deployment Info
+
+- **Project**: `studious` (org: `liams-projects-659f8cf7`)
+- **Production URL**: `studious-beta.vercel.app`
+- **Repo**: `LDCODES12/Studious` on GitHub, auto-deploys on push to `main`
+
+## Check Deployment Status
+
+```bash
+vercel ls                          # list recent deployments with status
+vercel inspect <deployment-url>    # detailed info on a specific deploy
+```
+
+## View Logs
+
+```bash
+# Recent logs (last hour, expanded with full messages)
+vercel logs --no-follow --since 1h --expand
+
+# Stream live logs from a specific deployment
+vercel logs <deployment-url>
+
+# Errors only
+vercel logs --no-follow --level error --since 1h --expand
+
+# Filter by keyword (e.g. canvas sync, schedule, gradescope)
+vercel logs --no-follow --query "sync" --since 1h --expand
+
+# JSON output for piping/parsing
+vercel logs --no-follow --json --since 1h
+
+# Filter by HTTP status code
+vercel logs --no-follow --status-code 500 --since 6h
+
+# Filter by source type
+vercel logs --no-follow --source serverless --since 1h
+```
+
+## Logging Architecture
+
+All API routes use `apiLogger()` from `src/lib/logger.ts`. Every log line is structured JSON with fields:
+
+```
+{ ts, level, route, userId, duration, status, message, ...extras }
+```
+
+Key routes with extensive logging:
+
+- `POST /api/canvas/import` — the main sync endpoint. Logs per-course debug info: syllabus sources with scores, AI extraction attempts (source, format, weeks found, accepted/rejected), audit pass results, class schedule extraction source, material imports. Returns a `debug` object in the response body that the Chrome extension persists to `chrome.storage.local.lastSyncDebug`.
+- `POST /api/gradescope/import` — logs matched courses, updated/created assignment counts, cross-source date reconciliation from syllabus events.
+- `POST /api/chat` — logs course context and message count.
+- `POST /api/syllabus/parse` — logs parsed event counts.
+- The Chrome extension also POSTs breadcrumb logs to `POST /api/extension-log` which are persisted in Vercel logs.
+
+## Testing Workflow
+
+The developer tests by deleting all courses in Study Circle, then re-syncing everything via the Chrome extension. This triggers the full `canvas/import` pipeline. Monitor with:
+
+```bash
+# Watch the sync in real-time
+vercel logs --follow --query "canvas" --expand
+
+# After sync, check for errors
+vercel logs --no-follow --level error --since 10m --expand
+
+# See full sync summary
+vercel logs --no-follow --query "sync" --since 10m --json | grep "summary"
+```
+
+## Slow Query Detection
+
+In development, Prisma logs queries taking >200ms (configured in `src/lib/db.ts`). These appear as `slow_query` entries in stdout.
