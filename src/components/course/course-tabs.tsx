@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { format, parseISO, differenceInDays, differenceInHours } from "date-fns";
+import { format, parseISO, differenceInHours } from "date-fns";
 import { ChevronRight, CalendarCheck, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { differenceInPlanningDays, formatAcademicDueDateShort } from "@/lib/academic-deadlines";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MaterialCard } from "./material-card";
 import { MaterialUploader, type UploadedMaterial } from "./material-uploader";
@@ -371,7 +372,7 @@ function DeadlinesSection({
                   {pill.label}
                 </span>
                 <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                  {a.dueDate ? format(parseISO(a.dueDate), "MMM d") : "No date"}
+                  {a.dueDate ? formatAcademicDueDateShort(a.dueDate) : "No date"}
                 </span>
                 {googleConnected && (
                   <div className="w-20 shrink-0 text-right">
@@ -534,13 +535,13 @@ export function CourseTabs({
   const thisWeek = sorted.filter((a) => {
     if (isNeedsAttention(a) || isMissed(a) || a.status === "submitted" || a.status === "graded") return false;
     if (!a.dueDate) return false;
-    const days = differenceInDays(parseISO(a.dueDate), now);
+    const days = differenceInPlanningDays(a.dueDate, now);
     return days >= 0 && days <= 7;
   });
   const upcoming = sorted.filter((a) => {
     if (isNeedsAttention(a) || isMissed(a) || a.status === "submitted" || a.status === "graded") return false;
     if (!a.dueDate) return false;
-    const days = differenceInDays(parseISO(a.dueDate), now);
+    const days = differenceInPlanningDays(a.dueDate, now);
     return days > 7;
   });
   const done = sorted.filter(

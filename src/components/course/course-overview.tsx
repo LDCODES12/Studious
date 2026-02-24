@@ -4,6 +4,7 @@ import { useState } from "react";
 import { format, parseISO, differenceInHours, differenceInDays } from "date-fns";
 import { AlertTriangle, CheckCircle2, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatAcademicDueDateShort, formatAcademicMidnightLabel } from "@/lib/academic-deadlines";
 
 const TYPE_PILL: Record<string, { label: string; className: string }> = {
   exam:       { label: "Exam",       className: "bg-red-50 text-red-700" },
@@ -45,6 +46,11 @@ interface CourseOverviewProps {
 function timeUntil(dueDate: string): string {
   const now = new Date();
   const due = parseISO(dueDate);
+  const midnightLabel = formatAcademicMidnightLabel(dueDate);
+  if (midnightLabel) {
+    const hours = differenceInHours(due, now);
+    if (hours >= 0 && hours <= 36) return midnightLabel;
+  }
   const hours = differenceInHours(due, now);
   const days = differenceInDays(due, now);
   if (hours < 0) return "Overdue";
@@ -229,7 +235,7 @@ export function CourseOverview({
                     {pill.label}
                   </span>
                   <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                    {a.dueDate ? format(parseISO(a.dueDate), "MMM d") : ""}
+                    {a.dueDate ? formatAcademicDueDateShort(a.dueDate) : ""}
                   </span>
                 </div>
               );
