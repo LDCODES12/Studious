@@ -277,6 +277,7 @@ function extractScheduleSection(html) {
       // include[]=content_details gives us direct download URLs for File items —
       // much more reliable than the files endpoint which is often restricted.
       const rawModules = [];
+      const modulePageUrls = new Set();
       try {
         const fetched = await fetchAll(
           `${BASE}/courses/${course.id}/modules?include[]=items&include[]=content_details&per_page=100`
@@ -286,6 +287,9 @@ function extractScheduleSection(html) {
           const items    = mod.items ?? [];
           const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
           const readings = items.filter((it) => it.type === "File").map((it) => it.title).filter(Boolean);
+          for (const it of items) {
+            if (it.type === "Page" && it.page_url) modulePageUrls.add(it.page_url);
+          }
           payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
         }
       } catch { /* modules disabled — skip */ }
@@ -311,6 +315,31 @@ function extractScheduleSection(html) {
           } catch { /* skip */ }
         }
       } catch { /* pages endpoint not available */ }
+
+      // ── Module-linked Canvas Pages fallback (important for courses that store
+      // syllabus/schedule content in module Pages rather than the syllabus tab) ──
+      // We already fetched module items above; if they contain Page links, fetch the
+      // top likely syllabus/schedule pages directly by page_url and append bodies.
+      try {
+        const pageCandidates = [...modulePageUrls].filter((u) =>
+          /syllab|schedul|course.{0,10}(schedule|info|outline|overview)|office.{0,5}hours|meeting.{0,5}times/i.test(u)
+        );
+        let fetchedBodies = 0;
+        for (const pageUrl of pageCandidates.slice(0, 5)) {
+          try {
+            const [pageData] = await fetchAll(`${BASE}/courses/${course.id}/pages/${pageUrl}`);
+            const bodyHtml = pageData?.body?.trim();
+            if (bodyHtml && bodyHtml.length > 50) {
+              course.syllabusBody = (course.syllabusBody ?? "") + "\n" + bodyHtml;
+              course._rawSyllabusBody = (course._rawSyllabusBody ?? "") + "\n" + bodyHtml;
+              fetchedBodies++;
+            }
+          } catch { /* skip individual module page */ }
+        }
+        if (fetchedBodies > 0) {
+          console.log(`[scout] ${course.name}: appended ${fetchedBodies} module-linked page bod${fetchedBodies !== 1 ? "ies" : "y"}`);
+        }
+      } catch { /* module-page fallback failed */ }
 
       // ── Announcements ──────────────────────────────────────────────────────
       try {

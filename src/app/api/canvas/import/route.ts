@@ -1143,7 +1143,8 @@ export async function POST(request: NextRequest) {
         const strongAiCoverage = (termWeeks && termWeeks > 0
           ? topics.length >= Math.max(8, Math.round(termWeeks * 0.6))
           : topics.length >= 10)
-          || (topics.length >= 8 && aiDatedWeeks >= 6 && aiDatesLookWeekly);
+          || (topics.length >= 8 && aiDatedWeeks >= 6)
+          || (topics.length >= 8 && aiDatedWeeks >= 5 && aiDatesLookWeekly);
         const nonWeeklyModuleRx = /\b(unit|orientation|welcome|exam|quiz|aktiv|discussion module|module)\b/i;
         const nonWeeklyModuleCount = existingModuleTopics.filter((mt) => nonWeeklyModuleRx.test(mt.weekLabel)).length;
         const nonWeeklyModuleRatio = existingModuleTopics.length > 0
