@@ -1,4 +1,4 @@
-import { isThisWeek, parseISO } from "date-fns";
+import { isThisWeek } from "date-fns";
 import { effectivePlanningDate } from "@/lib/academic-deadlines";
 
 interface Props {
@@ -11,7 +11,7 @@ export function QuickStats({ courses, assignments }: Props) {
     (a) =>
       a.status === "not_started" &&
       a.dueDate &&
-      isThisWeek(effectivePlanningDate(parseISO(a.dueDate)))
+      isThisWeek(effectivePlanningDate(a.dueDate))
   ).length;
 
   const upcoming = assignments.filter(

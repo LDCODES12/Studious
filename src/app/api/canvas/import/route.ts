@@ -159,10 +159,10 @@ function inferType(
   return "assignment";
 }
 
-/** Canvas returns ISO datetime; we store YYYY-MM-DD. Returns null if input is null. */
-function toDateOnly(iso: string | null): string | null {
+/** Preserve Canvas due datetime (ISO string) when present. */
+function normalizeDueDate(iso: string | null): string | null {
   if (!iso) return null;
-  return iso.slice(0, 10);
+  return iso;
 }
 
 /**
@@ -482,7 +482,7 @@ export async function POST(request: NextRequest) {
       if (!scCourseId) continue;
 
       const canvasAssId = String(a.id);
-      const dueDate = toDateOnly(a.dueDate);
+      const dueDate = normalizeDueDate(a.dueDate);
       const type = inferType(a.title, a.submissionTypes ?? [a.submissionType], a.gradingType ?? null);
       const description = a.description
         ? a.description.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 1000) || null
