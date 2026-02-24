@@ -286,6 +286,20 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+function classScheduleProbe(text: string) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return {
+    chars: text.length,
+    hasMeetingHeading: /\b(meeting times?|class times?|course schedule)\b/i.test(text),
+    hasDayNames: /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mondays|wednesdays|fridays)\b/i.test(text),
+    hasCompactDays: /\b(MWF|TR|TTH|MON\/WED\/FRI)\b/i.test(text),
+    hasTimeRange:
+      /\d{1,2}(?::\d{2})?\s*[AP]M\s*[-–—]\s*\d{1,2}(?::\d{2})?\s*[AP]M/i.test(text) ||
+      /\d{1,2}(?::\d{2})?\s*[AP]M\s+to\s+\d{1,2}(?::\d{2})?\s*[AP]M/i.test(text),
+    snippet: compact.slice(0, 500),
+  };
+}
+
 // ─── Auth helper ─────────────────────────────────────────────────────────────
 
 async function authedUser(request: NextRequest) {
@@ -892,9 +906,13 @@ export async function POST(request: NextRequest) {
       try {
         let classSchedule = null;
         let classScheduleSource = "none";
+        const debugClassScheduleCourse = /anthropology/i.test(c.name);
 
         // Source 1: best-scoring syllabus text (from topic extraction pipeline)
         if (syllabusText.length >= 200) {
+          if (debugClassScheduleCourse) {
+            console.log(`[sync-debug] ${c.name}: classSchedule source1 probe`, classScheduleProbe(syllabusText));
+          }
           classSchedule = await extractClassSchedule(syllabusText);
           if (classSchedule) classScheduleSource = "syllabus-ai";
         }
@@ -904,6 +922,9 @@ export async function POST(request: NextRequest) {
         // in the topic pipeline (e.g. just "Meeting Times: MWF 1-1:50PM")
         if (!classSchedule && c.syllabusBody) {
           const rawBodyText = htmlToText(c.syllabusBody);
+          if (debugClassScheduleCourse) {
+            console.log(`[sync-debug] ${c.name}: classSchedule source1b probe`, classScheduleProbe(rawBodyText));
+          }
           if (rawBodyText.length >= 50 && rawBodyText !== syllabusText) {
             console.log(`[sync] ${c.name}: trying Source 1b (syllabusBody raw, ${rawBodyText.length}c)`);
             classSchedule = await extractClassSchedule(rawBodyText);
@@ -1129,6 +1150,23 @@ export async function POST(request: NextRequest) {
           ? nonWeeklyModuleCount / existingModuleTopics.length
           : 0;
         const suppressModuleCarryover = strongAiCoverage && nonWeeklyModuleRatio >= 0.4;
+
+        if (existingModuleTopics.length > 0 || topics.length > 0) {
+          console.log(
+            `[sync-debug] ${c.name}: module-carryover decision ` +
+            JSON.stringify({
+              aiWeeks: topics.length,
+              aiDatedWeeks,
+              aiDatesLookWeekly,
+              termWeeks,
+              strongAiCoverage,
+              moduleTopics: existingModuleTopics.length,
+              nonWeeklyModuleCount,
+              nonWeeklyModuleRatio: Number(nonWeeklyModuleRatio.toFixed(2)),
+              suppressModuleCarryover,
+            })
+          );
+        }
 
         // Delete module topics either:
         // 1) all of them when they are likely non-weekly scaffolding and AI is good, or
