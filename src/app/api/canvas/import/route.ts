@@ -1084,17 +1084,41 @@ export async function POST(request: NextRequest) {
         // weeks that no AI source extracted (merge, not replace).
         const existingModuleTopics = await db.courseTopic.findMany({
           where: { courseId: scCourseId, canvasModuleId: { not: null } },
-          select: { id: true, weekNumber: true },
+          select: { id: true, weekNumber: true, weekLabel: true },
         });
 
         const aiWeekNumbers = new Set(topics.map((t) =>
           Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || 0)
         ));
 
-        // Only delete module topics for weeks that AI covers
-        const moduleIdsToDelete = existingModuleTopics
-          .filter((mt) => aiWeekNumbers.has(mt.weekNumber))
-          .map((mt) => mt.id);
+        // Suppress module carryover when AI coverage is already strong and the
+        // module labels look like non-weekly buckets (Unit/Orientation/Exam/etc).
+        const termWeeks = c.termStartAt && c.termEndAt
+          ? Math.max(
+              0,
+              Math.round(
+                (new Date(c.termEndAt).getTime() - new Date(c.termStartAt).getTime()) / (7 * 86400_000)
+              )
+            )
+          : null;
+        const strongAiCoverage = termWeeks && termWeeks > 0
+          ? topics.length >= Math.max(8, Math.round(termWeeks * 0.6))
+          : topics.length >= 10;
+        const nonWeeklyModuleRx = /\b(unit|orientation|welcome|exam|quiz|aktiv|discussion module|module)\b/i;
+        const nonWeeklyModuleCount = existingModuleTopics.filter((mt) => nonWeeklyModuleRx.test(mt.weekLabel)).length;
+        const nonWeeklyModuleRatio = existingModuleTopics.length > 0
+          ? nonWeeklyModuleCount / existingModuleTopics.length
+          : 0;
+        const suppressModuleCarryover = strongAiCoverage && nonWeeklyModuleRatio >= 0.4;
+
+        // Delete module topics either:
+        // 1) all of them when they are likely non-weekly scaffolding and AI is good, or
+        // 2) only the overlapping week numbers when module carryover is still useful.
+        const moduleIdsToDelete = suppressModuleCarryover
+          ? existingModuleTopics.map((mt) => mt.id)
+          : existingModuleTopics
+              .filter((mt) => aiWeekNumbers.has(mt.weekNumber))
+              .map((mt) => mt.id);
 
         if (moduleIdsToDelete.length > 0) {
           await db.courseTopic.deleteMany({
@@ -1141,6 +1165,7 @@ export async function POST(request: NextRequest) {
         console.log(
           `[sync] ${c.name}: OK ${topics.length} weeks written` +
           (keptModuleWeeks > 0 ? ` + ${keptModuleWeeks} module weeks kept` : "") +
+          (suppressModuleCarryover ? ` modules-suppressed(nonweekly=${nonWeeklyModuleCount}/${existingModuleTopics.length})` : "") +
           ` | src=${usedLabel} fmt=${usedFormat}` +
           (auditFired ? ` audit(${dbg.auditDelta})` : ` audit-skipped`)
         );

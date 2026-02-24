@@ -479,9 +479,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 const lower = ct.toLowerCase();
                 if (
                   lower.includes("late due date passed") ||
-                  lower.includes("due date passed") ||
-                  lower.includes("no submission") ||
-                  lower.includes("missing")
+                  lower.includes("due date passed")
                 ) {
                   status = "missing";
                 }
@@ -516,7 +514,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 a.closest("tr,[data-testid='assignment-row'],li,div") || a.parentElement;
               const blob = (container?.textContent || "").toLowerCase();
               let status = "unsubmitted";
-              if (blob.includes("late due date passed") || blob.includes("due date passed") || blob.includes("no submission") || blob.includes("missing")) {
+              if (blob.includes("late due date passed") || blob.includes("due date passed")) {
                 status = "missing";
               } else if (blob.includes("graded")) {
                 status = "graded";

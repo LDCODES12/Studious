@@ -281,6 +281,115 @@ export interface ExtractedClassSchedule {
   semesterEnd: string | null;    // ISO YYYY-MM-DD
 }
 
+function to24HourTime(raw: string): string | null {
+  const m = raw.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?$/);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] ?? "00";
+  const ap = m[3].toUpperCase();
+  if (hour === 12) hour = ap === "A" ? 0 : 12;
+  else if (ap === "P") hour += 12;
+  return `${String(hour).padStart(2, "0")}:${minute}`;
+}
+
+function parseDaysFromText(text: string): string[] {
+  const hits = new Set<string>();
+  const lower = text.toLowerCase();
+
+  const fullDayMap: [RegExp, string][] = [
+    [/\bmondays?\b/g, "MO"],
+    [/\btuesdays?\b/g, "TU"],
+    [/\bwednesdays?\b/g, "WE"],
+    [/\bthursdays?\b/g, "TH"],
+    [/\bfridays?\b/g, "FR"],
+    [/\bsaturdays?\b/g, "SA"],
+    [/\bsundays?\b/g, "SU"],
+  ];
+  for (const [rx, code] of fullDayMap) {
+    if (rx.test(lower)) hits.add(code);
+  }
+
+  if (hits.size === 0) {
+    // Common compact forms: MWF, TR, TuTh, Mon/Wed/Fri, Tue & Thu
+    const compact = lower
+      .replace(/th/g, "R")
+      .replace(/tu/g, "T")
+      .replace(/mon|monday/g, "M")
+      .replace(/wed|wednesday/g, "W")
+      .replace(/fri|friday/g, "F")
+      .replace(/sat|saturday/g, "S")
+      .replace(/sun|sunday/g, "U");
+    const compactMatch = compact.match(/\b[mtwrfsu]{2,7}\b/);
+    if (compactMatch) {
+      for (const ch of compactMatch[0].toUpperCase()) {
+        if (ch === "M") hits.add("MO");
+        if (ch === "T") hits.add("TU");
+        if (ch === "W") hits.add("WE");
+        if (ch === "R") hits.add("TH");
+        if (ch === "F") hits.add("FR");
+        if (ch === "S") hits.add("SA");
+        if (ch === "U") hits.add("SU");
+      }
+    }
+  }
+
+  const order = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+  return order.filter((d) => hits.has(d));
+}
+
+function extractClassScheduleDeterministic(
+  text: string
+): ExtractedClassSchedule | null {
+  const lines = text
+    .split(/\n+/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const timeRangeRx =
+    /(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)\s*[-–—]\s*(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)/;
+
+  const meetings: ClassMeeting[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(timeRangeRx);
+    if (!m) continue;
+
+    const days = parseDaysFromText(line);
+    if (days.length === 0) continue;
+
+    const startTime = to24HourTime(m[1]);
+    const endTime = to24HourTime(m[2]);
+    if (!startTime || !endTime) continue;
+
+    const prev = lines[i - 1]?.toLowerCase() ?? "";
+    const here = line.toLowerCase();
+    const label = /\blab\b/.test(prev + " " + here)
+      ? "Lab"
+      : /\bdiscuss/i.test(prev + " " + here)
+        ? "Discussion"
+        : /\brecit/i.test(prev + " " + here)
+          ? "Recitation"
+          : "Lecture";
+
+    const key = `${label}|${days.join(",")}|${startTime}|${endTime}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    meetings.push({
+      label,
+      days,
+      startTime,
+      endTime,
+      location: "",
+    });
+  }
+
+  if (meetings.length === 0) return null;
+  return { meetings, semesterStart: null, semesterEnd: null };
+}
+
 /**
  * Extracts the recurring class meeting schedule from a syllabus.
  * Looks for patterns like "MWF 10:00–10:50 AM, Chem 201" or
@@ -291,6 +400,9 @@ export interface ExtractedClassSchedule {
 export async function extractClassSchedule(
   text: string
 ): Promise<ExtractedClassSchedule | null> {
+  const deterministic = extractClassScheduleDeterministic(text);
+  if (deterministic) return deterministic;
+
   // Focus on the first ~6000 chars — schedule info lives in the header but
   // large PDFs often have a full page of title/prerequisites before meeting times.
   const truncated = text.slice(0, 6000);
