@@ -88,7 +88,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
   }));
 
   return (
-    <div className="mx-auto max-w-[1200px] space-y-7">
+    <div className="space-y-7">
       <CourseHeader
         course={course}
         courseId={course.id}

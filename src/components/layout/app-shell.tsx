@@ -11,7 +11,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <Sidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
           <Header />
-          <main className="flex min-h-0 flex-1 flex-col overflow-y-auto p-8">{children}</main>
+          <main className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5">{children}</main>
         </div>
       </div>
     </SessionProvider>

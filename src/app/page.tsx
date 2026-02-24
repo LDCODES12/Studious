@@ -54,7 +54,7 @@ export default async function DashboardPage() {
   }));
 
   return (
-    <div className="mx-auto max-w-[1200px] space-y-7">
+    <div className="space-y-7">
       <GreetingBanner name={session?.user?.name ?? "there"} />
       <QuickStats courses={courses} assignments={assignments} />
       <div className="grid grid-cols-5 gap-7">

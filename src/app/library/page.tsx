@@ -14,7 +14,7 @@ export default async function LibraryPage() {
   });
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       <div>
         <h1 className="text-lg font-semibold">Library</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">

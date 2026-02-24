@@ -42,7 +42,7 @@ export default async function TasksPage() {
   }));
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div>
       <h1 className="mb-6 text-lg font-semibold">Tasks</h1>
       <TasksView
         initialTasks={serializedTasks}
