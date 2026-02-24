@@ -12,6 +12,8 @@ import { createEventsServicePlugin } from "@schedule-x/events-service";
 import { createDragAndDropPlugin } from "@schedule-x/drag-and-drop";
 import { createResizePlugin } from "@schedule-x/resize";
 import { createEventModalPlugin } from "@schedule-x/event-modal";
+import { createScrollControllerPlugin } from "@schedule-x/scroll-controller";
+import { createCurrentTimePlugin } from "@schedule-x/current-time";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import "@schedule-x/theme-shadcn/dist/index.css";
@@ -389,12 +391,8 @@ export function SxCalendar({
     locale: "en-US",
     timezone: userTimezone,
     firstDayOfWeek: 7,
-    dayBoundaries: {
-      start: "07:00",
-      end: "23:00",
-    },
     weekOptions: {
-      gridHeight: 1600,
+      gridHeight: 2400,
       eventWidth: 95,
       gridStep: 30,
       timeAxisFormatOptions: { hour: "numeric" },
@@ -413,6 +411,8 @@ export function SxCalendar({
       createDragAndDropPlugin(15),
       createResizePlugin(15),
       createEventModalPlugin(),
+      createScrollControllerPlugin({ initialScroll: "07:00" }),
+      createCurrentTimePlugin({ fullWeekWidth: true }),
     ],
   });
 
