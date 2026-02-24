@@ -64,15 +64,23 @@ export function CourseOverview({
 
   const now = new Date();
 
-  // Urgent: missing OR (due within 48h AND not submitted/graded)
+  const isDone = (a: OverviewAssignment) => a.status === "submitted" || a.status === "graded";
+  const hoursLeftFor = (a: OverviewAssignment) =>
+    a.dueDate ? differenceInHours(parseISO(a.dueDate), now) : null;
+
+  // Needs Attention: actionable soon (not already missed/closed)
   const urgent = assignments.filter((a) => {
-    if (a.status === "submitted" || a.status === "graded") return false;
+    if (isDone(a) || a.missing || !a.dueDate) return false;
+    const hoursLeft = hoursLeftFor(a);
+    return hoursLeft != null && hoursLeft >= 0 && hoursLeft <= 48;
+  });
+
+  // Missed: explicitly missing or overdue and not completed
+  const missed = assignments.filter((a) => {
+    if (isDone(a)) return false;
     if (a.missing) return true;
-    if (a.dueDate) {
-      const hoursLeft = differenceInHours(parseISO(a.dueDate), now);
-      return hoursLeft >= 0 && hoursLeft <= 48;
-    }
-    return false;
+    const hoursLeft = hoursLeftFor(a);
+    return hoursLeft != null && hoursLeft < 0;
   });
 
   // Up Next: upcoming not-submitted/graded, sorted by dueDate, top 3
@@ -156,6 +164,34 @@ export function CourseOverview({
           <p className="mt-0.5 text-[11px] text-muted-foreground">
             {applyGroupWeights ? "Weighted grading" : "Points-based grading"}
           </p>
+        </div>
+      )}
+
+      {/* ── Missed ── */}
+      {missed.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-700" />
+            <span className="text-[13px] font-semibold text-amber-800">
+              Missed ({missed.length})
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            {missed.map((a) => (
+              <div key={a.id} className="flex items-center justify-between gap-3">
+                <span className="min-w-0 truncate text-[13px] text-amber-900">
+                  {a.canvasUrl ? (
+                    <a href={a.canvasUrl} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                      {a.title}
+                    </a>
+                  ) : a.title}
+                </span>
+                <span className="shrink-0 text-[11px] font-medium text-amber-700">
+                  Missed
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

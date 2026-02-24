@@ -515,22 +515,30 @@ export function CourseTabs({
     return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
   });
 
-  const isNeedsAttention = (a: Assignment) => {
+  const isMissed = (a: Assignment) => {
     if (a.status === "submitted" || a.status === "graded") return false;
     if (a.missing) return true;
     if (a.dueDate && new Date(a.dueDate) < now) return true;
     return false;
   };
+  const isNeedsAttention = (a: Assignment) => {
+    if (a.status === "submitted" || a.status === "graded") return false;
+    if (isMissed(a)) return false;
+    if (!a.dueDate) return false;
+    const hours = differenceInHours(parseISO(a.dueDate), now);
+    return hours >= 0 && hours <= 48;
+  };
 
   const needsAttention = sorted.filter(isNeedsAttention);
+  const missed = sorted.filter(isMissed);
   const thisWeek = sorted.filter((a) => {
-    if (isNeedsAttention(a) || a.status === "submitted" || a.status === "graded") return false;
+    if (isNeedsAttention(a) || isMissed(a) || a.status === "submitted" || a.status === "graded") return false;
     if (!a.dueDate) return false;
     const days = differenceInDays(parseISO(a.dueDate), now);
     return days >= 0 && days <= 7;
   });
   const upcoming = sorted.filter((a) => {
-    if (isNeedsAttention(a) || a.status === "submitted" || a.status === "graded") return false;
+    if (isNeedsAttention(a) || isMissed(a) || a.status === "submitted" || a.status === "graded") return false;
     if (!a.dueDate) return false;
     const days = differenceInDays(parseISO(a.dueDate), now);
     return days > 7;
@@ -686,6 +694,12 @@ export function CourseTabs({
               {...sectionProps}
             />
             <DeadlinesSection
+              label="Missed"
+              assignments={missed}
+              headerClassName="text-amber-700"
+              {...sectionProps}
+            />
+            <DeadlinesSection
               label="This Week"
               assignments={thisWeek}
               {...sectionProps}
@@ -702,7 +716,7 @@ export function CourseTabs({
               headerClassName="text-muted-foreground"
               {...sectionProps}
             />
-            {needsAttention.length === 0 && thisWeek.length === 0 && upcoming.length === 0 && done.length === 0 && (
+            {needsAttention.length === 0 && missed.length === 0 && thisWeek.length === 0 && upcoming.length === 0 && done.length === 0 && (
               <div className="rounded-lg border border-border bg-card px-6 py-10 text-center">
                 <p className="text-[13px] text-muted-foreground">No assignments.</p>
               </div>
