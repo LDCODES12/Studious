@@ -396,9 +396,9 @@ export function SxCalendar({
     timezone: userTimezone,
     firstDayOfWeek: 7,
     weekOptions: {
-      gridHeight: 1800,
+      gridHeight: 1300,
       eventWidth: 95,
-      gridStep: 15,
+      gridStep: 60,
       timeAxisFormatOptions: { hour: "numeric" },
     },
     calendars,
