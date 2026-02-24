@@ -369,11 +369,11 @@ function setSyncing(active) {
         if (!progressSection.hidden) {
           progressLabel.textContent = "Still working… the server is processing your syllabi";
         }
-        // Force-reset after another 90s regardless — server must have timed out
+        // Force-reset after another 210s — server maxDuration is 300s
         _syncWatchdog = setTimeout(() => {
           setSyncing(false);
           refreshLiveStats();
-        }, 90_000);
+        }, 210_000);
       }
     }, 90_000);
   } else {
