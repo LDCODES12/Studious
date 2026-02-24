@@ -117,8 +117,8 @@ export function ScheduleView() {
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 gap-6">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 gap-6 overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {!googleConnected && !loading && (
           /* eslint-disable-next-line @next/next/no-html-link-for-pages -- API route */
           <a

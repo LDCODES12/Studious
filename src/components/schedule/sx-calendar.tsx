@@ -225,12 +225,18 @@ export function SxCalendar({
     [selectedDate]
   );
 
+  const userTimezone = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+    []
+  );
+
   const calendar = useCalendarApp({
     views: [createViewWeek(), createViewDay(), createViewMonthGrid()],
     defaultView: "week",
     theme: "shadcn",
     selectedDate: sxSelectedDate,
     locale: "en-US",
+    timezone: userTimezone,
     firstDayOfWeek: 7,
     weekOptions: {
       gridHeight: 2400,
