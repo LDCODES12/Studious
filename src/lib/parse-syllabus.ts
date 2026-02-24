@@ -350,7 +350,13 @@ function extractClassScheduleDeterministic(
   const timeRangeRx =
     /(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)\s*(?:[-–—]|to)?\s*(\d{1,2}(?::\d{2})?\s*[AaPp]\.?[Mm]\.?)/;
 
-  const meetings: ClassMeeting[] = [];
+  type Candidate = {
+    meeting: ClassMeeting;
+    score: number;
+    index: number;
+    label: string;
+  };
+  const candidates: Candidate[] = [];
   const seen = new Set<string>();
   const hasMeetingHeadingNear = (idx: number) => {
     const window = [lines[idx - 2], lines[idx - 1], lines[idx], lines[idx + 1], lines[idx + 2]]
@@ -359,6 +365,11 @@ function extractClassScheduleDeterministic(
       .toLowerCase();
     return /\b(meeting times?|class times?|lecture times?|course schedule)\b/.test(window);
   };
+  const contextWindow = (idx: number) =>
+    [lines[idx - 2], lines[idx - 1], lines[idx], lines[idx + 1], lines[idx + 2]]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
 
   const lineHasTimeRange = (line: string) => {
     const m = line.match(timeRangeRx);
@@ -434,16 +445,49 @@ function extractClassScheduleDeterministic(
     if (seen.has(key)) continue;
     seen.add(key);
 
-    meetings.push({
+    const meeting: ClassMeeting = {
       label,
       days,
       startTime,
       endTime,
       location: "",
-    });
+    };
+
+    const ctx = contextWindow(i);
+    const durationMinutes = (() => {
+      const [sh, sm] = startTime.split(":").map(Number);
+      const [eh, em] = endTime.split(":").map(Number);
+      return (eh * 60 + em) - (sh * 60 + sm);
+    })();
+    let score = 0;
+    if (hasMeetingHeadingNear(i)) score += 6;
+    if (/\b(meeting times?|class meets?|lecture)\b/.test(ctx)) score += 3;
+    if (/\b(lab|discussion|recitation)\b/.test(ctx)) score += 2;
+    if (/\boffice\s+hours?\b/.test(ctx)) score -= 8;
+    if (/\b(instructor|professor|prof\.)\b/.test(ctx) && /\boffice\b/.test(ctx)) score -= 5;
+    if (label === "Lecture" && days.length === 1) score -= 2;
+    if (label === "Lecture" && durationMinutes >= 120) score -= 3;
+    if (days.length >= 3) score += 2;
+    if (durationMinutes > 0 && durationMinutes <= 80) score += 1;
+
+    candidates.push({ meeting, score, index: i, label });
   }
 
-  if (meetings.length === 0) return null;
+  if (candidates.length === 0) return null;
+
+  // Prefer class-meeting candidates over other schedule-like text (especially
+  // Office Hours pages) by keeping only the strongest context-supported rows.
+  const bestScore = Math.max(...candidates.map((c) => c.score));
+  let chosen = candidates.filter((c) => c.score >= Math.max(1, bestScore - 2));
+  if (chosen.length === 0) {
+    // Fall back to non-negative candidates before giving up entirely.
+    chosen = candidates.filter((c) => c.score >= 0);
+  }
+  if (chosen.length === 0) return null;
+
+  // Preserve order of appearance while deduping (dedupe already done above).
+  chosen.sort((a, b) => a.index - b.index);
+  const meetings = chosen.map((c) => c.meeting);
   return { meetings, semesterStart: null, semesterEnd: null };
 }
 
