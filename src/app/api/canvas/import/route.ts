@@ -629,6 +629,7 @@ export async function POST(request: NextRequest) {
     classScheduleSource: string;
     status: string;
     error?: string;
+    coverageWarning?: string;
   };
   const allCourseDebug: CourseDebug[] = [];
   const scheduleRows: string[] = [];
@@ -884,44 +885,36 @@ export async function POST(request: NextRequest) {
       //   2. Canvas calendar events (deterministic) — reliable fallback when
       //      the syllabus doesn't mention meeting times
       try {
-        const existingCourse = await db.course.findUnique({
-          where: { id: scCourseId },
-          select: { classSchedule: true },
-        });
-        if (!existingCourse?.classSchedule) {
-          let classSchedule = null;
-          let classScheduleSource = "none";
+        let classSchedule = null;
+        let classScheduleSource = "none";
 
-          // Source 1: syllabus text (AI) — first 6k chars where meeting info lives
-          if (syllabusText.length >= 200) {
-            classSchedule = await extractClassSchedule(syllabusText);
-            if (classSchedule) classScheduleSource = "syllabus-ai";
-          }
+        // Source 1: syllabus text (AI) — first 6k chars where meeting info lives
+        if (syllabusText.length >= 200) {
+          classSchedule = await extractClassSchedule(syllabusText);
+          if (classSchedule) classScheduleSource = "syllabus-ai";
+        }
 
-          // Source 2: Canvas calendar events (deterministic fallback)
-          if (!classSchedule && c.calendarEvents && c.calendarEvents.length > 0) {
-            classSchedule = extractScheduleFromCalendarEvents(
-              c.calendarEvents,
-              c.termStartAt,
-              c.termEndAt,
-            );
-            if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
-          }
-
-          dbg.classScheduleSource = classScheduleSource + (classSchedule ? `(${classSchedule.meetings.length} meetings)` : "");
-          scheduleRows.push(
-            `${c.name}: ${classScheduleSource}` +
-            (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
+        // Source 2: Canvas calendar events (deterministic fallback)
+        if (!classSchedule && c.calendarEvents && c.calendarEvents.length > 0) {
+          classSchedule = extractScheduleFromCalendarEvents(
+            c.calendarEvents,
+            c.termStartAt,
+            c.termEndAt,
           );
+          if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
+        }
 
-          if (classSchedule) {
-            await db.course.update({
-              where: { id: scCourseId },
-              data: { classSchedule: classSchedule as object },
-            });
-          }
-        } else {
-          scheduleRows.push(`${c.name}: already set`);
+        dbg.classScheduleSource = classScheduleSource + (classSchedule ? `(${classSchedule.meetings.length} meetings)` : "");
+        scheduleRows.push(
+          `${c.name}: ${classScheduleSource}` +
+          (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
+        );
+
+        if (classSchedule) {
+          await db.course.update({
+            where: { id: scCourseId },
+            data: { classSchedule: classSchedule as object },
+          });
         }
       } catch {
         // Don't fail the whole import on this optional enrichment
@@ -973,15 +966,14 @@ export async function POST(request: NextRequest) {
         // Build a format hint for the AI based on the winning source
         const bestFormat = detectSourceFormat(syllabusText);
 
-        // ── Role 3: Extractor ─────────────────────────────────────────────
-        // Try each candidate source in descending score order until one
-        // returns a contentful schedule. This handles the common case where
-        // the top-scored source (e.g. HTML body with policy text) returns
-        // nothing and the actual schedule is in a lower-ranked PDF.
-        let topics: ReturnType<typeof sanitizeSchedule> = [];
+        // ── Role 3: Extractor (merge-all-sources) ──────────────────────
+        // Try every candidate source and merge results by week number.
+        // Each source may cover different parts of the semester; merging
+        // ensures we don't lose weeks that only appear in one source.
+        const allGoodResults: { result: ReturnType<typeof sanitizeSchedule>; label: string; fmt: string; win: string }[] = [];
         let usedLabel = bestLabel;
         let usedFormat = bestFormat;
-        let usedWindow = bestWindow(best?.text ?? ""); // track the actual text window the extractor used
+        let usedWindow = bestWindow(best?.text ?? "");
 
         for (let ci = 0; ci < candidates.length; ci++) {
           const src    = candidates[ci];
@@ -991,8 +983,6 @@ export async function POST(request: NextRequest) {
           const raw    = await parseSyllabusTopics(win, hint);
           const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
-          // Accept if: has weeks AND at least 40% of them have real topics/readings
-          // (not just "No Topics Listed" filler from an exam-dates-only HTML body)
           const richWeeks = result.filter(
             (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0
           ).length;
@@ -1008,22 +998,50 @@ export async function POST(request: NextRequest) {
           console.log(`[sync] ${c.name} attempt[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
           if (isGoodResult) {
-            topics     = result;
-            usedFormat = fmt;
-            usedWindow = win;
-            usedLabel  = ci === 0
-              ? bestLabel
-              : `${src.label}(retry${ci},score=${src.score.toFixed(3)},${src.text.length}c)`;
-            break;
+            allGoodResults.push({ result, label: src.label, fmt, win });
           }
         }
 
-        if (topics.length === 0) {
+        if (allGoodResults.length === 0) {
           dbg.status = `ai-0-weeks(${candidates.length} sources tried)`;
           allCourseDebug.push(dbg);
           console.log(`[sync] ${c.name}: 0 contentful weeks from all ${candidates.length} source(s) | ${candidatesSummary}`);
           return;
         }
+
+        // Merge: start with the highest-coverage source, fill gaps from others
+        allGoodResults.sort((a, b) => b.result.length - a.result.length);
+        const merged = new Map<number, ReturnType<typeof sanitizeSchedule>[number]>();
+        const sourceLabels: string[] = [];
+        for (const { result, label, fmt, win } of allGoodResults) {
+          let contributed = false;
+          for (const week of result) {
+            const existing = merged.get(week.weekNumber);
+            if (!existing) {
+              merged.set(week.weekNumber, week);
+              contributed = true;
+            } else {
+              // Merge richer content into existing week
+              const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
+              const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
+              if (newRich > existingRich) {
+                merged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
+                contributed = true;
+              } else if (!existing.startDate && week.startDate) {
+                existing.startDate = week.startDate;
+                contributed = true;
+              }
+            }
+          }
+          if (contributed) sourceLabels.push(label);
+          if (sourceLabels.length === 1) { usedFormat = fmt; usedWindow = win; }
+        }
+
+        let topics = [...merged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
+        usedLabel = sourceLabels.length > 1
+          ? `merged(${sourceLabels.join("+")})`
+          : sourceLabels[0] ?? bestLabel;
+        console.log(`[sync] ${c.name}: merged ${allGoodResults.length} source(s) → ${topics.length} weeks from [${sourceLabels.join(", ")}]`);
 
         // ── Role 5: Auditor ───────────────────────────────────────────────
         // Second AI pass — only fires when the result looks partial or messy.
@@ -1044,36 +1062,68 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Delete module-based topics (those sourced from Canvas modules)
-        // and replace with the AI-parsed weekly schedule.
-        // Topics from manual syllabus upload (canvasModuleId = null) are
-        // already excluded by the shouldRunAI check above.
-        await db.courseTopic.deleteMany({
+        // Fetch existing module-based topics to preserve those covering
+        // weeks that no AI source extracted (merge, not replace).
+        const existingModuleTopics = await db.courseTopic.findMany({
           where: { courseId: scCourseId, canvasModuleId: { not: null } },
+          select: { id: true, weekNumber: true },
+        });
+
+        const aiWeekNumbers = new Set(topics.map((t) =>
+          Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || 0)
+        ));
+
+        // Only delete module topics for weeks that AI covers
+        const moduleIdsToDelete = existingModuleTopics
+          .filter((mt) => aiWeekNumbers.has(mt.weekNumber))
+          .map((mt) => mt.id);
+
+        if (moduleIdsToDelete.length > 0) {
+          await db.courseTopic.deleteMany({
+            where: { id: { in: moduleIdsToDelete } },
+          });
+        }
+
+        // Also delete any prior AI-sourced topics so we don't create duplicates
+        await db.courseTopic.deleteMany({
+          where: { courseId: scCourseId, canvasModuleId: null },
         });
 
         await db.courseTopic.createMany({
           data: topics.map((t, i) => ({
             courseId: scCourseId,
-            // Coerce AI output types — model occasionally returns string "1" instead of int 1
             weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
             weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
-            // Only keep valid ISO date strings; reject anything malformed
             startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
             topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
             readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
-            // Guard against AI returning [] instead of null/string for notes
             notes: typeof t.notes === "string" ? t.notes : null,
-            canvasModuleId: null, // marks this as AI-sourced (not from a Canvas module)
+            canvasModuleId: null,
           })),
         });
 
         aiTopicsCreated += topics.length;
         dbg.weeksWritten = topics.length;
         dbg.status = "ok";
+
+        // Coverage warning: flag if week count seems low for a standard term
+        const keptModuleWeeks = existingModuleTopics.length - moduleIdsToDelete.length;
+        const totalWeeks = topics.length + keptModuleWeeks;
+        if (totalWeeks > 0 && totalWeeks < 10 && c.termEndAt && c.termStartAt) {
+          const termWeeks = Math.round(
+            (new Date(c.termEndAt).getTime() - new Date(c.termStartAt).getTime()) / (7 * 86400_000)
+          );
+          if (termWeeks >= 14 && totalWeeks < termWeeks * 0.6) {
+            dbg.coverageWarning = `${totalWeeks} weeks extracted for a ${termWeeks}-week term`;
+            console.warn(`[sync] ${c.name}: LOW COVERAGE — ${totalWeeks} weeks for ${termWeeks}-week term`);
+          }
+        }
+
         allCourseDebug.push(dbg);
         console.log(
-          `[sync] ${c.name}: OK ${topics.length} weeks written | src=${usedLabel} fmt=${usedFormat}` +
+          `[sync] ${c.name}: OK ${topics.length} weeks written` +
+          (keptModuleWeeks > 0 ? ` + ${keptModuleWeeks} module weeks kept` : "") +
+          ` | src=${usedLabel} fmt=${usedFormat}` +
           (auditFired ? ` audit(${dbg.auditDelta})` : ` audit-skipped`)
         );
       } catch (err) {

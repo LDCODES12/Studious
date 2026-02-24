@@ -353,15 +353,14 @@ function extractScheduleSection(html) {
       } catch { /* grading standard not available */ }
 
       // ── Canvas Calendar Events (class meeting times fallback) ─────────────
-      // Fetches a 3-week window from the course calendar so the server can
+      // Fetches a 6-week window from the course calendar so the server can
       // detect recurring meeting patterns (days/times) when the syllabus PDF
       // doesn't explicitly state them. Silent on error — purely additive.
       try {
         const now = new Date();
         const termStart = course.termStartAt ? new Date(course.termStartAt) : now;
-        // Start from the later of: term start OR 7 days ago (handles ongoing terms)
-        const scanFrom = new Date(Math.max(termStart.getTime(), now.getTime() - 7 * 86400_000));
-        const scanTo   = new Date(scanFrom.getTime() + 21 * 86400_000); // 3-week window
+        const scanFrom = new Date(Math.max(termStart.getTime(), now.getTime() - 14 * 86400_000));
+        const scanTo   = new Date(scanFrom.getTime() + 42 * 86400_000); // 6-week window
         const startStr = scanFrom.toISOString().split("T")[0];
         const endStr   = scanTo.toISOString().split("T")[0];
         const calEvents = await fetchAll(

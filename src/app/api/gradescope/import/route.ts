@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
       name: true,
       gradescopeCourseId: true,
       assignments: {
-        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true },
+        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true, status: true, missing: true },
       },
     },
   });
@@ -94,6 +94,7 @@ export async function POST(request: NextRequest) {
     userCourses.map((c) => [c.gradescopeCourseId!, c]),
   );
 
+  const now = new Date();
   let updated = 0;
   let created = 0;
   const debugCourses: { gsId: string; matched: string | null; updated: number; created: number }[] = [];
@@ -120,6 +121,9 @@ export async function POST(request: NextRequest) {
     for (const gsAssignment of gsCourse.assignments) {
       const { title, score, maxScore, status, gradescopeAssignmentId, dueDate } = gsAssignment;
 
+      const dbStatus = status === "graded" ? "graded" : status === "submitted" ? "submitted" : "not_started";
+      const isMissing = dbStatus === "not_started" && !!dueDate && new Date(dueDate) < now;
+
       // 1. Exact GS assignment ID match (best — already linked from a prior sync)
       if (gradescopeAssignmentId) {
         const existing = matchedCourse.assignments.find(
@@ -131,14 +135,13 @@ export async function POST(request: NextRequest) {
             data.gradescopeScore = score;
             data.gradescopeMaxScore = maxScore;
           }
-          if (dueDate && !existing.dueDate) {
-            data.dueDate = dueDate;
-          }
-          if (Object.keys(data).length > 0) {
-            await db.assignment.update({ where: { id: existing.id }, data });
-            updated++;
-            courseUpdated++;
-          }
+          if (dueDate && !existing.dueDate) data.dueDate = dueDate;
+          data.status = dbStatus;
+          data.missing = isMissing;
+
+          await db.assignment.update({ where: { id: existing.id }, data });
+          updated++;
+          courseUpdated++;
           continue;
         }
       }
@@ -157,22 +160,29 @@ export async function POST(request: NextRequest) {
         }
         if (gradescopeAssignmentId) data.gradescopeId = gradescopeAssignmentId;
         if (dueDate && !canvasMatch.dueDate) data.dueDate = dueDate;
+        data.status = dbStatus;
+        data.missing = isMissing;
 
-        if (Object.keys(data).length > 0) {
-          await db.assignment.update({ where: { id: canvasMatch.id }, data });
-          if (score !== null && maxScore !== null) { updated++; courseUpdated++; }
-        }
+        await db.assignment.update({ where: { id: canvasMatch.id }, data });
+        updated++;
+        courseUpdated++;
         continue;
       }
 
       // 3. No match → create a Gradescope-only assignment
-      if (!gradescopeAssignmentId) continue;
+      if (!gradescopeAssignmentId) {
+        log.info("gs skip: no assignment ID", { title, course: matchedCourse.name });
+        continue;
+      }
 
       const alreadyCreated = await db.assignment.findFirst({
         where: { courseId, gradescopeId: gradescopeAssignmentId },
         select: { id: true },
       });
-      if (alreadyCreated) continue;
+      if (alreadyCreated) {
+        log.info("gs skip: already exists", { title, gsId: gradescopeAssignmentId, course: matchedCourse.name });
+        continue;
+      }
 
       await db.assignment.create({
         data: {
@@ -180,12 +190,12 @@ export async function POST(request: NextRequest) {
           title,
           type: inferType(title),
           dueDate: dueDate ?? null,
-          status: status === "graded" ? "graded" : status === "submitted" ? "submitted" : "not_started",
+          status: dbStatus,
           gradescopeId: gradescopeAssignmentId,
           gradescopeScore: score,
           gradescopeMaxScore: maxScore,
           pointsPossible: maxScore,
-          missing: false,
+          missing: isMissing,
         },
       });
       created++;

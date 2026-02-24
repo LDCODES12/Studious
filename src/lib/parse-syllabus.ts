@@ -226,7 +226,7 @@ export async function auditSchedule(
         role: "system",
         content: `You are a schedule quality auditor. You will receive:
 1. EXTRACTED SCHEDULE — a JSON array of weekly schedule entries (possibly with errors)
-2. ORIGINAL SOURCE — the first 6000 characters of the raw syllabus text
+2. ORIGINAL SOURCE — the text window used for extraction (up to 12k chars)
 
 Your job is to fix the extracted schedule:
 - Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
@@ -240,7 +240,7 @@ Return JSON: { "weeks": [...] } using the exact same field structure. Return onl
       },
       {
         role: "user",
-        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE (first 6000 chars):\n${sourceText.slice(0, 6000)}`,
+        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE:\n${sourceText.slice(0, 12000)}`,
       },
     ],
   }, { timeout: 45_000 });
@@ -385,10 +385,12 @@ export function extractScheduleFromCalendarEvents(
     slotCount.set(key, existing);
   }
 
-  // Keep only recurring slots (count ≥ 2) and group by (startTime, endTime)
+  // Keep slots that appear at least once and group by (startTime, endTime).
+  // A single occurrence is enough — courses that meet once per week with a
+  // narrow scan window may only yield one event per slot.
   const timeGroups = new Map<string, { days: Set<number>; locations: string[]; title: string }>();
   for (const [key, { count, locations, title }] of slotCount) {
-    if (count < 2) continue;
+    if (count < 1) continue;
     const [startTime, endTime, dowStr] = key.split("~");
     const timeKey = `${startTime}~${endTime}`;
     const tg = timeGroups.get(timeKey) ?? { days: new Set<number>(), locations: [], title };
