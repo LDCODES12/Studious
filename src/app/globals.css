@@ -145,100 +145,107 @@
 
 /* ── Schedule-X overrides ── */
 
-/* Grid-level density — keep the time grid tight */
 .sx-calendar-wrapper .sx__calendar-wrapper {
   --sx-font-extra-small: 0.6875rem;
-  --sx-font-small: 0.8125rem;
-  --sx-font-large: 1rem;
-  --sx-font-extra-large: 1.125rem;
-  --sx-calendar-week-grid-padding-left: 56px;
+  --sx-font-small: 0.75rem;
+  --sx-font-large: 0.9375rem;
+  --sx-font-extra-large: 1rem;
+  --sx-spacing-padding1: 2px;
+  --sx-spacing-padding2: 4px;
+  --sx-spacing-padding3: 6px;
+  --sx-spacing-padding4: 10px;
+  --sx-spacing-padding6: 16px;
+  --sx-calendar-week-grid-padding-left: 52px;
 }
 
-/* ── Header bar: clean and substantial ── */
+/* ── Header: single clean row ── */
 .sx-calendar-wrapper .sx__calendar-header {
-  padding: 10px 16px;
-  gap: 12px;
+  padding: 6px 12px;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-height: unset;
   border-bottom: 1px solid var(--border);
 }
 
 .sx-calendar-wrapper .sx__calendar-header-content {
-  gap: 10px;
+  gap: 6px;
 }
 
 .sx-calendar-wrapper .sx__range-heading {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: -0.01em;
 }
 
 .sx-calendar-wrapper .sx__today-button {
-  font-size: 12px;
-  padding: 5px 12px;
-  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 5px;
   font-weight: 500;
 }
 
 .sx-calendar-wrapper .sx__chevron-wrapper {
-  min-height: 32px;
-  min-width: 32px;
+  min-height: 26px;
+  min-width: 26px;
 }
 
 .sx-calendar-wrapper .sx__forward-backward-navigation {
-  height: 34px;
+  height: 28px;
+}
+
+/* Kill the floating "View" label — the dropdown already says "Week" */
+.sx-calendar-wrapper .sx__view-selection-label {
+  display: none;
 }
 
 .sx-calendar-wrapper .sx__view-selection-selected-item {
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 5px;
 }
 
 .sx-calendar-wrapper .sx__view-selection-item {
-  font-size: 12px;
-  padding: 8px 16px;
+  font-size: 11px;
+  padding: 6px 14px;
 }
 
-.sx-calendar-wrapper .sx__date-input {
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 6px;
+/* Hide the date picker — nav arrows + today button are enough */
+.sx-calendar-wrapper .sx__date-picker-wrapper {
+  display: none;
 }
 
-/* ── Date axis: day names + numbers ── */
+/* ── Date axis ── */
 .sx-calendar-wrapper .sx__week-grid__date {
-  padding: 8px 0 6px;
-  gap: 2px;
+  padding: 4px 0;
+  gap: 1px;
 }
 
 .sx-calendar-wrapper .sx__week-grid__day-name {
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  color: var(--muted-foreground);
+  font-size: 10px;
+  letter-spacing: 0.03em;
 }
 
 .sx-calendar-wrapper .sx__week-grid__date-number {
-  font-size: 18px;
-  font-weight: 400;
-  height: 1.7em;
-  width: 1.7em;
+  font-size: 14px;
+  height: 1.6em;
+  width: 1.6em;
 }
 
 /* ── Time axis ── */
 .sx-calendar-wrapper .sx__week-grid__hour-text {
   font-size: 10px;
-  left: -42px;
-  color: var(--muted-foreground);
+  left: -38px;
 }
 
 .sx-calendar-wrapper .sx__week-grid__hour {
   font-size: 10px;
 }
 
-/* ── Event chips: compact but readable ── */
+/* ── Event chips ── */
 .sx-calendar-wrapper .sx__time-grid-event {
   font-size: 11px;
-  line-height: 1.3;
-  padding: 2px 5px;
+  line-height: 1.25;
+  padding: 1px 4px;
   border-radius: 4px;
 }
 
@@ -248,28 +255,24 @@
 }
 
 .sx-calendar-wrapper .sx__time-grid-event-time {
-  font-size: 10px;
-  opacity: 0.65;
+  font-size: 9.5px;
+  opacity: 0.7;
 }
 
-/* ── All-day / date-grid events ── */
 .sx-calendar-wrapper .sx__date-grid-event {
   font-size: 11px;
-  padding: 2px 5px;
+  padding: 1px 4px;
 }
 
-/* ── Month grid ── */
 .sx-calendar-wrapper .sx__month-grid-event {
   font-size: 11px;
-  padding: 1px 5px;
+  padding: 0 4px;
 }
 
-/* ── Current time indicator ── */
 .sx-calendar-wrapper .sx__current-time-indicator {
   z-index: 20;
 }
 
-/* ── Calendar container polish ── */
 .sx-calendar-wrapper .sx__calendar {
   border-radius: 10px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
