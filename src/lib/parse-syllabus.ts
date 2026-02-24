@@ -352,18 +352,68 @@ function extractClassScheduleDeterministic(
 
   const meetings: ClassMeeting[] = [];
   const seen = new Set<string>();
+  const hasMeetingHeadingNear = (idx: number) => {
+    const window = [lines[idx - 2], lines[idx - 1], lines[idx], lines[idx + 1], lines[idx + 2]]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return /\b(meeting times?|class times?|lecture times?|course schedule)\b/.test(window);
+  };
+
+  const lineHasTimeRange = (line: string) => {
+    const m = line.match(timeRangeRx);
+    if (!m) return null;
+    const explicitSep = /[-–—]|\bto\b/i.test(m[0]);
+    return { m, explicitSep };
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const m = line.match(timeRangeRx);
-    if (!m) continue;
-    if (m.index != null && m.index > 0 && !/[-–—]|to/i.test(m[0])) {
-      // If there is no explicit separator, only accept when we also have clear day names
-      // to avoid false positives from unrelated "office hours" prose.
-      if (parseDaysFromText(line).length === 0) continue;
+    let matchedLine = line;
+    let timeInfo = lineHasTimeRange(line);
+    let days = parseDaysFromText(line);
+
+    // Canvas Pages often format this as:
+    //   "Meeting Times"
+    //   "Mondays, Wednesdays, and Fridays"
+    //   "1:00PM-1:50PM"
+    // so we need to pair a nearby day-name line with a time-only line.
+    if ((!timeInfo || days.length === 0) && i + 1 < lines.length) {
+      const next = lines[i + 1];
+      const next2 = i + 2 < lines.length ? lines[i + 2] : "";
+
+      const curDays = parseDaysFromText(line);
+      const nextDays = parseDaysFromText(next);
+      const curTime = lineHasTimeRange(line);
+      const nextTime = lineHasTimeRange(next);
+      const next2Time = next2 ? lineHasTimeRange(next2) : null;
+
+      if (curDays.length > 0 && nextTime) {
+        days = curDays;
+        timeInfo = nextTime;
+        matchedLine = `${line} ${next}`;
+      } else if (curDays.length > 0 && next2Time && hasMeetingHeadingNear(i)) {
+        days = curDays;
+        timeInfo = next2Time;
+        matchedLine = `${line} ${next} ${next2}`;
+      } else if (nextDays.length > 0 && curTime && hasMeetingHeadingNear(i)) {
+        days = nextDays;
+        timeInfo = curTime;
+        matchedLine = `${line} ${next}`;
+      }
     }
 
-    const days = parseDaysFromText(line);
+    if (!timeInfo) continue;
+    const { m, explicitSep } = timeInfo;
+    if (m.index != null && m.index > 0 && !explicitSep) {
+      // If there is no explicit separator, only accept when we also have clear day names
+      // to avoid false positives from unrelated prose.
+      if (days.length === 0) continue;
+    }
+
+    if (days.length === 0) {
+      days = parseDaysFromText(matchedLine);
+    }
     if (days.length === 0) continue;
 
     const startTime = to24HourTime(m[1]);
@@ -371,7 +421,7 @@ function extractClassScheduleDeterministic(
     if (!startTime || !endTime) continue;
 
     const prev = lines[i - 1]?.toLowerCase() ?? "";
-    const here = line.toLowerCase();
+    const here = matchedLine.toLowerCase();
     const label = /\blab\b/.test(prev + " " + here)
       ? "Lab"
       : /\bdiscuss/i.test(prev + " " + here)
