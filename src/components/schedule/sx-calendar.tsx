@@ -471,26 +471,20 @@ export function SxCalendar({
 
   return (
     <div className="sx-calendar-wrapper">
-      {dueTonightItems.length > 0 && (
-        <div className="mx-1 mt-1 overflow-hidden rounded-md border border-border/70 bg-card">
-          <div className="flex min-h-11 items-stretch border-b border-border/60">
-            <div className="flex w-[52px] shrink-0 items-center justify-center border-r border-border/60 bg-muted/20 px-1">
-              <span className="flex flex-col items-center leading-tight text-muted-foreground">
-                <span className="text-[9px] font-semibold uppercase tracking-wide">Due</span>
-                <span className="text-[9px] font-semibold uppercase tracking-wide">Tonight</span>
-              </span>
+      <div className="sx-calendar-unified">
+        {dueTonightItems.length > 0 && (
+          <div className="due-tonight-row">
+            <div className="due-tonight-gutter">
+              <span>Due</span>
+              <span>Tonight</span>
             </div>
-            <div className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5">
-              <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground sm:hidden">
-                Due Tonight
-              </span>
-              <div className="min-w-0 flex flex-1 flex-wrap gap-1.5">
+            <div className="due-tonight-chips">
               {dueTonightItems.map(({ assignment, due, midnight }) => (
                 <button
                   key={assignment.id}
                   type="button"
                   onClick={() => onSelectEvent(assignment)}
-                  className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-left text-[12px] hover:bg-accent/40"
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-background/80 px-2.5 py-1 text-left text-[12px] transition-colors hover:bg-accent/50"
                 >
                   <span
                     className={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -503,12 +497,11 @@ export function SxCalendar({
                   <span className="truncate font-medium">{assignment.title}</span>
                 </button>
               ))}
-              </div>
             </div>
           </div>
-        </div>
-      )}
-      <ScheduleXCalendar calendarApp={calendar} />
+        )}
+        <ScheduleXCalendar calendarApp={calendar} />
+      </div>
       {quickCreate && (
         <QuickCreatePopover
           state={quickCreate}

@@ -143,6 +143,66 @@
   height: 100%;
 }
 
+/* Unified container: wraps optional due-tonight row + ScheduleX in one visual block */
+.sx-calendar-unified {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.sx-calendar-unified .sx-react-calendar-wrapper {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sx-calendar-unified .sx-react-calendar-wrapper > div {
+  height: 100%;
+}
+
+/* ── Due-tonight row (visually integrated into calendar) ── */
+.due-tonight-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+
+.due-tonight-gutter {
+  width: 52px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+
+.due-tonight-gutter span {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  color: var(--muted-foreground);
+}
+
+.due-tonight-chips {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  min-width: 0;
+}
+
 /* ── Schedule-X overrides ── */
 
 .sx-calendar-wrapper .sx__calendar-wrapper {
@@ -273,7 +333,9 @@
   z-index: 20;
 }
 
-.sx-calendar-wrapper .sx__calendar {
-  border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
+/* Calendar's own shell is stripped — unified container provides it */
+.sx-calendar-unified .sx__calendar {
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
 }
