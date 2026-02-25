@@ -1,17 +1,19 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { format, addDays, startOfWeek, startOfMonth, endOfMonth } from "date-fns";
+import { format, addDays, startOfWeek, startOfMonth, endOfMonth, isSameDay, parseISO, isValid } from "date-fns";
 import { CalendarPlus } from "lucide-react";
 import { toast } from "sonner";
 import { SxCalendar } from "./sx-calendar";
 import { EventDetailPanel } from "./event-detail-panel";
+import { ACCENT_BAR } from "./calendar-constants";
 import type {
   Assignment,
   CalendarEvent,
   CourseRef,
   ScheduleItem,
 } from "./calendar-types";
+import { effectivePlanningDate, isMidnightDeadline } from "@/lib/academic-deadlines";
 
 export function ScheduleView() {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -61,6 +63,24 @@ export function ScheduleView() {
     }
     return Array.from(map.values());
   }, [assignments]);
+
+  const dueTonight = useMemo(() => {
+    const isLateNight = (d: Date) => d.getHours() * 60 + d.getMinutes() >= 23 * 60;
+    return assignments
+      .filter((a) => a.status === "not_started" && !!a.dueDate)
+      .map((a) => {
+        const due = parseISO(a.dueDate!);
+        if (!isValid(due)) return null;
+        const planningDate = effectivePlanningDate(a.dueDate!);
+        const midnight = isMidnightDeadline(a.dueDate!);
+        const lateNight = !midnight && (a.dueDate!.includes("T") ? isLateNight(due) : false);
+        if (!midnight && !lateNight) return null;
+        if (!isSameDay(planningDate, currentDate)) return null;
+        return { assignment: a, due, midnight };
+      })
+      .filter((x): x is { assignment: Assignment; due: Date; midnight: boolean } => !!x)
+      .sort((a, b) => a.due.getTime() - b.due.getTime());
+  }, [assignments, currentDate]);
 
   const handleEventUpdate = useCallback(
     async (eventId: string, newStart: string, newEnd: string) => {
@@ -138,6 +158,41 @@ export function ScheduleView() {
           <span className="font-medium">Connect Google Calendar</span>
           <span className="text-muted-foreground">to see events alongside assignments</span>
         </a>
+      )}
+
+      {!loading && dueTonight.length > 0 && (
+        <div className="mb-2 shrink-0 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">
+              Due Tonight
+            </p>
+            <p className="text-[11px] text-amber-700">
+              {format(currentDate, "EEE, MMM d")}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {dueTonight.map(({ assignment, due, midnight }) => (
+              <button
+                key={assignment.id}
+                type="button"
+                onClick={() => setSelectedEvent(assignment)}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-amber-200 bg-white/80 px-2 py-1 text-left text-[12px] hover:bg-white"
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    ACCENT_BAR[assignment.course.color] ?? "bg-gray-400"
+                  }`}
+                />
+                <span className="truncate font-medium text-foreground">
+                  {assignment.title}
+                </span>
+                <span className="shrink-0 text-amber-800">
+                  {midnight ? "midnight" : format(due, "h:mm a")}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
       )}
 
       {loading ? (

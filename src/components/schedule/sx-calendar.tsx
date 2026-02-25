@@ -138,40 +138,9 @@ function toSxEvents(
     const due = new Date(a.dueDate);
     if (!Number.isFinite(due.getTime())) continue;
 
-    // Exact midnight deadlines are placed on the previous day for planning,
-    // but the assignment details still show the true due timestamp on click.
-    if (isLocalMidnight(due)) {
-      const placement = new Date(due.getTime() - 24 * 60 * 60 * 1000);
-      const placementDay = format(placement, "yyyy-MM-dd");
-      events.push({
-        id: `assignment-${a.id}`,
-        title: `${a.title} (midnight)`,
-        start: Temporal.PlainDate.from(placementDay),
-        end: Temporal.PlainDate.from(placementDay),
-        calendarId: color,
-        _type: "assignment",
-        _originalId: a.id,
-        _course: a.course,
-        _options: { disableDND: true, disableResize: true },
-      });
-      continue;
-    }
-
-    // Late-night deadlines (especially 11:59 PM) are more legible as compact
-    // top-row "deadline chips" than tiny slivers at the bottom of the time grid.
-    if (isLateNightDeadline(due)) {
-      const dueDay = a.dueDate.slice(0, 10);
-      events.push({
-        id: `assignment-${a.id}`,
-        title: `${a.title} ${format(due, "h:mm a")}`,
-        start: Temporal.PlainDate.from(dueDay),
-        end: Temporal.PlainDate.from(dueDay),
-        calendarId: color,
-        _type: "assignment",
-        _originalId: a.id,
-        _course: a.course,
-        _options: { disableDND: true, disableResize: true },
-      });
+    // Late-night / midnight deadlines are shown in the dedicated "Due Tonight"
+    // strip above the calendar for clearer semantics. Keep them out of the grid.
+    if (isLocalMidnight(due) || isLateNightDeadline(due)) {
       continue;
     }
 
