@@ -24,6 +24,7 @@ import type {
   CourseRef,
   ScheduleItem,
 } from "./calendar-types";
+import { effectivePlanningDate, isMidnightDeadline } from "@/lib/academic-deadlines";
 
 const COURSE_COLORS: Record<
   string,
@@ -93,14 +94,6 @@ function hasExplicitDueTime(dueDate: string): boolean {
   return /T\d{2}:\d{2}/.test(dueDate);
 }
 
-function isLocalMidnight(date: Date): boolean {
-  return (
-    Number.isFinite(date.getTime()) &&
-    date.getHours() === 0 &&
-    date.getMinutes() === 0
-  );
-}
-
 function isLateNightDeadline(date: Date): boolean {
   if (!Number.isFinite(date.getTime())) return false;
   const minutes = date.getHours() * 60 + date.getMinutes();
@@ -110,9 +103,11 @@ function isLateNightDeadline(date: Date): boolean {
 function toSxEvents(
   assignments: Assignment[],
   calendarEvents: CalendarEvent[],
-  courses: CourseRef[]
+  courses: CourseRef[],
+  selectedDate: Date
 ): SxCalendarEvent[] {
   const events: SxCalendarEvent[] = [];
+  const selectedDay = format(selectedDate, "yyyy-MM-dd");
 
   for (const a of assignments) {
     if (!a.dueDate) continue;
@@ -138,9 +133,33 @@ function toSxEvents(
     const due = new Date(a.dueDate);
     if (!Number.isFinite(due.getTime())) continue;
 
-    // Late-night / midnight deadlines are shown in the dedicated "Due Tonight"
-    // strip above the calendar for clearer semantics. Keep them out of the grid.
-    if (isLocalMidnight(due) || isLateNightDeadline(due)) {
+    const midnight = isMidnightDeadline(a.dueDate);
+    const lateNight = !midnight && isLateNightDeadline(due);
+
+    // Keep selected-day late-night/midnight deadlines in the dedicated "Due Tonight"
+    // strip, but preserve week-level visibility for other days as explicit chips.
+    if (midnight || lateNight) {
+      const placementDay = midnight
+        ? format(effectivePlanningDate(a.dueDate), "yyyy-MM-dd")
+        : format(due, "yyyy-MM-dd");
+
+      if (placementDay === selectedDay) {
+        continue;
+      }
+
+      events.push({
+        id: `assignment-${a.id}`,
+        title: midnight
+          ? `Deadline · midnight · ${a.title}`
+          : `Deadline · ${format(due, "h:mm a")} · ${a.title}`,
+        start: Temporal.PlainDate.from(placementDay),
+        end: Temporal.PlainDate.from(placementDay),
+        calendarId: color,
+        _type: "assignment",
+        _originalId: a.id,
+        _course: a.course,
+        _options: { disableDND: true, disableResize: true },
+      });
       continue;
     }
 
@@ -473,8 +492,8 @@ export function SxCalendar({
   });
 
   const sxEvents = useMemo(
-    () => toSxEvents(assignments, calendarEvents, courses),
-    [assignments, calendarEvents, courses]
+    () => toSxEvents(assignments, calendarEvents, courses, selectedDate),
+    [assignments, calendarEvents, courses, selectedDate]
   );
 
   useEffect(() => {
