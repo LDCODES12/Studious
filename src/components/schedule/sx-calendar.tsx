@@ -89,6 +89,18 @@ function buildCalendarMap(courses: CourseRef[]) {
   return calendars;
 }
 
+function hasExplicitDueTime(dueDate: string): boolean {
+  return /T\d{2}:\d{2}/.test(dueDate);
+}
+
+function isLocalMidnight(date: Date): boolean {
+  return (
+    Number.isFinite(date.getTime()) &&
+    date.getHours() === 0 &&
+    date.getMinutes() === 0
+  );
+}
+
 function toSxEvents(
   assignments: Assignment[],
   calendarEvents: CalendarEvent[],
@@ -98,13 +110,56 @@ function toSxEvents(
 
   for (const a of assignments) {
     if (!a.dueDate) continue;
-    const dueDay = a.dueDate.slice(0, 10);
+    const color = a.course.color in COURSE_COLORS ? a.course.color : "blue";
+
+    // Date-only deadlines (unknown time) stay as all-day markers.
+    if (!hasExplicitDueTime(a.dueDate)) {
+      const dueDay = a.dueDate.slice(0, 10);
+      events.push({
+        id: `assignment-${a.id}`,
+        title: a.title,
+        start: Temporal.PlainDate.from(dueDay),
+        end: Temporal.PlainDate.from(dueDay),
+        calendarId: color,
+        _type: "assignment",
+        _originalId: a.id,
+        _course: a.course,
+        _options: { disableDND: true, disableResize: true },
+      });
+      continue;
+    }
+
+    const due = new Date(a.dueDate);
+    if (!Number.isFinite(due.getTime())) continue;
+
+    // Exact midnight deadlines are placed on the previous day for planning,
+    // but the assignment details still show the true due timestamp on click.
+    if (isLocalMidnight(due)) {
+      const placement = new Date(due.getTime() - 24 * 60 * 60 * 1000);
+      const placementDay = format(placement, "yyyy-MM-dd");
+      events.push({
+        id: `assignment-${a.id}`,
+        title: `${a.title} (midnight)`,
+        start: Temporal.PlainDate.from(placementDay),
+        end: Temporal.PlainDate.from(placementDay),
+        calendarId: color,
+        _type: "assignment",
+        _originalId: a.id,
+        _course: a.course,
+        _options: { disableDND: true, disableResize: true },
+      });
+      continue;
+    }
+
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const startStr = format(due, "yyyy-MM-dd'T'HH:mm:ss");
+    const endStr = format(new Date(due.getTime() + 15 * 60 * 1000), "yyyy-MM-dd'T'HH:mm:ss");
     events.push({
       id: `assignment-${a.id}`,
       title: a.title,
-      start: Temporal.PlainDate.from(dueDay),
-      end: Temporal.PlainDate.from(dueDay),
-      calendarId: a.course.color in COURSE_COLORS ? a.course.color : "blue",
+      start: Temporal.ZonedDateTime.from(`${startStr}[${tz}]`),
+      end: Temporal.ZonedDateTime.from(`${endStr}[${tz}]`),
+      calendarId: color,
       _type: "assignment",
       _originalId: a.id,
       _course: a.course,
