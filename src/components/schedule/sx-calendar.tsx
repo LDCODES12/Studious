@@ -101,6 +101,12 @@ function isLocalMidnight(date: Date): boolean {
   );
 }
 
+function isLateNightDeadline(date: Date): boolean {
+  if (!Number.isFinite(date.getTime())) return false;
+  const minutes = date.getHours() * 60 + date.getMinutes();
+  return minutes >= 23 * 60; // 11:00 PM+
+}
+
 function toSxEvents(
   assignments: Assignment[],
   calendarEvents: CalendarEvent[],
@@ -142,6 +148,24 @@ function toSxEvents(
         title: `${a.title} (midnight)`,
         start: Temporal.PlainDate.from(placementDay),
         end: Temporal.PlainDate.from(placementDay),
+        calendarId: color,
+        _type: "assignment",
+        _originalId: a.id,
+        _course: a.course,
+        _options: { disableDND: true, disableResize: true },
+      });
+      continue;
+    }
+
+    // Late-night deadlines (especially 11:59 PM) are more legible as compact
+    // top-row "deadline chips" than tiny slivers at the bottom of the time grid.
+    if (isLateNightDeadline(due)) {
+      const dueDay = a.dueDate.slice(0, 10);
+      events.push({
+        id: `assignment-${a.id}`,
+        title: `${a.title} ${format(due, "h:mm a")}`,
+        start: Temporal.PlainDate.from(dueDay),
+        end: Temporal.PlainDate.from(dueDay),
         calendarId: color,
         _type: "assignment",
         _originalId: a.id,
