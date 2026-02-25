@@ -475,8 +475,9 @@ export function SxCalendar({
         <div className="mx-1 mt-1 overflow-hidden rounded-md border border-border/70 bg-card">
           <div className="flex min-h-11 items-stretch border-b border-border/60">
             <div className="flex w-[52px] shrink-0 items-center justify-center border-r border-border/60 bg-muted/20 px-1">
-              <span className="text-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Due Tonight
+              <span className="flex flex-col items-center leading-tight text-muted-foreground">
+                <span className="text-[9px] font-semibold uppercase tracking-wide">Due</span>
+                <span className="text-[9px] font-semibold uppercase tracking-wide">Tonight</span>
               </span>
             </div>
             <div className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5">
