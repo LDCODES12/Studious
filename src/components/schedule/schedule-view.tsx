@@ -6,7 +6,6 @@ import { CalendarPlus } from "lucide-react";
 import { toast } from "sonner";
 import { SxCalendar } from "./sx-calendar";
 import { EventDetailPanel } from "./event-detail-panel";
-import { ACCENT_BAR } from "./calendar-constants";
 import type {
   Assignment,
   CalendarEvent,
@@ -160,41 +159,6 @@ export function ScheduleView() {
         </a>
       )}
 
-      {!loading && dueTonight.length > 0 && (
-        <div className="mb-2 shrink-0 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2">
-          <div className="mb-1.5 flex items-center justify-between">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">
-              Due Tonight
-            </p>
-            <p className="text-[11px] text-amber-700">
-              {format(currentDate, "EEE, MMM d")}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {dueTonight.map(({ assignment, due, midnight }) => (
-              <button
-                key={assignment.id}
-                type="button"
-                onClick={() => setSelectedEvent(assignment)}
-                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-amber-200 bg-white/80 px-2 py-1 text-left text-[12px] hover:bg-white"
-              >
-                <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    ACCENT_BAR[assignment.course.color] ?? "bg-gray-400"
-                  }`}
-                />
-                <span className="truncate font-medium text-foreground">
-                  {assignment.title}
-                </span>
-                <span className="shrink-0 text-amber-800">
-                  {midnight ? "midnight" : format(due, "h:mm a")}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
       {loading ? (
         <LoadingSkeleton />
       ) : (
@@ -203,6 +167,7 @@ export function ScheduleView() {
             calendarEvents={calendarEvents}
             courses={courses}
             selectedDate={currentDate}
+            dueTonightItems={dueTonight}
           onSelectEvent={setSelectedEvent}
           onEventUpdate={handleEventUpdate}
           onEventCreate={handleEventCreate}

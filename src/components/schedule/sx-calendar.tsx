@@ -24,6 +24,7 @@ import type {
   CourseRef,
   ScheduleItem,
 } from "./calendar-types";
+import { ACCENT_BAR } from "./calendar-constants";
 import { effectivePlanningDate, isMidnightDeadline } from "@/lib/academic-deadlines";
 
 const COURSE_COLORS: Record<
@@ -336,6 +337,7 @@ interface SxCalendarProps {
   calendarEvents: CalendarEvent[];
   courses: CourseRef[];
   selectedDate: Date;
+  dueTonightItems?: Array<{ assignment: Assignment; due: Date; midnight: boolean }>;
   onSelectEvent: (item: ScheduleItem) => void;
   onEventUpdate: (eventId: string, newStart: string, newEnd: string) => void;
   onEventCreate?: (title: string, startISO: string, endISO: string) => void;
@@ -347,6 +349,7 @@ export function SxCalendar({
   calendarEvents,
   courses,
   selectedDate,
+  dueTonightItems = [],
   onSelectEvent,
   onEventUpdate,
   onEventCreate,
@@ -502,6 +505,35 @@ export function SxCalendar({
 
   return (
     <div className="sx-calendar-wrapper">
+      {dueTonightItems.length > 0 && (
+        <div className="mx-1 mt-1 rounded-md border border-border/70 bg-muted/30">
+          <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2">
+            <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Due Tonight
+            </span>
+            <div className="min-w-0 flex flex-1 flex-wrap gap-1.5">
+              {dueTonightItems.map(({ assignment, due, midnight }) => (
+                <button
+                  key={assignment.id}
+                  type="button"
+                  onClick={() => onSelectEvent(assignment)}
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-left text-[12px] hover:bg-accent/40"
+                >
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      ACCENT_BAR[assignment.course.color] ?? "bg-gray-400"
+                    }`}
+                  />
+                  <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                    {midnight ? "midnight" : format(due, "h:mm a")}
+                  </span>
+                  <span className="truncate font-medium">{assignment.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <ScheduleXCalendar calendarApp={calendar} />
       {quickCreate && (
         <QuickCreatePopover
