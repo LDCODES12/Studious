@@ -152,8 +152,12 @@ function toSxEvents(
     }
 
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const startStr = format(due, "yyyy-MM-dd'T'HH:mm:ss");
-    const endStr = format(new Date(due.getTime() + 15 * 60 * 1000), "yyyy-MM-dd'T'HH:mm:ss");
+    // Represent assignment deadlines as a short timed marker that *ends* at the
+    // due moment. This avoids 11:59 PM deadlines spilling into the next day and
+    // being rendered as multi-day/all-day bars.
+    const start = new Date(due.getTime() - 15 * 60 * 1000);
+    const startStr = format(start, "yyyy-MM-dd'T'HH:mm:ss");
+    const endStr = format(due, "yyyy-MM-dd'T'HH:mm:ss");
     events.push({
       id: `assignment-${a.id}`,
       title: a.title,
