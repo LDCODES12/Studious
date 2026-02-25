@@ -18,6 +18,8 @@ interface Assignment {
   id: string;
   title: string;
   dueDate: string | null;
+  availableFrom?: string | null;
+  availableUntil?: string | null;
   status: string;
   type: string;
   googleEventId: string | null;

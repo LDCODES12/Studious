@@ -75,6 +75,9 @@ interface CanvasAssignment {
   courseId: number;
   title: string;
   dueDate: string | null; // ISO datetime — nullable for participation/attendance items
+  /** Canvas assignment availability window */
+  availableFrom?: string | null; // unlock_at
+  availableUntil?: string | null; // lock_at
   description: string | null;
   submissionType: string;
   submissionTypes?: string[];
@@ -498,6 +501,8 @@ export async function POST(request: NextRequest) {
         excused: a.excused ?? false,
         late: a.late ?? false,
         missing: a.missing ?? false,
+        availableFrom: a.availableFrom ?? null,
+        availableUntil: a.availableUntil ?? null,
       };
 
       const existingId = existingAssMap.get(`${scCourseId}:${canvasAssId}`);

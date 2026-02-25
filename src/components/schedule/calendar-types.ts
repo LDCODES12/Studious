@@ -2,6 +2,8 @@ export interface Assignment {
   id: string;
   title: string;
   dueDate: string | null;
+  availableFrom?: string | null;
+  availableUntil?: string | null;
   type: string;
   status: string;
   course: {

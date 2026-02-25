@@ -59,6 +59,8 @@ export default async function CoursePage({ params }: CoursePageProps) {
     id: a.id,
     title: a.title,
     dueDate: a.dueDate,
+    availableFrom: a.availableFrom,
+    availableUntil: a.availableUntil,
     status: a.status,
     type: a.type,
     googleEventId: a.googleEventId,

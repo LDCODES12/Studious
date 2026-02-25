@@ -240,6 +240,8 @@ function extractScheduleSection(html) {
             courseId: course.id,
             title: a.name,
             dueDate: a.due_at ?? null,
+            availableFrom: a.unlock_at ?? null,
+            availableUntil: a.lock_at ?? null,
             description: stripHtml(a.description),
             submissionType: a.submission_types?.[0] ?? "assignment",
             submissionTypes: a.submission_types ?? [],

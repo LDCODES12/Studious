@@ -183,6 +183,8 @@ model Assignment {
   title              String
   type               String
   dueDate            String?           // Nullable for participation/attendance items
+  availableFrom      String?           // Canvas unlock_at (assignment becomes available)
+  availableUntil     String?           // Canvas lock_at (assignment closes/locks)
   description        String?
   status             String            @default("not_started")
   score              Float?            // Student's score from Canvas submission
