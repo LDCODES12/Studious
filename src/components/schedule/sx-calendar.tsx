@@ -25,7 +25,7 @@ import type {
   ScheduleItem,
 } from "./calendar-types";
 import { ACCENT_BAR } from "./calendar-constants";
-import { effectivePlanningDate, isMidnightDeadline } from "@/lib/academic-deadlines";
+import { isMidnightDeadline } from "@/lib/academic-deadlines";
 
 const COURSE_COLORS: Record<
   string,
@@ -104,30 +104,17 @@ function isLateNightDeadline(date: Date): boolean {
 function toSxEvents(
   assignments: Assignment[],
   calendarEvents: CalendarEvent[],
-  courses: CourseRef[],
-  selectedDate: Date
+  courses: CourseRef[]
 ): SxCalendarEvent[] {
   const events: SxCalendarEvent[] = [];
-  const selectedDay = format(selectedDate, "yyyy-MM-dd");
 
   for (const a of assignments) {
     if (!a.dueDate) continue;
     const color = a.course.color in COURSE_COLORS ? a.course.color : "blue";
 
-    // Date-only deadlines (unknown time) stay as all-day markers.
+    // Date-only deadlines (unknown time) are intentionally kept out of the
+    // built-in all-day lane. They will be handled by dedicated deadline UI.
     if (!hasExplicitDueTime(a.dueDate)) {
-      const dueDay = a.dueDate.slice(0, 10);
-      events.push({
-        id: `assignment-${a.id}`,
-        title: a.title,
-        start: Temporal.PlainDate.from(dueDay),
-        end: Temporal.PlainDate.from(dueDay),
-        calendarId: color,
-        _type: "assignment",
-        _originalId: a.id,
-        _course: a.course,
-        _options: { disableDND: true, disableResize: true },
-      });
       continue;
     }
 
@@ -137,30 +124,9 @@ function toSxEvents(
     const midnight = isMidnightDeadline(a.dueDate);
     const lateNight = !midnight && isLateNightDeadline(due);
 
-    // Keep selected-day late-night/midnight deadlines in the dedicated "Due Tonight"
-    // strip, but preserve week-level visibility for other days as explicit chips.
+    // Late-night/midnight deadlines are handled by the dedicated "Due Tonight"
+    // row instead of the built-in all-day lane.
     if (midnight || lateNight) {
-      const placementDay = midnight
-        ? format(effectivePlanningDate(a.dueDate), "yyyy-MM-dd")
-        : format(due, "yyyy-MM-dd");
-
-      if (placementDay === selectedDay) {
-        continue;
-      }
-
-      events.push({
-        id: `assignment-${a.id}`,
-        title: midnight
-          ? `Deadline · midnight · ${a.title}`
-          : `Deadline · ${format(due, "h:mm a")} · ${a.title}`,
-        start: Temporal.PlainDate.from(placementDay),
-        end: Temporal.PlainDate.from(placementDay),
-        calendarId: color,
-        _type: "assignment",
-        _originalId: a.id,
-        _course: a.course,
-        _options: { disableDND: true, disableResize: true },
-      });
       continue;
     }
 
@@ -495,8 +461,8 @@ export function SxCalendar({
   });
 
   const sxEvents = useMemo(
-    () => toSxEvents(assignments, calendarEvents, courses, selectedDate),
-    [assignments, calendarEvents, courses, selectedDate]
+    () => toSxEvents(assignments, calendarEvents, courses),
+    [assignments, calendarEvents, courses]
   );
 
   useEffect(() => {
@@ -506,12 +472,18 @@ export function SxCalendar({
   return (
     <div className="sx-calendar-wrapper">
       {dueTonightItems.length > 0 && (
-        <div className="mx-1 mt-1 rounded-md border border-border/70 bg-muted/30">
-          <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2">
-            <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Due Tonight
-            </span>
-            <div className="min-w-0 flex flex-1 flex-wrap gap-1.5">
+        <div className="mx-1 mt-1 overflow-hidden rounded-md border border-border/70 bg-card">
+          <div className="flex min-h-11 items-stretch border-b border-border/60">
+            <div className="flex w-[52px] shrink-0 items-center justify-center border-r border-border/60 bg-muted/20 px-1">
+              <span className="text-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Due Tonight
+              </span>
+            </div>
+            <div className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5">
+              <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground sm:hidden">
+                Due Tonight
+              </span>
+              <div className="min-w-0 flex flex-1 flex-wrap gap-1.5">
               {dueTonightItems.map(({ assignment, due, midnight }) => (
                 <button
                   key={assignment.id}
@@ -530,6 +502,7 @@ export function SxCalendar({
                   <span className="truncate font-medium">{assignment.title}</span>
                 </button>
               ))}
+              </div>
             </div>
           </div>
         </div>
