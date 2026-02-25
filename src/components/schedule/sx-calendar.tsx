@@ -13,7 +13,7 @@ import { createDragAndDropPlugin } from "@schedule-x/drag-and-drop";
 import { createResizePlugin } from "@schedule-x/resize";
 import { createScrollControllerPlugin } from "@schedule-x/scroll-controller";
 import { createCurrentTimePlugin } from "@schedule-x/current-time";
-import { format } from "date-fns";
+import { format, startOfWeek, addDays, isSameDay } from "date-fns";
 import { toast } from "sonner";
 import "@schedule-x/theme-shadcn/dist/index.css";
 import "temporal-polyfill/global";
@@ -303,7 +303,7 @@ interface SxCalendarProps {
   calendarEvents: CalendarEvent[];
   courses: CourseRef[];
   selectedDate: Date;
-  dueTonightItems?: Array<{ assignment: Assignment; due: Date; midnight: boolean }>;
+  dueTonightItems?: Array<{ assignment: Assignment; due: Date; midnight: boolean; planningDate: Date }>;
   onSelectEvent: (item: ScheduleItem) => void;
   onEventUpdate: (eventId: string, newStart: string, newEnd: string) => void;
   onEventCreate?: (title: string, startISO: string, endISO: string) => void;
@@ -469,38 +469,59 @@ export function SxCalendar({
     eventsService.set(sxEvents);
   }, [eventsService, sxEvents]);
 
+  /* ── Group due-tonight items into day columns matching the week view ── */
+  const weekStart = useMemo(
+    () => startOfWeek(selectedDate, { weekStartsOn: 0 }),
+    [selectedDate]
+  );
+  const weekDays = useMemo(
+    () => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)),
+    [weekStart]
+  );
+  const dueTonightByDay = useMemo(
+    () =>
+      weekDays.map((day) =>
+        dueTonightItems.filter((item) => isSameDay(item.planningDate, day))
+      ),
+    [weekDays, dueTonightItems]
+  );
+  const hasDueTonight = dueTonightByDay.some((items) => items.length > 0);
+
   return (
     <div className="sx-calendar-wrapper">
       <div className="sx-calendar-unified">
-        {dueTonightItems.length > 0 && (
+        <ScheduleXCalendar calendarApp={calendar} />
+        {hasDueTonight && (
           <div className="due-tonight-row">
             <div className="due-tonight-gutter">
               <span>Due</span>
               <span>Tonight</span>
             </div>
-            <div className="due-tonight-chips">
-              {dueTonightItems.map(({ assignment, due, midnight }) => (
-                <button
-                  key={assignment.id}
-                  type="button"
-                  onClick={() => onSelectEvent(assignment)}
-                  className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-background/80 px-2.5 py-1 text-left text-[12px] transition-colors hover:bg-accent/50"
-                >
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      ACCENT_BAR[assignment.course.color] ?? "bg-gray-400"
-                    }`}
-                  />
-                  <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
-                    {midnight ? "midnight" : format(due, "h:mm a")}
-                  </span>
-                  <span className="truncate font-medium">{assignment.title}</span>
-                </button>
+            <div className="due-tonight-columns">
+              {dueTonightByDay.map((items, dayIdx) => (
+                <div key={dayIdx} className="due-tonight-day">
+                  {items.map(({ assignment }) => (
+                    <button
+                      key={assignment.id}
+                      type="button"
+                      onClick={() => onSelectEvent(assignment)}
+                      className="due-tonight-chip"
+                    >
+                      <span
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                          ACCENT_BAR[assignment.course.color] ?? "bg-gray-400"
+                        }`}
+                      />
+                      <span className="due-tonight-chip-title">
+                        {assignment.title}
+                      </span>
+                    </button>
+                  ))}
+                </div>
               ))}
             </div>
           </div>
         )}
-        <ScheduleXCalendar calendarApp={calendar} />
       </div>
       {quickCreate && (
         <QuickCreatePopover

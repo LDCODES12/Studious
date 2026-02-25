@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { format, addDays, startOfWeek, startOfMonth, endOfMonth, isSameDay, parseISO, isValid } from "date-fns";
+import { format, addDays, startOfWeek, startOfMonth, endOfMonth, parseISO, isValid } from "date-fns";
 import { CalendarPlus } from "lucide-react";
 import { toast } from "sonner";
 import { SxCalendar } from "./sx-calendar";
@@ -74,12 +74,11 @@ export function ScheduleView() {
         const midnight = isMidnightDeadline(a.dueDate!);
         const lateNight = !midnight && (a.dueDate!.includes("T") ? isLateNight(due) : false);
         if (!midnight && !lateNight) return null;
-        if (!isSameDay(planningDate, currentDate)) return null;
-        return { assignment: a, due, midnight };
+        return { assignment: a, due, midnight, planningDate };
       })
-      .filter((x): x is { assignment: Assignment; due: Date; midnight: boolean } => !!x)
+      .filter((x): x is { assignment: Assignment; due: Date; midnight: boolean; planningDate: Date } => !!x)
       .sort((a, b) => a.due.getTime() - b.due.getTime());
-  }, [assignments, currentDate]);
+  }, [assignments]);
 
   const handleEventUpdate = useCallback(
     async (eventId: string, newStart: string, newEnd: string) => {
