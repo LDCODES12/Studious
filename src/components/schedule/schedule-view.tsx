@@ -66,7 +66,7 @@ export function ScheduleView() {
   const dueTonight = useMemo(() => {
     const isLateNight = (d: Date) => d.getHours() * 60 + d.getMinutes() >= 23 * 60;
     return assignments
-      .filter((a) => a.status === "not_started" && !!a.dueDate)
+      .filter((a) => !!a.dueDate)
       .map((a) => {
         const due = parseISO(a.dueDate!);
         if (!isValid(due)) return null;
