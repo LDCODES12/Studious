@@ -655,6 +655,7 @@ export async function POST(request: NextRequest) {
     const bgLog = apiLogger("POST /api/canvas/import [after]", user.id);
     bgLog.info("background AI processing started", { courses: courses.length });
 
+  try {
   // AI syllabus processing — run all courses in parallel for speed
   //    For each course that provided syllabus content:
   //      a) Build best available syllabus text from HTML body + pre-extracted PDF texts
@@ -698,6 +699,7 @@ export async function POST(request: NextRequest) {
 
   await Promise.all(
     courses.map(async (c) => {
+      try {
       const scCourseId = courseIdMap.get(c.id);
       if (!scCourseId) return;
 
@@ -758,31 +760,35 @@ export async function POST(request: NextRequest) {
         }
 
         // Save as CourseMaterial (visible in the Materials tab)
-        const existing = await db.courseMaterial.findFirst({
-          where: { courseId: scCourseId, fileName: st.fileName },
-          select: { id: true },
-        });
-        if (!existing) {
-          const material = await db.courseMaterial.create({
-            data: {
-              courseId: scCourseId,
-              fileName: st.fileName,
-              detectedType: "syllabus",
-              summary: "Syllabus automatically imported from Canvas.",
-              relatedTopics: [],
-              rawText: pdfText.slice(0, 25_000),
-              storedForAI: false,
-            },
+        try {
+          const existing = await db.courseMaterial.findFirst({
+            where: { courseId: scCourseId, fileName: st.fileName },
+            select: { id: true },
           });
-          syllabusFilesImported++;
-          try {
-            const vector = await generateEmbedding(pdfText);
-            await db.$executeRaw`
-              UPDATE "CourseMaterial"
-              SET embedding = ${JSON.stringify(vector)}::vector
-              WHERE id = ${material.id}
-            `;
-          } catch { /* embedding failure never blocks import */ }
+          if (!existing) {
+            const material = await db.courseMaterial.create({
+              data: {
+                courseId: scCourseId,
+                fileName: st.fileName,
+                detectedType: "syllabus",
+                summary: "Syllabus automatically imported from Canvas.",
+                relatedTopics: [],
+                rawText: pdfText.slice(0, 25_000),
+                storedForAI: false,
+              },
+            });
+            syllabusFilesImported++;
+            try {
+              const vector = await generateEmbedding(pdfText);
+              await db.$executeRaw`
+                UPDATE "CourseMaterial"
+                SET embedding = ${JSON.stringify(vector)}::vector
+                WHERE id = ${material.id}
+              `;
+            } catch { /* embedding failure never blocks import */ }
+          }
+        } catch (matErr) {
+          console.error(`[sync] ${c.name}: material save failed for ${st.fileName}:`, matErr);
         }
       }
 
@@ -858,28 +864,32 @@ export async function POST(request: NextRequest) {
       // students see and request files without downloading everything up front.
       const materialCandidates = c.materialCandidates ?? [];
       if (materialCandidates.length > 0) {
-        for (const candidate of materialCandidates) {
-          await db.canvasMaterialCandidate.upsert({
-            where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
-            update: { fileName: candidate.fileName, moduleName: candidate.moduleName },
-            create: {
-              courseId: scCourseId,
-              fileName: candidate.fileName,
-              moduleName: candidate.moduleName,
-              contentId: candidate.contentId,
-              requested: false,
-            },
-          });
-        }
+        try {
+          for (const candidate of materialCandidates) {
+            await db.canvasMaterialCandidate.upsert({
+              where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
+              update: { fileName: candidate.fileName, moduleName: candidate.moduleName },
+              create: {
+                courseId: scCourseId,
+                fileName: candidate.fileName,
+                moduleName: candidate.moduleName,
+                contentId: candidate.contentId,
+                requested: false,
+              },
+            });
+          }
 
-        // Remove candidates that were just imported as full CourseMaterial records
-        if (importedFileNames.size > 0) {
-          await db.canvasMaterialCandidate.deleteMany({
-            where: {
-              courseId: scCourseId,
-              fileName: { in: Array.from(importedFileNames) },
-            },
-          });
+          // Remove candidates that were just imported as full CourseMaterial records
+          if (importedFileNames.size > 0) {
+            await db.canvasMaterialCandidate.deleteMany({
+              where: {
+                courseId: scCourseId,
+                fileName: { in: Array.from(importedFileNames) },
+              },
+            });
+          }
+        } catch (candErr) {
+          console.error(`[sync] ${c.name}: candidate upsert failed:`, candErr);
         }
       }
 
@@ -1276,6 +1286,9 @@ export async function POST(request: NextRequest) {
         allCourseDebug.push(dbg);
         console.error(`[sync] ${c.name}: ERROR ${err} | sources: ${candidatesSummary}`);
       }
+      } catch (courseErr) {
+        console.error(`[sync] ${c.name}: UNHANDLED course-level error:`, courseErr);
+      }
     })
   );
 
@@ -1288,6 +1301,13 @@ export async function POST(request: NextRequest) {
     filesImported: syllabusFilesImported,
     coursesProcessed: allCourseDebug.length,
   });
+
+  } catch (err) {
+    bgLog.error("background AI processing CRASHED", {
+      error: String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  }
 
   }); // end after()
 
