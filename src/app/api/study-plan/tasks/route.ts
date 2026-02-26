@@ -133,5 +133,17 @@ Extract 3-8 tasks. Focus on concrete, actionable items — skip vague items like
 
   log.info("created plan tasks", { count: createdTasks.length });
 
+  // Log as intervention event for outcome tracking
+  db.learningEvent.create({
+    data: {
+      userId: session.user!.id!,
+      type: "plan_tasks_created",
+      metadata: {
+        taskIds: createdTasks.map((t) => t.id),
+        count: createdTasks.length,
+      },
+    },
+  }).catch(() => {});
+
   return Response.json({ tasks: createdTasks });
 }

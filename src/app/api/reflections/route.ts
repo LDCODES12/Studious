@@ -31,6 +31,20 @@ export async function POST(request: NextRequest) {
     },
   });
 
+  // Log as intervention event for outcome tracking
+  db.learningEvent.create({
+    data: {
+      userId: session.user.id,
+      type: "reflection_completed",
+      metadata: {
+        reflectionType: body.type,
+        courseId: body.courseId ?? null,
+        confidence: typeof body.confidence === "number" ? body.confidence : null,
+        blocker: body.blocker ?? null,
+      },
+    },
+  }).catch(() => {});
+
   return NextResponse.json({ reflection }, { status: 201 });
 }
 

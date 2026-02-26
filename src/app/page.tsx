@@ -7,8 +7,10 @@ import { UpcomingDeadlines } from "@/components/dashboard/upcoming-deadlines";
 import { TodayTasks } from "@/components/dashboard/today-tasks";
 import { PreClassCard } from "@/components/reflections/pre-class-card";
 import { LearningPulse } from "@/components/dashboard/learning-pulse";
+import { WhatsWorking } from "@/components/dashboard/whats-working";
 import { computeCourseContext } from "@/lib/course-context";
 import { computeLearningSignals } from "@/lib/learning-signals";
+import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 export default async function DashboardPage() {
@@ -20,7 +22,7 @@ export default async function DashboardPage() {
     .toISOString()
     .slice(0, 10);
 
-  const [courses, tasks, learningSignals] = await Promise.all([
+  const [courses, tasks, learningSignals, interventionOutcomes] = await Promise.all([
     userId
       ? db.course.findMany({
           where: { userId },
@@ -56,6 +58,7 @@ export default async function DashboardPage() {
         })
       : [],
     userId ? computeLearningSignals(userId) : null,
+    userId ? computeInterventionOutcomes(userId) : null,
   ]);
 
   const assignments = (courses as Awaited<typeof courses>).flatMap((c) =>
@@ -120,6 +123,7 @@ export default async function DashboardPage() {
       <GreetingBanner name={session?.user?.name ?? "there"} />
       <QuickStats courses={courses} assignments={assignments} />
       {learningSignals && <LearningPulse signals={learningSignals} />}
+      {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} />}
       <div className="grid grid-cols-5 gap-7">
         <div className="col-span-3">
           <CourseGrid courses={courses} />

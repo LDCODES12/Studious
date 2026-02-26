@@ -7,7 +7,7 @@
  */
 
 import { db } from "@/lib/db";
-import { subDays, startOfDay, format } from "date-fns";
+import { subDays, startOfDay, format, differenceInCalendarDays, parseISO } from "date-fns";
 
 // ── Output Types ────────────────────────────────────────────────────────────
 
@@ -28,6 +28,7 @@ export interface LearningSignals {
   perCourseConfidence: { courseId: string; avg: number; count: number }[];
   planCount7d: number;
   planFollowThrough: { created: number; completed: number; rate: number } | null;
+  timeToStart: { avgDaysBefore: number; count: number } | null;
 }
 
 export interface CourseLearningSignals {
@@ -244,6 +245,66 @@ async function computePerCourseConfidence(
   }));
 }
 
+// ── Time-to-Start ──────────────────────────────────────────────────────────
+
+export async function computeTimeToStart(
+  userId: string
+): Promise<{ avgDaysBefore: number; count: number } | null> {
+  const courseIds = (
+    await db.course.findMany({
+      where: { userId },
+      select: { id: true },
+    })
+  ).map((c) => c.id);
+
+  if (courseIds.length === 0) return null;
+
+  // Find submitted/graded assignments with due dates
+  const assignments = await db.assignment.findMany({
+    where: {
+      courseId: { in: courseIds },
+      dueDate: { not: null },
+      status: { in: ["submitted", "graded"] },
+    },
+    select: { id: true, dueDate: true },
+  });
+
+  if (assignments.length === 0) return null;
+
+  // Find earliest task per assignment
+  const tasks = await db.task.findMany({
+    where: {
+      userId,
+      assignmentId: { in: assignments.map((a) => a.id) },
+    },
+    select: { assignmentId: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const earliestByAssignment: Record<string, Date> = {};
+  for (const t of tasks) {
+    if (t.assignmentId && !earliestByAssignment[t.assignmentId]) {
+      earliestByAssignment[t.assignmentId] = t.createdAt;
+    }
+  }
+
+  const daysBefore: number[] = [];
+  for (const a of assignments) {
+    if (a.dueDate && earliestByAssignment[a.id]) {
+      const days = differenceInCalendarDays(
+        parseISO(a.dueDate),
+        earliestByAssignment[a.id]
+      );
+      if (days >= 0) daysBefore.push(days);
+    }
+  }
+
+  if (daysBefore.length === 0) return null;
+
+  const avg = daysBefore.reduce((s, d) => s + d, 0) / daysBefore.length;
+  return { avgDaysBefore: Math.round(avg * 10) / 10, count: daysBefore.length };
+}
+
 // ── Main Entry Point ────────────────────────────────────────────────────────
 
 export async function computeLearningSignals(
@@ -260,6 +321,7 @@ export async function computeLearningSignals(
     perCourseConfidence,
     planCount7d,
     planTaskCounts,
+    timeToStart,
   ] = await Promise.all([
     computeConfidenceTrend(userId),
     computeStudyStreak(userId),
@@ -279,6 +341,7 @@ export async function computeLearningSignals(
       db.task.count({ where: { userId, source: "plan" } }),
       db.task.count({ where: { userId, source: "plan", completed: true } }),
     ]),
+    computeTimeToStart(userId),
   ]);
 
   const [planCreated, planCompleted] = planTaskCounts;
@@ -297,6 +360,7 @@ export async function computeLearningSignals(
     perCourseConfidence,
     planCount7d,
     planFollowThrough,
+    timeToStart,
   };
 }
 

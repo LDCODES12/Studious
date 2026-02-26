@@ -136,6 +136,7 @@ PLANNING RULES:
 - If task completion stats are present, adjust plan density — if the student completed most tasks last week, maintain pace. If completion was low, create a lighter plan with fewer but more critical tasks.
 - If on-time submission rate is below 80%, frontload deadline-adjacent work and add explicit "start early" sessions 2+ days before due dates.
 - If plan follow-through data is present: high follow-through (>70%) → the student executes plans well, maintain current plan density. Low follow-through (<50%) → create a lighter plan with fewer, higher-priority tasks so they can actually complete everything.
+- If intervention effectiveness data shows which tools work best for this student, favor those approaches. If plans have positive task completion lift, create thorough plans. If chat sessions show higher confidence lift, suggest the student discuss difficult topics with the AI before starting work.
 
 FORMAT:
 Organize by day. For each session:

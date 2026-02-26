@@ -22,6 +22,8 @@ import {
 } from "date-fns";
 import { db } from "@/lib/db";
 import { effectivePlanningDate } from "@/lib/academic-deadlines";
+import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
+import { computeTimeToStart } from "@/lib/learning-signals";
 import type { ClassMeeting, ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -737,6 +739,26 @@ export async function buildReflectionSummary(
   if (planCreated > 0) {
     const pct = Math.round((planCompleted / planCreated) * 100);
     lines.push(`Plan follow-through: ${planCompleted}/${planCreated} planned tasks completed (${pct}%)`);
+  }
+
+  // Time-to-start
+  const timeToStart = await computeTimeToStart(userId);
+  if (timeToStart) {
+    lines.push(`Avg time-to-start: ${timeToStart.avgDaysBefore} days before deadline (${timeToStart.count} assignments)`);
+  }
+
+  // Intervention effectiveness (Pillar 3)
+  const interventions = await computeInterventionOutcomes(userId, courseId);
+  const insights = interventions.outcomes.filter((o) => o.insight);
+  if (insights.length > 0) {
+    lines.push("");
+    lines.push("=== INTERVENTION EFFECTIVENESS ===");
+    for (const o of insights) {
+      lines.push(o.insight!);
+    }
+    if (interventions.effectiveInterventions.length > 0) {
+      lines.push(`Most effective tools for this student: ${interventions.effectiveInterventions.join(", ")}`);
+    }
   }
 
   return lines.length > 1 ? lines.join("\n") : "";

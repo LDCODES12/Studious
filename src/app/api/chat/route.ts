@@ -5,6 +5,8 @@ import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
 import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
 import { buildStudyContext } from "@/lib/course-context";
+import { db } from "@/lib/db";
+import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 
 export const maxDuration = 60;
 
@@ -36,7 +38,12 @@ Using trend and behavioral data (if present):
 - If confidence trend is DECLINING, gently adjust — spend more time on review and check understanding before moving forward. Don't alarm the student.
 - If task completion data is present, use it to calibrate advice — if they're completing most tasks, encourage maintaining pace; if completion is low, help them prioritize fewer, higher-impact tasks.
 - If on-time submission rate is present, factor it into planning — a high rate means they're managing well; a low rate means they may need help starting earlier.
-- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.`;
+- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.
+
+Using intervention effectiveness data (if present):
+- If an intervention type shows positive lift, naturally encourage it: "this seems to work well for you."
+- If it shows no or negative lift, suggest alternatives rather than pushing the same approach.
+- Never show raw numbers or say "data shows." Use natural language like "this seems to help" or "you might try a different approach."`;
 
 const CROSS_COURSE_INSTRUCTIONS = `You are a learning collaborator who sees across all of this student's courses. You know their deadlines, topics, grades, and schedule for every class. You also have access to their self-reported understanding and blockers from micro-reflections across all courses.
 
@@ -63,7 +70,12 @@ Using trend and behavioral data (if present):
 - If confidence trend is DECLINING, gently adjust — spend more time on review and check understanding before moving forward. Don't alarm the student.
 - If task completion data is present, use it to calibrate advice — if they're completing most tasks, encourage maintaining pace; if completion is low, help them prioritize fewer, higher-impact tasks.
 - If on-time submission rate is below 80%, suggest starting assignments earlier and building in buffer days.
-- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.`;
+- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.
+
+Using intervention effectiveness data (if present):
+- If an intervention type shows positive lift, naturally encourage it: "this seems to work well for you."
+- If it shows no or negative lift, suggest alternatives rather than pushing the same approach.
+- Never show raw numbers or say "data shows." Use natural language like "this seems to help" or "you might try a different approach."`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -77,6 +89,18 @@ export async function POST(request: NextRequest) {
 
   const { messages: uiMessages, courseId } = await request.json();
   log.info("chat request", { courseId, messageCount: uiMessages?.length ?? 0 });
+
+  // Log first message of a chat session as an intervention event
+  const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
+  if (userMessages.length === 1) {
+    db.learningEvent.create({
+      data: {
+        userId: session.user.id,
+        type: "chat_session",
+        metadata: { courseId: courseId ?? null },
+      },
+    }).catch(() => {});
+  }
 
   const messages = await convertToModelMessages(uiMessages);
 
@@ -109,10 +133,31 @@ export async function POST(request: NextRequest) {
   const instructions = courseId ? SINGLE_COURSE_INSTRUCTIONS : CROSS_COURSE_INSTRUCTIONS;
   const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 
+  // Adaptive rules from intervention outcomes
+  let adaptiveRules = "";
+  try {
+    const outcomes = await computeInterventionOutcomes(session.user.id, courseId ?? undefined);
+    if (outcomes.effectiveInterventions.length > 0 || outcomes.topInsight) {
+      const rules: string[] = [];
+      if (outcomes.effectiveInterventions.includes("Study plans")) {
+        rules.push("This student benefits from structured plans. When they seem overwhelmed, suggest generating a study plan.");
+      }
+      if (outcomes.effectiveInterventions.includes("Chat sessions")) {
+        rules.push("This student benefits from discussion. Spend more time talking through concepts rather than giving quick answers.");
+      }
+      if (outcomes.effectiveInterventions.includes("Reflections")) {
+        rules.push("This student benefits from reflection. After helping with a topic, gently encourage checking understanding.");
+      }
+      if (rules.length > 0) {
+        adaptiveRules = `\n\nAdaptive notes for this student:\n${rules.map((r) => `- ${r}`).join("\n")}`;
+      }
+    }
+  } catch { /* non-fatal */ }
+
   const system = `${instructions}
 
 Today is ${today}.
-
+${adaptiveRules}
 ${promptText}${materialContext}`;
 
   const result = streamText({
