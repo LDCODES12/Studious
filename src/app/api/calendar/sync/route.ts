@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
 import { getRefreshedCalendarClient, applyRefreshedTokensCookie } from "@/lib/google";
 import { type SyllabusEvent } from "@/types";
 
 export async function POST(request: NextRequest) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const tokensCookie = request.cookies.get("google_tokens");
     if (!tokensCookie) {

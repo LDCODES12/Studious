@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
 import { parseSyllabusText, parseSyllabusTopics } from "@/lib/parse-syllabus";
 import { apiLogger } from "@/lib/logger";
 import { type SyllabusEvent } from "@/types";
@@ -13,7 +14,12 @@ type TopicRow = {
 };
 
 export async function POST(request: NextRequest) {
-  const log = apiLogger("POST /api/syllabus/parse");
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const log = apiLogger("POST /api/syllabus/parse", session.user.id);
 
   try {
     const { texts } = (await request.json()) as { texts: string[] };

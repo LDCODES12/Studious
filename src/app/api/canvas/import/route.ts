@@ -21,6 +21,24 @@ import { generateEmbedding } from "@/lib/embeddings";
 
 export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
 
+// ─── CORS (Chrome extension sends cross-origin requests) ─────────────────────
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
+function withCors<T extends Response>(res: T): T {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.headers.set(k, v));
+  return res;
+}
+
+export async function OPTIONS() {
+  return withCors(new NextResponse(null, { status: 204 }));
+}
+
 // ─── Types mirroring what the extension sends ────────────────────────────────
 
 /**
@@ -317,7 +335,7 @@ async function authedUser(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   const user = await authedUser(request);
-  if (!user) return NextResponse.json({ error: "Invalid or missing token" }, { status: 401 });
+  if (!user) return withCors(NextResponse.json({ error: "Invalid or missing token" }, { status: 401 }));
 
   const log = apiLogger("GET /api/canvas/import", user.id);
 
@@ -327,7 +345,7 @@ export async function GET(request: NextRequest) {
     db.courseTopic.count({ where: { course: { userId: user.id } } }),
   ]);
 
-  return log.respond(NextResponse.json({ courses, assignments, topics }), { courses, assignments, topics });
+  return withCors(log.respond(NextResponse.json({ courses, assignments, topics }), { courses, assignments, topics }));
 }
 
 // ─── POST — full Canvas sync ──────────────────────────────────────────────────
@@ -335,7 +353,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   // 1. Authenticate via Bearer token
   const user = await authedUser(request);
-  if (!user) return NextResponse.json({ error: "Invalid or missing token" }, { status: 401 });
+  if (!user) return withCors(NextResponse.json({ error: "Invalid or missing token" }, { status: 401 }));
 
   const log = apiLogger("POST /api/canvas/import", user.id);
 
@@ -1258,7 +1276,7 @@ export async function POST(request: NextRequest) {
     syllabus: { aiWeeks: aiTopicsCreated, filesImported: syllabusFilesImported },
   };
 
-  return log.respond(
+  return withCors(log.respond(
     NextResponse.json({
       ok: true,
       summary,
@@ -1268,5 +1286,5 @@ export async function POST(request: NextRequest) {
       },
     }),
     summary,
-  );
+  ));
 }
