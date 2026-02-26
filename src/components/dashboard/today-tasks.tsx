@@ -5,6 +5,7 @@ import Link from "next/link";
 import { format, parseISO } from "date-fns";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
+import { ReflectionStrip } from "@/components/reflections/reflection-strip";
 
 interface TaskItem {
   id: string;
@@ -13,7 +14,7 @@ interface TaskItem {
   completed: boolean;
   priority: string;
   source: string;
-  course: { shortName: string | null; color: string } | null;
+  course: { id: string; shortName: string | null; color: string } | null;
 }
 
 const priorityDot: Record<string, string> = {
@@ -24,6 +25,7 @@ const priorityDot: Record<string, string> = {
 
 export function TodayTasks({ initialTasks }: { initialTasks: TaskItem[] }) {
   const [tasks, setTasks] = useState(initialTasks);
+  const [reflectingIds, setReflectingIds] = useState<Set<string>>(new Set());
 
   const handleToggle = async (id: string) => {
     const task = tasks.find((t) => t.id === id);
@@ -33,6 +35,11 @@ export function TodayTasks({ initialTasks }: { initialTasks: TaskItem[] }) {
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, completed: newCompleted } : t))
     );
+
+    // Show reflection when completing a course-linked task
+    if (newCompleted && task.course) {
+      setReflectingIds((prev) => new Set(prev).add(id));
+    }
 
     try {
       await fetch(`/api/tasks/${id}`, {
@@ -45,6 +52,14 @@ export function TodayTasks({ initialTasks }: { initialTasks: TaskItem[] }) {
         prev.map((t) => (t.id === id ? { ...t, completed: !newCompleted } : t))
       );
     }
+  };
+
+  const dismissReflection = (id: string) => {
+    setReflectingIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   };
 
   const pending = tasks.filter((t) => !t.completed);
@@ -72,39 +87,49 @@ export function TodayTasks({ initialTasks }: { initialTasks: TaskItem[] }) {
           {pending.map((task, i) => {
             const colors = task.course ? courseColors[task.course.color ?? "blue"] : null;
             return (
-              <div
-                key={task.id}
-                className={cn(
-                  "flex items-center gap-2.5 px-4 py-2.5",
-                  i < pending.length - 1 && "border-b border-border"
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={task.completed}
-                  onChange={() => handleToggle(task.id)}
-                  className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-border accent-foreground"
-                />
-                {colors && (
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", colors.dot)} />
-                )}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px]">{task.title}</p>
-                  {task.course && (
-                    <p className="text-[11px] text-muted-foreground">
-                      {task.course.shortName ?? ""}
-                    </p>
-                  )}
-                </div>
-                <span
+              <div key={task.id}>
+                <div
                   className={cn(
-                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                    priorityDot[task.priority] ?? "bg-gray-300"
+                    "flex items-center gap-2.5 px-4 py-2.5",
+                    i < pending.length - 1 && !reflectingIds.has(task.id) && "border-b border-border"
                   )}
-                />
-                <span className="shrink-0 text-[12px] text-muted-foreground">
-                  {task.dueDate ? format(parseISO(task.dueDate), "MMM d") : ""}
-                </span>
+                >
+                  <input
+                    type="checkbox"
+                    checked={task.completed}
+                    onChange={() => handleToggle(task.id)}
+                    className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-border accent-foreground"
+                  />
+                  {colors && (
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", colors.dot)} />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px]">{task.title}</p>
+                    {task.course && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {task.course.shortName ?? ""}
+                      </p>
+                    )}
+                  </div>
+                  <span
+                    className={cn(
+                      "h-1.5 w-1.5 shrink-0 rounded-full",
+                      priorityDot[task.priority] ?? "bg-gray-300"
+                    )}
+                  />
+                  <span className="shrink-0 text-[12px] text-muted-foreground">
+                    {task.dueDate ? format(parseISO(task.dueDate), "MMM d") : ""}
+                  </span>
+                </div>
+                {reflectingIds.has(task.id) && task.course && (
+                  <div className={cn(i < pending.length - 1 && "border-b border-border")}>
+                    <ReflectionStrip
+                      taskId={task.id}
+                      courseId={task.course.id}
+                      onDone={() => dismissReflection(task.id)}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}

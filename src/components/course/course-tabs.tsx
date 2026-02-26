@@ -100,6 +100,13 @@ interface MaterialCandidate {
   requested: boolean;
 }
 
+interface CourseSignals {
+  avgConfidence: number | null;
+  confidenceCount: number;
+  topBlocker: string | null;
+  topBlockerCount: number;
+}
+
 interface CourseTabsProps {
   assignments: Assignment[];
   topics: CourseTopic[];
@@ -114,6 +121,7 @@ interface CourseTabsProps {
   googleConnected: boolean;
   courseTasks: CourseTask[];
   announcements: Announcement[];
+  courseSignals?: CourseSignals;
 }
 
 // ── Type pills ───────────────────────────────────────────────────────────────
@@ -507,6 +515,7 @@ export function CourseTabs({
   googleConnected,
   courseTasks,
   announcements,
+  courseSignals,
 }: CourseTabsProps) {
   const now = new Date();
 
@@ -679,6 +688,7 @@ export function CourseTabs({
           applyGroupWeights={applyGroupWeights}
           courseTasks={courseTasks}
           courseId={courseId}
+          courseSignals={courseSignals}
         />
       </TabsContent>
 

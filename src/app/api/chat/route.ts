@@ -2,11 +2,70 @@ import { NextRequest } from "next/server";
 import { streamText, convertToModelMessages } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { auth } from "@/lib/auth";
-import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
 import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
+import { buildStudyContext } from "@/lib/course-context";
 
 export const maxDuration = 60;
+
+// ── Learning-aligned system prompt instructions ──────────────────────────────
+
+const SINGLE_COURSE_INSTRUCTIONS = `You are a learning collaborator for this course. You know where the student is in the semester, what they just covered, what's due soon, and what's coming next. You also have access to their self-reported understanding and blockers from micro-reflections.
+
+Your role:
+- Help students LEARN, not get answers. Guide them through understanding.
+- When they ask about assignments, help them break tasks down and plan their approach — don't do the work for them.
+- Reference specific topics from their current and previous weeks to connect concepts.
+- If something is due soon, help them prioritize and plan realistic study sessions.
+- When tutoring, use the "what do you already know?" → "let's build on that" → "try this" pattern.
+- Suggest the review → work → preview cycle: review what was just covered, work on current assignments, preview what's coming next.
+- Be concise. Use plain text with line breaks — no markdown formatting.
+- Be supportive, not judgmental. Never moralize about study habits.
+
+Using self-assessment data (if present):
+- If study confidence is low (avg ≤ 1), proactively offer to review the topics they've struggled with before moving forward.
+- If their most common blocker is "confusion about the material", ask targeted probing questions to find the specific gap — don't just re-explain everything.
+- If their most common blocker is "ran out of time", help them prioritize and build smaller, time-boxed study blocks.
+- If they reported low confidence on specific topics, reference those topics when relevant and offer to revisit them.
+- If pre-class self-assessment says "new to me" or "heard of it", give a brief conceptual preview to prime their learning before class.
+- If pre-class says "some idea" or "comfortable", skip the overview and go deeper — pose challenge questions or connect to advanced applications.
+- If no self-assessment data exists, work normally — never mention reflections or ask them to fill anything out.
+
+Using trend and behavioral data (if present):
+- If confidence trend is IMPROVING, briefly acknowledge progress to reinforce it — one sentence max, don't over-celebrate.
+- If confidence trend is DECLINING, gently adjust — spend more time on review and check understanding before moving forward. Don't alarm the student.
+- If task completion data is present, use it to calibrate advice — if they're completing most tasks, encourage maintaining pace; if completion is low, help them prioritize fewer, higher-impact tasks.
+- If on-time submission rate is present, factor it into planning — a high rate means they're managing well; a low rate means they may need help starting earlier.
+- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.`;
+
+const CROSS_COURSE_INSTRUCTIONS = `You are a learning collaborator who sees across all of this student's courses. You know their deadlines, topics, grades, and schedule for every class. You also have access to their self-reported understanding and blockers from micro-reflections across all courses.
+
+Your role:
+- Help students plan and prioritize across all their courses.
+- When asked "what should I work on?", consider urgency (deadlines), importance (points/grade weight), and difficulty.
+- Help them build realistic study plans: when to start, how to break work down, how long to spend.
+- Suggest the review → work → preview cycle for each course.
+- Connect concepts across courses when relevant.
+- Be concise. Use plain text with line breaks — no markdown formatting.
+- Be supportive, not judgmental. Focus on what they CAN do with the time they have.
+
+Using self-assessment data (if present):
+- Factor confidence levels into prioritization: courses where the student is struggling need more time and earlier attention.
+- If a course shows consistently low confidence, suggest starting study sessions with that course while energy is highest.
+- If the top blocker across courses is time pressure, help them identify what to deprioritize or timebox.
+- If the top blocker is confusion, suggest they seek office hours or tutoring for those specific courses and offer to help them prepare questions.
+- Reference specific low-confidence topics when building study plans — these need review before new material builds on them.
+- If pre-class data shows they're comfortable in one course but lost in another, suggest allocating prep time accordingly.
+- If no self-assessment data exists, work normally — never mention reflections or ask them to fill anything out.
+
+Using trend and behavioral data (if present):
+- If confidence trend is IMPROVING, briefly acknowledge progress to reinforce it — one sentence max, don't over-celebrate.
+- If confidence trend is DECLINING, gently adjust — spend more time on review and check understanding before moving forward. Don't alarm the student.
+- If task completion data is present, use it to calibrate advice — if they're completing most tasks, encourage maintaining pace; if completion is low, help them prioritize fewer, higher-impact tasks.
+- If on-time submission rate is below 80%, suggest starting assignments earlier and building in buffer days.
+- If plan follow-through data is present: high follow-through (>70%) → reinforce the habit, acknowledge they're executing well. Low follow-through (<50%) → suggest lighter, more achievable plans with fewer tasks.`;
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -19,85 +78,42 @@ export async function POST(request: NextRequest) {
   const { messages: uiMessages, courseId } = await request.json();
   log.info("chat request", { courseId, messageCount: uiMessages?.length ?? 0 });
 
-  // Convert UI messages to model messages (async in v6)
   const messages = await convertToModelMessages(uiMessages);
 
-  // Verify the course belongs to this user
-  const course = await db.course.findFirst({
-    where: { id: courseId, userId: session.user.id },
-    select: {
-      name: true,
-      currentGrade: true,
-      currentScore: true,
-      topics: {
-        orderBy: { weekNumber: "asc" },
-        select: { weekNumber: true, weekLabel: true, startDate: true, topics: true },
-      },
-      assignments: {
-        where: {
-          status: { notIn: ["submitted", "graded"] },
-          dueDate: { gte: new Date().toISOString().split("T")[0] },
-          omitFromFinalGrade: false,
-        },
-        orderBy: { dueDate: "asc" },
-        take: 10,
-        select: { title: true, type: true, dueDate: true, pointsPossible: true },
-      },
-    },
-  });
+  // Build context — single-course or cross-course depending on courseId
+  const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
-  if (!course) {
+  if (courseId && !promptText) {
     return new Response(JSON.stringify({ error: "Course not found" }), { status: 404 });
   }
 
-  // RAG: embed the last user message and retrieve relevant materials
-  const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+  // RAG: embed last user message for single-course mode
   let materialContext = "";
-  if (lastUserMessage && "content" in lastUserMessage && typeof lastUserMessage.content === "string") {
-    try {
-      const vector = await generateEmbedding(lastUserMessage.content);
-      const materials = await searchMaterials(courseId, vector, 3);
-      if (materials.length > 0) {
-        materialContext =
-          "\nRelevant course material:\n" +
-          materials
-            .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 500)}`)
-            .join("\n\n");
-      }
-    } catch { /* RAG failure is non-fatal */ }
+  if (courseId) {
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUserMessage && "content" in lastUserMessage && typeof lastUserMessage.content === "string") {
+      try {
+        const vector = await generateEmbedding(lastUserMessage.content);
+        const materials = await searchMaterials(courseId, vector, 3);
+        if (materials.length > 0) {
+          materialContext =
+            "\n\nRelevant course material:\n" +
+            materials
+              .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 500)}`)
+              .join("\n\n");
+        }
+      } catch { /* RAG failure is non-fatal */ }
+    }
   }
 
-  // Build schedule section
-  const scheduleLines = course.topics
-    .map((t) => {
-      const label = t.startDate ? `Week ${t.weekNumber} (${t.startDate})` : `Week ${t.weekNumber}`;
-      return `${label}: ${t.topics.join(", ")}`;
-    })
-    .join("\n");
+  const instructions = courseId ? SINGLE_COURSE_INSTRUCTIONS : CROSS_COURSE_INSTRUCTIONS;
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 
-  // Build upcoming assignments section
-  const assignmentLines = course.assignments
-    .map((a) => {
-      const pts = a.pointsPossible ? ` — ${a.pointsPossible}pts` : "";
-      return `- ${a.title} (${a.type}) — due ${a.dueDate}${pts}`;
-    })
-    .join("\n");
+  const system = `${instructions}
 
-  const gradeInfo =
-    course.currentScore != null
-      ? `${course.currentScore}%${course.currentGrade ? ` (${course.currentGrade})` : ""}`
-      : course.currentGrade ?? "not available";
+Today is ${today}.
 
-  const system = `You are a personal study assistant for ${course.name}.
-Current grade: ${gradeInfo}
-
-Course schedule (week by week):
-${scheduleLines || "No schedule available yet."}
-
-Upcoming assignments:
-${assignmentLines || "No upcoming assignments."}
-${materialContext}
-Help the student understand concepts, explain topics, generate practice problems, and create study plans. Be specific to their actual course content. Be concise and use plain text with line breaks — no markdown formatting.`;
+${promptText}${materialContext}`;
 
   const result = streamText({
     model: openai("gpt-4o-mini"),
@@ -105,6 +121,6 @@ Help the student understand concepts, explain topics, generate practice problems
     messages,
   });
 
-  log.info("streaming response started", { courseId });
+  log.info("streaming response started", { courseId: courseId ?? "cross-course" });
   return result.toUIMessageStreamResponse();
 }

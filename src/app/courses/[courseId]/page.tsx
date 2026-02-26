@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { CourseHeader } from "@/components/course/course-header";
 import { CourseTabs } from "@/components/course/course-tabs";
 import { CourseSidebar } from "@/components/course/course-sidebar";
+import { computeCourseLearningSignals } from "@/lib/learning-signals";
 
 interface CoursePageProps {
   params: Promise<{ courseId: string }>;
@@ -18,7 +19,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
   const cookieStore = await cookies();
   const googleConnected = !!cookieStore.get("google_tokens");
 
-  const [course, courseTasks, materialCandidates] = await Promise.all([db.course.findFirst({
+  const [course, courseTasks, materialCandidates, courseSignals] = await Promise.all([db.course.findFirst({
     where: { id: courseId, userId: session.user.id },
     include: {
       assignments: { orderBy: { dueDate: "asc" } },
@@ -50,7 +51,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
     where: { courseId },
     select: { id: true, fileName: true, moduleName: true, requested: true },
     orderBy: [{ moduleName: "asc" }, { fileName: "asc" }],
-  })]);
+  }), computeCourseLearningSignals(session.user.id, courseId)]);
 
   if (!course) notFound();
 
@@ -114,6 +115,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
             materialCandidates={materialCandidates}
             courseId={course.id}
             googleConnected={googleConnected}
+            courseSignals={courseSignals}
           />
         </div>
         <div className="col-span-1">

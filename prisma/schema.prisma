@@ -255,3 +255,34 @@ model Announcement {
   createdAt DateTime @default(now())
   course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }
+
+model Reflection {
+  id             String   @id @default(cuid())
+  userId         String
+  courseId        String?
+  taskId          String?
+  assignmentId    String?
+  type           String            // "task_completion" | "post_assignment" | "pre_class"
+  confidence     Int?              // 0=lost, 1=shaky, 2=solid, 3=nailed_it
+  blocker        String?           // "none" | "confused_by_topic" | "ran_out_of_time" | "missing_prereq"
+  priorKnowledge String?           // "nothing" | "heard_of_it" | "some_understanding" | "comfortable"
+  topics         String[] @default([])
+  note           String?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, courseId])
+  @@index([userId, createdAt])
+  @@index([taskId])
+  @@index([assignmentId])
+}
+
+model LearningEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // "plan_generated" | future: "ai_suggestion_followed", "intervention_outcome"
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([userId, type])
+  @@index([userId, createdAt])
+}

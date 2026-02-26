@@ -1,10 +1,63 @@
+"use client";
+
+import { useState } from "react";
+import { Brain, CalendarClock } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { AIChat } from "@/components/chat/ai-chat";
+import { StudyPlanPanel } from "@/components/study-tools/study-plan-panel";
+
+const CROSS_COURSE_PROMPTS = [
+  "What should I focus on today?",
+  "Which assignments are most urgent right now?",
+  "Help me plan my study sessions for this week",
+  "What topics should I review before my next class?",
+];
+
+type Tab = "chat" | "plan";
+
 export default function StudyToolsPage() {
+  const [tab, setTab] = useState<Tab>("chat");
+
   return (
-    <div className="flex flex-col items-center justify-center py-32 text-center">
-      <h1 className="text-lg font-semibold">Study Tools</h1>
-      <p className="mt-2 max-w-xs text-[13px] text-muted-foreground">
-        Flashcards, quizzes, and summaries from your lectures. Coming soon.
-      </p>
+    <div className="flex flex-1 flex-col gap-4 overflow-hidden">
+      {/* Tab header */}
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={() => setTab("chat")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            tab === "chat"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+        >
+          <Brain className="h-3.5 w-3.5" />
+          Study Assistant
+        </button>
+        <button
+          onClick={() => setTab("plan")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            tab === "plan"
+              ? "bg-primary text-primary-foreground"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+        >
+          <CalendarClock className="h-3.5 w-3.5" />
+          Study Plan
+        </button>
+      </div>
+
+      {/* Tab content */}
+      {tab === "chat" ? (
+        <AIChat
+          suggestedPrompts={CROSS_COURSE_PROMPTS}
+          emptyMessage="Ask about any of your courses — planning, priorities, study strategies, exam prep."
+          placeholder="Ask across all your courses... (Enter to send)"
+        />
+      ) : (
+        <StudyPlanPanel />
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { ACCENT_BAR, ACCENT_CHIP } from "./calendar-constants";
 import type { Assignment, CalendarEvent, ScheduleItem } from "./calendar-types";
 import { isAssignment } from "./calendar-types";
+import { AssignmentReflectionStrip } from "@/components/reflections/assignment-reflection-strip";
 
 export function EventDetailPanel({
   event,
@@ -121,6 +122,12 @@ export function EventDetailPanel({
                   </span>
                 )}
               </div>
+              {((event as Assignment).status === "submitted" || (event as Assignment).status === "graded") && (
+                <AssignmentReflectionStrip
+                  assignmentId={(event as Assignment).id}
+                  courseId={(event as Assignment).course.id}
+                />
+              )}
             </>
           ) : (
             <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-3.5 py-2.5">

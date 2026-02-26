@@ -5,6 +5,7 @@ import { format, parseISO, differenceInHours, differenceInDays } from "date-fns"
 import { AlertTriangle, CheckCircle2, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatAcademicDueDateShort, formatAcademicMidnightLabel } from "@/lib/academic-deadlines";
+import { ReflectionStrip } from "@/components/reflections/reflection-strip";
 
 const TYPE_PILL: Record<string, { label: string; className: string }> = {
   exam:       { label: "Exam",       className: "bg-red-50 text-red-700" },
@@ -34,6 +35,13 @@ interface OverviewTask {
   source: string;
 }
 
+interface CourseSignals {
+  avgConfidence: number | null;
+  confidenceCount: number;
+  topBlocker: string | null;
+  topBlockerCount: number;
+}
+
 interface CourseOverviewProps {
   assignments: OverviewAssignment[];
   currentGrade: string | null;
@@ -41,7 +49,14 @@ interface CourseOverviewProps {
   applyGroupWeights: boolean;
   courseTasks: OverviewTask[];
   courseId: string;
+  courseSignals?: CourseSignals;
 }
+
+const BLOCKER_LABELS: Record<string, string> = {
+  confused_by_topic: "Topic confusion",
+  ran_out_of_time: "Time pressure",
+  missing_prereq: "Missing prereqs",
+};
 
 function timeUntil(dueDate: string): string {
   const now = new Date();
@@ -65,8 +80,10 @@ export function CourseOverview({
   applyGroupWeights,
   courseTasks,
   courseId,
+  courseSignals,
 }: CourseOverviewProps) {
   const [tasks, setTasks] = useState(courseTasks);
+  const [reflectingTaskId, setReflectingTaskId] = useState<string | null>(null);
 
   const now = new Date();
 
@@ -104,7 +121,7 @@ export function CourseOverview({
     .slice(0, 3);
 
   const handleToggleTask = async (id: string) => {
-    setTasks((prev) => prev.filter((t) => t.id !== id));
+    setReflectingTaskId(id);
     try {
       await fetch(`/api/tasks/${id}`, {
         method: "PATCH",
@@ -114,6 +131,11 @@ export function CourseOverview({
     } catch {
       // optimistic — don't revert, will refresh on next page load
     }
+  };
+
+  const handleReflectionDone = (id: string) => {
+    setReflectingTaskId(null);
+    setTasks((prev) => prev.filter((t) => t.id !== id));
   };
 
   return (
@@ -170,6 +192,40 @@ export function CourseOverview({
           <p className="mt-0.5 text-[11px] text-muted-foreground">
             {applyGroupWeights ? "Weighted grading" : "Points-based grading"}
           </p>
+        </div>
+      )}
+
+      {/* ── Your Understanding ── */}
+      {courseSignals && courseSignals.confidenceCount >= 2 && courseSignals.avgConfidence !== null && (
+        <div className="rounded-lg border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Your Understanding
+          </p>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className={cn(
+              "text-lg font-semibold",
+              courseSignals.avgConfidence < 1 ? "text-red-600" :
+              courseSignals.avgConfidence < 2 ? "text-orange-600" :
+              courseSignals.avgConfidence < 3 ? "text-blue-600" :
+              "text-green-600"
+            )}>
+              {courseSignals.avgConfidence < 1 ? "Struggling" :
+               courseSignals.avgConfidence < 2 ? "Building" :
+               courseSignals.avgConfidence < 3 ? "Solid" :
+               "Strong"}
+            </span>
+            <span className="text-[13px] tabular-nums text-muted-foreground">
+              {courseSignals.avgConfidence.toFixed(1)}/3
+            </span>
+          </div>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Based on {courseSignals.confidenceCount} reflections
+          </p>
+          {courseSignals.topBlocker && (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Top challenge: {BLOCKER_LABELS[courseSignals.topBlocker] ?? courseSignals.topBlocker}
+            </p>
+          )}
         </div>
       )}
 
@@ -252,29 +308,39 @@ export function CourseOverview({
           </p>
           <div className="overflow-hidden rounded-lg border border-border bg-card">
             {tasks.map((task, i) => (
-              <div
-                key={task.id}
-                className={cn(
-                  "flex items-center gap-3 px-4 py-2.5",
-                  i < tasks.length - 1 && "border-b border-border"
-                )}
-              >
-                <button
-                  onClick={() => handleToggleTask(task.id)}
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border hover:border-foreground/40 transition-colors"
+              <div key={task.id}>
+                <div
+                  className={cn(
+                    "flex items-center gap-3 px-4 py-2.5",
+                    i < tasks.length - 1 && reflectingTaskId !== task.id && "border-b border-border"
+                  )}
                 >
-                  <Check className="h-2.5 w-2.5 opacity-0 hover:opacity-50" />
-                </button>
-                <span className="min-w-0 flex-1 truncate text-[13px]">{task.title}</span>
-                {task.source === "auto" && (
-                  <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    auto
-                  </span>
-                )}
-                {task.dueDate && (
-                  <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                    {format(parseISO(task.dueDate), "MMM d")}
-                  </span>
+                  <button
+                    onClick={() => handleToggleTask(task.id)}
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border hover:border-foreground/40 transition-colors"
+                  >
+                    <Check className="h-2.5 w-2.5 opacity-0 hover:opacity-50" />
+                  </button>
+                  <span className="min-w-0 flex-1 truncate text-[13px]">{task.title}</span>
+                  {task.source === "auto" && (
+                    <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      auto
+                    </span>
+                  )}
+                  {task.dueDate && (
+                    <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
+                      {format(parseISO(task.dueDate), "MMM d")}
+                    </span>
+                  )}
+                </div>
+                {reflectingTaskId === task.id && (
+                  <div className={cn(i < tasks.length - 1 && "border-b border-border")}>
+                    <ReflectionStrip
+                      taskId={task.id}
+                      courseId={courseId}
+                      onDone={() => handleReflectionDone(task.id)}
+                    />
+                  </div>
                 )}
               </div>
             ))}
