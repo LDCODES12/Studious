@@ -8,8 +8,9 @@ export default auth((req) => {
   const publicPaths = ["/login", "/register"];
   const isPublic = publicPaths.some((p) => pathname.startsWith(p));
   const isAuthApi = pathname.startsWith("/api/auth");
+  const isApi = pathname.startsWith("/api/");
 
-  if (!isLoggedIn && !isPublic && !isAuthApi) {
+  if (!isLoggedIn && !isPublic && !isAuthApi && !isApi) {
     return NextResponse.redirect(new URL("/login", req.url));
   }
 
