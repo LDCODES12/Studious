@@ -14,14 +14,6 @@ const TREND_CONFIG = {
 export function LearningPulse({ signals }: Props) {
   const { confidenceTrend, studyStreak, activeDaysLast7, taskCompletion, onTimeRate, planFollowThrough } = signals;
 
-  // Only show if there's meaningful data
-  const hasData =
-    confidenceTrend.totalReflections >= 1 ||
-    (taskCompletion && taskCompletion.total > 0) ||
-    studyStreak > 0;
-
-  if (!hasData) return null;
-
   const trend = TREND_CONFIG[confidenceTrend.direction];
 
   return (

@@ -35,7 +35,7 @@ const INTERVENTION_TYPES = [
   { type: "reflection_completed", label: "Reflections",    windowHours: 24 },
 ] as const;
 
-const MIN_SAMPLE = 3;
+const MIN_SAMPLE = 1;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -151,7 +151,7 @@ export async function computeInterventionOutcomes(
         : null;
 
     // Generate insight
-    const insight = generateInsight(cfg.label, taskLift, confidenceLift);
+    const insight = generateInsight(cfg.label, taskLift, confidenceLift, events.length);
 
     outcomes.push({
       type: cfg.type,
@@ -190,19 +190,22 @@ function generateInsight(
   label: string,
   taskLift: number | null,
   confidenceLift: number | null,
+  sampleSize: number,
 ): string | null {
+  const prefix = sampleSize < 3 ? "Early sign: " : "";
+
   // Positive task lift
   if (taskLift !== null && taskLift > 0.1) {
-    return `${label} are working — you complete ${Math.round(taskLift * 100)}% more tasks afterward.`;
+    return `${prefix}${label} are working — you complete ${Math.round(taskLift * 100)}% more tasks afterward.`;
   }
 
   // Positive confidence lift
   if (confidenceLift !== null && confidenceLift > 0.3) {
-    return `${label} boost your confidence by ${confidenceLift.toFixed(1)} points.`;
+    return `${prefix}${label} boost your confidence by ${confidenceLift.toFixed(1)} points.`;
   }
 
-  // Negative task lift (only mention if meaningful)
-  if (taskLift !== null && taskLift < -0.15) {
+  // Negative task lift (only mention if meaningful and enough data)
+  if (taskLift !== null && taskLift < -0.15 && sampleSize >= 3) {
     return `You might benefit from lighter ${label.toLowerCase()} — task completion dips slightly after them.`;
   }
 

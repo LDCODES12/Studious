@@ -108,13 +108,15 @@ export default async function DashboardPage() {
 
       if (!ctx.nextClassMeeting) return null;
 
-      // Get the first topic from current or next week
-      const topicName =
-        ctx.currentWeek?.topics?.[0] ??
-        ctx.nextWeek?.topics?.[0] ??
-        null;
-      if (!topicName) return null;
+      // Filter out generic module labels like "Lecture 5", "Module 3"
+      const isSemanticTopic = (name: string) =>
+        !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
 
+      const semanticCurrent = (ctx.currentWeek?.topics ?? []).filter(isSemanticTopic);
+      const semanticNext = (ctx.nextWeek?.topics ?? []).filter(isSemanticTopic);
+      const topicName = semanticCurrent[0] ?? semanticNext[0] ?? null;
+
+      // Show card even without a topic — generic "how prepared?" prompt
       return {
         courseId: course.id,
         courseName: course.shortName ?? course.name,
@@ -135,7 +137,7 @@ export default async function DashboardPage() {
       <SyncStatusBanner initialProcessing={isSyncProcessing} />
       <QuickStats courses={courses} assignments={assignments} />
       {learningSignals && <LearningPulse signals={learningSignals} />}
-      {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} />}
+      {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} hasCourses={courses.length > 0} />}
       <div className="grid grid-cols-5 gap-7">
         <div className="col-span-3">
           <CourseGrid courses={courses} />

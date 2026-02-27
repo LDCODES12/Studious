@@ -8,7 +8,7 @@ interface PreClassCardProps {
   courseId: string;
   courseName: string;
   courseColor: string;
-  topicName: string;
+  topicName: string | null;
   classTime: string;
 }
 
@@ -31,7 +31,7 @@ export function PreClassCard({ courseId, courseName, courseColor, topicName, cla
         type: "pre_class",
         courseId,
         priorKnowledge: value,
-        topics: [topicName],
+        topics: topicName ? [topicName] : [],
       }),
     }).catch(() => {});
     setSubmitted(true);
@@ -47,7 +47,9 @@ export function PreClassCard({ courseId, courseName, courseColor, topicName, cla
         <span className="text-[11px] text-muted-foreground ml-auto">{classTime}</span>
       </div>
       <p className="text-[11px] text-muted-foreground">
-        How much do you know about <span className="font-medium text-foreground">{topicName}</span>?
+        {topicName
+          ? <>How much do you know about <span className="font-medium text-foreground">{topicName}</span>?</>
+          : "How prepared do you feel for your next class?"}
       </p>
       <div className="grid grid-cols-4 gap-1.5">
         {PRIOR_KNOWLEDGE.map((pk) => (
