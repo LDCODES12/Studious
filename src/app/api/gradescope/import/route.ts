@@ -443,7 +443,10 @@ export async function POST(request: NextRequest) {
     // Cross-source reconciliation: if an assignment has no due date, check
     // the AI-extracted syllabus events for a matching title.
     const undated = await db.assignment.findMany({
-      where: { courseId, dueDate: null },
+      // Do not backfill undated Gradescope-linked rows from syllabus.
+      // GS assignments must come from GS dates; syllabus fallback can inject
+      // release-like dates and cause false "midnight missed" states.
+      where: { courseId, dueDate: null, gradescopeId: null },
       select: { id: true, title: true },
     });
 
