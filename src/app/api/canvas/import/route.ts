@@ -654,6 +654,7 @@ export async function POST(request: NextRequest) {
   after(async () => {
     const bgLog = apiLogger("POST /api/canvas/import [after]", user.id);
     bgLog.info("background AI processing started", { courses: courses.length });
+    await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: new Date() } });
 
   try {
   // AI syllabus processing — run all courses in parallel for speed
@@ -1301,12 +1302,14 @@ export async function POST(request: NextRequest) {
     filesImported: syllabusFilesImported,
     coursesProcessed: allCourseDebug.length,
   });
+  await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
 
   } catch (err) {
     bgLog.error("background AI processing CRASHED", {
       error: String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
+    await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
   }
 
   }); // end after()

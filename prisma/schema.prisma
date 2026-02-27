@@ -18,8 +18,9 @@ model User {
   image         String?
   emailVerified DateTime?
   canvasIcsUrl  String?
-  apiTokenHash  String?   @unique // SHA-256 hash of extension API token
-  createdAt     DateTime  @default(now())
+  apiTokenHash        String?   @unique // SHA-256 hash of extension API token
+  bgSyncProcessingAt  DateTime? // set when after() starts AI processing, cleared when done
+  createdAt           DateTime  @default(now())
   courses       Course[]
   tasks         Task[]
   accounts      Account[]

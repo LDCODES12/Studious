@@ -11,6 +11,7 @@ import { WhatsWorking } from "@/components/dashboard/whats-working";
 import { computeCourseContext } from "@/lib/course-context";
 import { computeLearningSignals } from "@/lib/learning-signals";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
+import { SyncStatusBanner } from "@/components/dashboard/sync-status-banner";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 export default async function DashboardPage() {
@@ -22,7 +23,7 @@ export default async function DashboardPage() {
     .toISOString()
     .slice(0, 10);
 
-  const [courses, tasks, learningSignals, interventionOutcomes] = await Promise.all([
+  const [courses, tasks, learningSignals, interventionOutcomes, userStatus] = await Promise.all([
     userId
       ? db.course.findMany({
           where: { userId },
@@ -59,6 +60,12 @@ export default async function DashboardPage() {
       : [],
     userId ? computeLearningSignals(userId) : null,
     userId ? computeInterventionOutcomes(userId) : null,
+    userId
+      ? db.user.findUnique({
+          where: { id: userId },
+          select: { bgSyncProcessingAt: true },
+        })
+      : null,
   ]);
 
   const assignments = (courses as Awaited<typeof courses>).flatMap((c) =>
@@ -118,9 +125,14 @@ export default async function DashboardPage() {
     })
     .filter((p): p is NonNullable<typeof p> => p !== null);
 
+  const isSyncProcessing =
+    !!userStatus?.bgSyncProcessingAt &&
+    Date.now() - new Date(userStatus.bgSyncProcessingAt).getTime() < 10 * 60 * 1000;
+
   return (
     <div className="space-y-7">
       <GreetingBanner name={session?.user?.name ?? "there"} />
+      <SyncStatusBanner initialProcessing={isSyncProcessing} />
       <QuickStats courses={courses} assignments={assignments} />
       {learningSignals && <LearningPulse signals={learningSignals} />}
       {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} />}
