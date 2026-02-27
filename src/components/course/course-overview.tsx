@@ -97,7 +97,7 @@ export function CourseOverview({
 
   // Needs Attention: actionable soon (not already missed/closed)
   const urgent = assignments.filter((a) => {
-    if (isDone(a) || a.missing || !a.dueDate) return false;
+    if (isDone(a) || a.missing || !deadlineFor(a)) return false;
     const hoursLeft = hoursLeftFor(a);
     return hoursLeft != null && hoursLeft >= 0 && hoursLeft <= 48;
   });
