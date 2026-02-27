@@ -478,7 +478,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
             const extractDateFragments = (text) => {
               if (!text) return [];
               const flat = text.replace(/\s+/g, " ").trim();
-              const monthRx = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[ap]m)?\b/ig;
+              const monthRx = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?(?:(?:\s+at)?\s+\d{1,2}:\d{2}\s*[ap]m)?\b/ig;
               const slashRx = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?:\s+\d{1,2}:\d{2}\s*[ap]m?)?\b/ig;
               const matches = [];
               for (const rx of [monthRx, slashRx]) {
@@ -568,7 +568,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
 
               const row = container.matches?.("tr,[role='row']") ? container : container.closest?.("tr,[role='row']");
               const idx = getColumnIndexes(container);
-              if (row && idx) {
+              if (row && idx && idx.due >= 0) {
                 const cells = Array.from(row.querySelectorAll(":scope > th, :scope > td"));
                 if (idx.released >= 0 && idx.released < cells.length) {
                   releasedAt = parseReleasedAt(cells[idx.released]);
@@ -577,6 +577,18 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                   const due = parseDueFields(cells[idx.due]);
                   dueAt = due.dueAt;
                   lateDueAt = due.lateDueAt;
+                }
+              }
+              // Robust structural fallback: most GS rows are Name | Status | Released | Due.
+              if (row && !dueAt) {
+                const cells = Array.from(row.querySelectorAll(":scope > th, :scope > td"));
+                if (cells.length >= 3) {
+                  const dueCell = cells[cells.length - 1];
+                  const releasedCell = cells[cells.length - 2];
+                  const due = parseDueFields(dueCell);
+                  if (due.dueAt) dueAt = due.dueAt;
+                  if (due.lateDueAt) lateDueAt = due.lateDueAt;
+                  if (!releasedAt) releasedAt = parseReleasedAt(releasedCell);
                 }
               }
 
@@ -598,7 +610,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 const cells = Array.from(container.querySelectorAll("td,th,span,div"));
                 for (const cell of cells.slice(0, 24)) {
                   const txt = cell.textContent?.trim() || "";
-                  if (!txt || txt.length > 180) continue;
+                  if (!txt || txt.length > 600) continue;
                   const parsed = parseDateTimesFromText(txt);
                   if (parsed.length) {
                     dueAt = parsed[0];
