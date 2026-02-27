@@ -21,6 +21,7 @@ interface OverviewAssignment {
   title: string;
   type: string;
   dueDate: string | null;
+  availableUntil?: string | null;
   status: string;
   missing: boolean;
   pointsPossible: number | null;
@@ -88,8 +89,11 @@ export function CourseOverview({
   const now = new Date();
 
   const isDone = (a: OverviewAssignment) => a.status === "submitted" || a.status === "graded";
-  const hoursLeftFor = (a: OverviewAssignment) =>
-    a.dueDate ? differenceInHours(parseISO(a.dueDate), now) : null;
+  const deadlineFor = (a: OverviewAssignment) => a.availableUntil || a.dueDate;
+  const hoursLeftFor = (a: OverviewAssignment) => {
+    const cutoff = deadlineFor(a);
+    return cutoff ? differenceInHours(parseISO(cutoff), now) : null;
+  };
 
   // Needs Attention: actionable soon (not already missed/closed)
   const urgent = assignments.filter((a) => {
@@ -110,13 +114,16 @@ export function CourseOverview({
   const upNext = assignments
     .filter((a) => {
       if (a.status === "submitted" || a.status === "graded" || a.missing) return false;
-      if (!a.dueDate) return false;
-      return differenceInHours(parseISO(a.dueDate), now) > 48;
+      const cutoff = deadlineFor(a);
+      if (!cutoff) return false;
+      return differenceInHours(parseISO(cutoff), now) > 48;
     })
     .sort((a, b) => {
-      if (!a.dueDate) return 1;
-      if (!b.dueDate) return -1;
-      return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+      const da = deadlineFor(a);
+      const db = deadlineFor(b);
+      if (!da) return 1;
+      if (!db) return -1;
+      return new Date(da).getTime() - new Date(db).getTime();
     })
     .slice(0, 3);
 
@@ -160,7 +167,10 @@ export function CourseOverview({
                   ) : a.title}
                 </span>
                 <span className="shrink-0 text-[11px] font-medium text-red-600">
-                  {a.missing ? "Missing" : a.dueDate ? timeUntil(a.dueDate) : ""}
+                  {a.missing ? "Missing" : (() => {
+                    const cutoff = deadlineFor(a);
+                    return cutoff ? timeUntil(cutoff) : "";
+                  })()}
                 </span>
               </div>
             ))}

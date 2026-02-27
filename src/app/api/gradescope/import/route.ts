@@ -49,6 +49,9 @@ interface GradescopeAssignment {
   gradescopeAssignmentId: string | null;
   gradescopeFingerprint?: string | null;
   dueDate: string | null;
+  dueAt?: string | null;
+  releasedAt?: string | null;
+  lateDueAt?: string | null;
 }
 
 interface GradescopeCourse {
@@ -60,12 +63,34 @@ function normalizeTitle(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function canonicalDateTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 function canonicalDueDate(dueDate: string | null | undefined): string | null {
   if (!dueDate) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return dueDate;
-  const parsed = new Date(dueDate);
+  const ts = canonicalDateTime(dueDate);
+  return ts ? ts.slice(0, 10) : null;
+}
+
+function canonicalDueValue(dueDate: string | null | undefined): string | null {
+  if (!dueDate) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return dueDate;
+  return canonicalDateTime(dueDate);
+}
+
+function parseDeadlineInstant(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T23:59:59.999Z`);
+  }
+  const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
-  return parsed.toISOString().slice(0, 10);
+  return parsed;
 }
 
 function makeFingerprint(title: string, dueDate: string | null | undefined): string {
@@ -94,13 +119,14 @@ function isMissingAssignment(
   status: string | null | undefined,
   dbStatus: "graded" | "submitted" | "not_started",
   dueDate: string | null | undefined,
+  lateDueAt: string | null | undefined,
   now: Date,
 ): boolean {
   const s = (status ?? "").toLowerCase();
   if (s === "missing" || s.includes("late due date passed") || s.includes("due date passed")) return true;
-  const due = canonicalDueDate(dueDate);
-  if (!due) return false;
-  return dbStatus === "not_started" && new Date(`${due}T23:59:59.999Z`) < now;
+  const cutoff = parseDeadlineInstant(lateDueAt) ?? parseDeadlineInstant(dueDate);
+  if (!cutoff) return false;
+  return dbStatus === "not_started" && cutoff < now;
 }
 
 export async function POST(request: NextRequest) {
@@ -133,7 +159,18 @@ export async function POST(request: NextRequest) {
       name: true,
       gradescopeCourseId: true,
       assignments: {
-        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true, status: true, missing: true },
+        select: {
+          id: true,
+          title: true,
+          score: true,
+          gradescopeId: true,
+          dueDate: true,
+          status: true,
+          missing: true,
+          canvasAssignmentId: true,
+          availableFrom: true,
+          availableUntil: true,
+        },
       },
     },
   });
@@ -172,16 +209,31 @@ export async function POST(request: NextRequest) {
     }
 
     for (const gsAssignment of gsCourse.assignments) {
-      const { title, score, maxScore, status, gradescopeAssignmentId, dueDate, gradescopeFingerprint } = gsAssignment;
+      const {
+        title,
+        score,
+        maxScore,
+        status,
+        gradescopeAssignmentId,
+        dueDate,
+        dueAt,
+        releasedAt,
+        lateDueAt,
+        gradescopeFingerprint,
+      } = gsAssignment;
       if (!title?.trim()) continue;
 
       const incomingGsId = gradescopeAssignmentId?.trim() || null;
-      const fingerprint = gradescopeFingerprint?.trim() || makeFingerprint(title, dueDate);
+      const normalizedDue = canonicalDueValue(dueAt ?? dueDate);
+      const normalizedReleased = canonicalDateTime(releasedAt);
+      const normalizedLateDue = canonicalDateTime(lateDueAt);
+      const fingerprint = gradescopeFingerprint?.trim() || makeFingerprint(title, normalizedDue);
       const syntheticGsId = `fp:${fingerprint}`;
       const dbStatus = mapDbStatus(status);
-      const isMissing = isMissingAssignment(status, dbStatus, dueDate, now);
+      const isMissing = isMissingAssignment(status, dbStatus, normalizedDue, normalizedLateDue, now);
 
       const applyUpdate = async (target: (typeof localAssignments)[number], attachId: string | null) => {
+        const isCanvasBacked = !!target.canvasAssignmentId;
         const data: Record<string, unknown> = {
           status: dbStatus,
           missing: isMissing,
@@ -190,13 +242,26 @@ export async function POST(request: NextRequest) {
           data.gradescopeScore = score;
           data.gradescopeMaxScore = maxScore;
         }
-        if (dueDate && (!target.dueDate || !sameDueDay(target.dueDate, dueDate))) {
-          data.dueDate = canonicalDueDate(dueDate);
+        if (normalizedDue) {
+          if (!target.dueDate) {
+            data.dueDate = normalizedDue;
+          } else if (!isCanvasBacked && !sameDueDay(target.dueDate, normalizedDue)) {
+            // GS-only rows can move when instructors edit deadlines in Gradescope.
+            data.dueDate = normalizedDue;
+          }
+        }
+        if (normalizedReleased && (!target.availableFrom || !isCanvasBacked)) {
+          data.availableFrom = normalizedReleased;
+        }
+        if (normalizedLateDue && (!target.availableUntil || !isCanvasBacked)) {
+          data.availableUntil = normalizedLateDue;
         }
         if (attachId && target.gradescopeId !== attachId) data.gradescopeId = attachId;
 
         await db.assignment.update({ where: { id: target.id }, data });
         if (data.dueDate) target.dueDate = String(data.dueDate);
+        if (data.availableFrom) target.availableFrom = String(data.availableFrom);
+        if (data.availableUntil) target.availableUntil = String(data.availableUntil);
         target.status = dbStatus;
         target.missing = isMissing;
         if (attachId) {
@@ -222,10 +287,14 @@ export async function POST(request: NextRequest) {
       const gsNorm = normalizeTitle(title);
       matched = localAssignments.find((a) => {
         if (normalizeTitle(a.title) !== gsNorm) return false;
-        if (!sameDueDay(a.dueDate, dueDate)) return false;
+        if (!sameDueDay(a.dueDate, normalizedDue)) return false;
         if (!incomingGsId) return true;
         return !isConcreteGsId(a.gradescopeId) || a.gradescopeId === incomingGsId;
       });
+      if (!matched) {
+        const sameTitle = localAssignments.filter((a) => normalizeTitle(a.title) === gsNorm);
+        if (sameTitle.length === 1) matched = sameTitle[0];
+      }
       if (!matched) matched = byFingerprint.get(fingerprint);
 
       if (matched) {
@@ -240,15 +309,37 @@ export async function POST(request: NextRequest) {
       const dbIdToCheck = incomingGsId || syntheticGsId;
       const existingById = await db.assignment.findFirst({
         where: { courseId, gradescopeId: dbIdToCheck },
-        select: { id: true, title: true, dueDate: true, status: true, missing: true, score: true, gradescopeId: true },
+        select: {
+          id: true,
+          title: true,
+          dueDate: true,
+          status: true,
+          missing: true,
+          score: true,
+          gradescopeId: true,
+          canvasAssignmentId: true,
+          availableFrom: true,
+          availableUntil: true,
+        },
       });
       if (existingById) {
+        const isCanvasBacked = !!existingById.canvasAssignmentId;
         await db.assignment.update({
           where: { id: existingById.id },
           data: {
             status: dbStatus,
             missing: isMissing,
-            dueDate: canonicalDueDate(dueDate) ?? existingById.dueDate,
+            dueDate: !existingById.dueDate
+              ? normalizedDue ?? existingById.dueDate
+              : (!isCanvasBacked && normalizedDue && !sameDueDay(existingById.dueDate, normalizedDue))
+                ? normalizedDue
+                : existingById.dueDate,
+            availableFrom: normalizedReleased && (!existingById.availableFrom || !isCanvasBacked)
+              ? normalizedReleased
+              : existingById.availableFrom,
+            availableUntil: normalizedLateDue && (!existingById.availableUntil || !isCanvasBacked)
+              ? normalizedLateDue
+              : existingById.availableUntil,
             gradescopeId: incomingGsId || existingById.gradescopeId,
             ...(score !== null && maxScore !== null
               ? { gradescopeScore: score, gradescopeMaxScore: maxScore }
@@ -261,15 +352,33 @@ export async function POST(request: NextRequest) {
       }
 
       const existingByTitleDue = await db.assignment.findFirst({
-        where: { courseId, title, dueDate: canonicalDueDate(dueDate) },
-        select: { id: true, title: true, dueDate: true, status: true, missing: true, score: true, gradescopeId: true },
+        where: { courseId, title, dueDate: canonicalDueValue(normalizedDue) },
+        select: {
+          id: true,
+          title: true,
+          dueDate: true,
+          status: true,
+          missing: true,
+          score: true,
+          gradescopeId: true,
+          canvasAssignmentId: true,
+          availableFrom: true,
+          availableUntil: true,
+        },
       });
       if (existingByTitleDue) {
+        const isCanvasBacked = !!existingByTitleDue.canvasAssignmentId;
         await db.assignment.update({
           where: { id: existingByTitleDue.id },
           data: {
             status: dbStatus,
             missing: isMissing,
+            availableFrom: normalizedReleased && (!existingByTitleDue.availableFrom || !isCanvasBacked)
+              ? normalizedReleased
+              : existingByTitleDue.availableFrom,
+            availableUntil: normalizedLateDue && (!existingByTitleDue.availableUntil || !isCanvasBacked)
+              ? normalizedLateDue
+              : existingByTitleDue.availableUntil,
             gradescopeId: incomingGsId || existingByTitleDue.gradescopeId || syntheticGsId,
             ...(score !== null && maxScore !== null
               ? { gradescopeScore: score, gradescopeMaxScore: maxScore }
@@ -287,7 +396,9 @@ export async function POST(request: NextRequest) {
           courseId,
           title,
           type: inferType(title),
-          dueDate: canonicalDueDate(dueDate) ?? null,
+          dueDate: normalizedDue ?? null,
+          availableFrom: normalizedReleased ?? null,
+          availableUntil: normalizedLateDue ?? null,
           status: dbStatus,
           gradescopeId: incomingGsId || syntheticGsId,
           gradescopeScore: score,
@@ -295,7 +406,18 @@ export async function POST(request: NextRequest) {
           pointsPossible: maxScore,
           missing: isMissing,
         },
-        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true, status: true, missing: true },
+        select: {
+          id: true,
+          title: true,
+          score: true,
+          gradescopeId: true,
+          dueDate: true,
+          status: true,
+          missing: true,
+          canvasAssignmentId: true,
+          availableFrom: true,
+          availableUntil: true,
+        },
       });
       localAssignments.push(createdRow);
       if (createdRow.gradescopeId) byGsId.set(createdRow.gradescopeId, createdRow);

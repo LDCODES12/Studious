@@ -461,55 +461,153 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 .replace(/[^a-z0-9\s]/g, " ")
                 .replace(/\s+/g, " ")
                 .trim();
-            const canonicalDueDate = (value) => {
+            const canonicalDateTime = (value) => {
               if (!value) return null;
               try {
                 const d = new Date(value);
                 if (!Number.isFinite(d.getTime())) return null;
-                return d.toISOString().split("T")[0];
+                return d.toISOString();
               } catch {
                 return null;
               }
             };
-            const parseDueDateText = (text) => {
-              if (!text) return null;
+            const canonicalDueDate = (value) => {
+              const ts = canonicalDateTime(value);
+              return ts ? ts.split("T")[0] : null;
+            };
+            const extractDateFragments = (text) => {
+              if (!text) return [];
               const flat = text.replace(/\s+/g, " ").trim();
-              const monthRx = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[ap]m)?\b/i;
-              const slashRx = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?:\s+\d{1,2}:\d{2}\s*[ap]m?)?\b/i;
-              const m = flat.match(monthRx) || flat.match(slashRx);
-              if (!m) return null;
-              const fragment = m[0];
+              const monthRx = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[ap]m)?\b/ig;
+              const slashRx = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?:\s+\d{1,2}:\d{2}\s*[ap]m?)?\b/ig;
+              const matches = [];
+              for (const rx of [monthRx, slashRx]) {
+                for (const m of flat.matchAll(rx)) matches.push(m[0]);
+              }
+              return matches;
+            };
+            const parseDateFragment = (fragment) => {
+              if (!fragment) return null;
+              const currentYear = new Date().getFullYear();
               const withYear = /\b\d{4}\b/.test(fragment)
                 ? fragment
-                : `${fragment}, ${new Date().getFullYear()}`;
-              return canonicalDueDate(withYear);
+                : /\bat\b/i.test(fragment)
+                  ? fragment.replace(/\s+at\s+/i, `, ${currentYear} at `)
+                  : `${fragment}, ${currentYear}`;
+              return canonicalDateTime(withYear);
             };
-            const extractDueDate = (container) => {
-              const timeTags = Array.from(container.querySelectorAll("time[datetime]"));
-              let fallback = null;
+            const parseDateTimesFromText = (text) => {
+              const out = [];
+              for (const fragment of extractDateFragments(text)) {
+                const parsed = parseDateFragment(fragment);
+                if (parsed) out.push(parsed);
+              }
+              return out;
+            };
+            const parseReleasedAt = (cell) => {
+              if (!cell) return null;
+              for (const tag of Array.from(cell.querySelectorAll("time[datetime]"))) {
+                const parsed = canonicalDateTime(tag.getAttribute("datetime"));
+                if (parsed) return parsed;
+              }
+              return parseDateTimesFromText(cell.textContent || "")[0] || null;
+            };
+            const parseDueFields = (cell) => {
+              if (!cell) return { dueAt: null, lateDueAt: null };
+              let dueAt = null;
+              let lateDueAt = null;
+
+              const timeTags = Array.from(cell.querySelectorAll("time[datetime]"));
               for (const tag of timeTags) {
-                const dt = tag.getAttribute("datetime");
-                if (!dt) continue;
+                const parsed = canonicalDateTime(tag.getAttribute("datetime"));
+                if (!parsed) continue;
                 const label = (
                   `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${tag.parentElement?.textContent || ""}`
                 ).toLowerCase();
                 if (label.includes("release")) continue;
-                if (label.includes("late due") || label.includes("hard due")) continue;
-                const parsed = canonicalDueDate(dt);
-                if (!parsed) continue;
-                if (label.includes("due")) return parsed;
-                if (!fallback) fallback = parsed;
+                if (label.includes("late due") || label.includes("hard due")) {
+                  if (!lateDueAt) lateDueAt = parsed;
+                  continue;
+                }
+                if (!dueAt) dueAt = parsed;
               }
-              if (fallback) return fallback;
+              if (dueAt) return { dueAt, lateDueAt };
 
-              const cells = Array.from(container.querySelectorAll("td,th,span,div"));
-              for (const cell of cells.slice(0, 24)) {
-                const txt = cell.textContent?.trim() || "";
-                if (!txt || txt.length > 140) continue;
-                const parsed = parseDueDateText(txt);
-                if (parsed) return parsed;
+              const flat = (cell.textContent || "").replace(/\s+/g, " ").trim();
+              const all = parseDateTimesFromText(flat);
+              if (all.length === 0) return { dueAt: null, lateDueAt: null };
+
+              dueAt = all[0] || null;
+              const lateChunk = flat.match(/late due date:\s*(.*)$/i)?.[1] || "";
+              const lateCandidates = parseDateTimesFromText(lateChunk);
+              lateDueAt = lateCandidates[0] || (/(late due|hard due)/i.test(flat) ? all[1] || null : null);
+
+              return { dueAt, lateDueAt };
+            };
+            const tableHeaderCache = new WeakMap();
+            const getColumnIndexes = (container) => {
+              const row = container.closest("tr,[role='row']") || (container.matches?.("tr,[role='row']") ? container : null);
+              if (!row) return null;
+              const table = row.closest("table");
+              if (!table) return null;
+              if (tableHeaderCache.has(table)) return tableHeaderCache.get(table);
+              const idx = { released: -1, due: -1 };
+              const headerCells = Array.from(table.querySelectorAll("thead tr th, thead tr td"));
+              for (const [i, header] of headerCells.entries()) {
+                const t = (header.textContent || "").toLowerCase().replace(/\s+/g, " ").trim();
+                if (idx.released === -1 && t.includes("released")) idx.released = i;
+                if (idx.due === -1 && t.includes("due")) idx.due = i;
               }
-              return null;
+              tableHeaderCache.set(table, idx);
+              return idx;
+            };
+            const extractDateFields = (container) => {
+              let releasedAt = null;
+              let dueAt = null;
+              let lateDueAt = null;
+
+              const row = container.matches?.("tr,[role='row']") ? container : container.closest?.("tr,[role='row']");
+              const idx = getColumnIndexes(container);
+              if (row && idx) {
+                const cells = Array.from(row.querySelectorAll(":scope > th, :scope > td"));
+                if (idx.released >= 0 && idx.released < cells.length) {
+                  releasedAt = parseReleasedAt(cells[idx.released]);
+                }
+                if (idx.due >= 0 && idx.due < cells.length) {
+                  const due = parseDueFields(cells[idx.due]);
+                  dueAt = due.dueAt;
+                  lateDueAt = due.lateDueAt;
+                }
+              }
+
+              // Fallback for non-table layouts.
+              if (!dueAt || !releasedAt) {
+                for (const tag of Array.from(container.querySelectorAll("time[datetime]"))) {
+                  const parsed = canonicalDateTime(tag.getAttribute("datetime"));
+                  if (!parsed) continue;
+                  const label = (
+                    `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${tag.parentElement?.textContent || ""}`
+                  ).toLowerCase();
+                  if (!releasedAt && label.includes("release")) releasedAt = parsed;
+                  if (!lateDueAt && (label.includes("late due") || label.includes("hard due"))) lateDueAt = parsed;
+                  if (!dueAt && label.includes("due") && !label.includes("late")) dueAt = parsed;
+                }
+              }
+
+              if (!dueAt) {
+                const cells = Array.from(container.querySelectorAll("td,th,span,div"));
+                for (const cell of cells.slice(0, 24)) {
+                  const txt = cell.textContent?.trim() || "";
+                  if (!txt || txt.length > 180) continue;
+                  const parsed = parseDateTimesFromText(txt);
+                  if (parsed.length) {
+                    dueAt = parsed[0];
+                    break;
+                  }
+                }
+              }
+
+              return { releasedAt, dueAt, lateDueAt };
             };
             const getAttrFirst = (els, attr) => {
               for (const el of els) {
@@ -621,11 +719,12 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               const gradescopeAssignmentId = extractAssignmentId(container);
               if (!gradescopeAssignmentId) debug.missingId++;
 
-              const dueDate = extractDueDate(container);
-              if (!dueDate) debug.missingDue++;
+              const { releasedAt, dueAt, lateDueAt } = extractDateFields(container);
+              if (!dueAt) debug.missingDue++;
 
               const normTitle = normalizeTitle(title);
-              const gradescopeFingerprint = `${courseIdFromPath}|${normTitle}|${dueDate || "no-date"}`;
+              const dueDay = canonicalDueDate(dueAt);
+              const gradescopeFingerprint = `${courseIdFromPath}|${normTitle}|${dueDay || "no-date"}`;
               const { status, score, maxScore } = deriveStatusAndScores(container);
               if (debug.statusCounts[status] !== undefined) debug.statusCounts[status]++;
 
@@ -636,7 +735,10 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 status,
                 gradescopeAssignmentId,
                 gradescopeFingerprint,
-                dueDate,
+                dueDate: dueAt || null,
+                dueAt: dueAt || null,
+                releasedAt: releasedAt || null,
+                lateDueAt: lateDueAt || null,
               });
               debug.parsed++;
             }

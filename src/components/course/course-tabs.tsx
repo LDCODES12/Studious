@@ -527,17 +527,21 @@ export function CourseTabs({
     return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
   });
 
+  const deadlineFor = (a: Assignment) => a.availableUntil || a.dueDate;
+
   const isMissed = (a: Assignment) => {
     if (a.status === "submitted" || a.status === "graded") return false;
     if (a.missing) return true;
-    if (a.dueDate && new Date(a.dueDate) < now) return true;
+    const cutoff = deadlineFor(a);
+    if (cutoff && new Date(cutoff) < now) return true;
     return false;
   };
   const isNeedsAttention = (a: Assignment) => {
     if (a.status === "submitted" || a.status === "graded") return false;
     if (isMissed(a)) return false;
-    if (!a.dueDate) return false;
-    const hours = differenceInHours(parseISO(a.dueDate), now);
+    const cutoff = deadlineFor(a);
+    if (!cutoff) return false;
+    const hours = differenceInHours(parseISO(cutoff), now);
     return hours >= 0 && hours <= 48;
   };
 
