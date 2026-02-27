@@ -19,6 +19,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const mode: "day" | "week" = body.mode === "week" ? "week" : "day";
   const days = mode === "day" ? 1 : 7;
+  const tzOffset: number = typeof body.tzOffset === "number" ? body.tzOffset : 0;
 
   log.info("study plan request", { mode });
 
@@ -60,7 +61,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Run the multi-stage pipeline
-  const result = await runStudyPlanPipeline(session.user.id, mode, now, calendarEvents);
+  const result = await runStudyPlanPipeline(session.user.id, mode, now, calendarEvents, tzOffset);
 
   log.info("study plan generated", {
     mode,

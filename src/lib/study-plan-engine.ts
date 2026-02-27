@@ -44,7 +44,7 @@ export interface WorkItem {
   dueDate: string | null;
   hoursUntilDue: number | null;
   pointsPossible: number | null;
-  status: "overdue" | "due_today" | "due_soon" | "upcoming";
+  status: "due_today" | "due_soon" | "upcoming";
   estimatedMinutes: number;
   relatedTopics: string[];
   assignmentId: string | null;
@@ -148,7 +148,8 @@ export async function gatherWorkItems(
   userId: string,
   mode: "day" | "week",
   now: Date,
-  calendarEvents: CalendarEvent[] = []
+  calendarEvents: CalendarEvent[] = [],
+  tzOffsetMinutes: number = 0
 ): Promise<GatherResult> {
   const days = mode === "day" ? 1 : 7;
   const planEnd = addDays(startOfDay(now), days);
@@ -212,7 +213,7 @@ export async function gatherWorkItems(
           const dueDateStr = format(due, "yyyy-MM-dd");
 
           if (hoursUntilDue < 0 || a.status === "missing") {
-            status = "overdue";
+            continue; // Skip overdue — can't be submitted
           } else if (dueDateStr === todayStr) {
             status = "due_today";
           } else if (hoursUntilDue <= days * 24) {
@@ -310,13 +311,15 @@ export async function gatherWorkItems(
       const jsDays = meeting.days.map((d) => DAY_CODE_TO_JS[d]).filter((n) => n != null);
 
       for (let offset = 0; offset < days; offset++) {
-        const day = addDays(startOfDay(now), offset);
-        if (!jsDays.includes(day.getDay())) continue;
+        const day = startOfLocalDay(addDays(now, offset), tzOffsetMinutes);
+        // getDay() on a UTC date may not match local day — adjust
+        const localDayOfWeek = new Date(day.getTime() - tzOffsetMinutes * 60 * 1000).getUTCDay();
+        if (!jsDays.includes(localDayOfWeek)) continue;
 
         const [sh, sm] = meeting.startTime.split(":").map(Number);
         const [eh, em] = meeting.endTime.split(":").map(Number);
-        const start = setMinutes(setHours(day, sh), sm);
-        const end = setMinutes(setHours(day, eh), em);
+        const start = localTimeToUTC(day, sh, sm, tzOffsetMinutes);
+        const end = localTimeToUTC(day, eh, em, tzOffsetMinutes);
 
         if (isAfter(end, now)) {
           const label = meeting.label
@@ -356,7 +359,7 @@ export async function gatherWorkItems(
   busyBlocks.sort((a, b) => a.start.getTime() - b.start.getTime());
 
   // Compute available slots
-  const availableSlots = computeAvailableSlots(now, mode, busyBlocks);
+  const availableSlots = computeAvailableSlots(now, mode, busyBlocks, tzOffsetMinutes);
 
   return { workItems, busyBlocks, availableSlots };
 }
@@ -366,17 +369,18 @@ export async function gatherWorkItems(
 function computeAvailableSlots(
   now: Date,
   mode: "day" | "week",
-  busyBlocks: BusyBlock[]
+  busyBlocks: BusyBlock[],
+  tzOffsetMinutes: number = 0
 ): AvailableSlot[] {
   const days = mode === "day" ? 1 : 7;
   const slots: AvailableSlot[] = [];
 
   for (let offset = 0; offset < days; offset++) {
-    const day = addDays(startOfDay(now), offset);
+    const day = startOfLocalDay(addDays(now, offset), tzOffsetMinutes);
 
-    // Day boundaries
-    let dayStart = setHours(day, DAY_START_HOUR);
-    const dayEnd = setHours(day, DAY_END_HOUR);
+    // Day boundaries in local time
+    let dayStart = localTimeToUTC(day, DAY_START_HOUR, 0, tzOffsetMinutes);
+    const dayEnd = localTimeToUTC(day, DAY_END_HOUR, 0, tzOffsetMinutes);
 
     // If today, start from now (rounded up to next 15-min)
     if (offset === 0) {
@@ -428,6 +432,27 @@ function computeAvailableSlots(
   }
 
   return slots;
+}
+
+/**
+ * Create a Date representing a local time on a given day.
+ * tzOffsetMinutes = getTimezoneOffset() value (e.g., 300 for EST = UTC-5)
+ * "09:00" local with offset 300 → 14:00 UTC
+ */
+function localTimeToUTC(day: Date, hours: number, minutes: number, tzOffsetMinutes: number): Date {
+  const utcDay = new Date(day);
+  utcDay.setUTCHours(hours + Math.floor(tzOffsetMinutes / 60), minutes + (tzOffsetMinutes % 60), 0, 0);
+  return utcDay;
+}
+
+/**
+ * Get the start of day in local timezone terms.
+ * "Start of day" is midnight local = midnight + tzOffset in UTC.
+ */
+function startOfLocalDay(d: Date, tzOffsetMinutes: number): Date {
+  const utc = new Date(d.getTime() - tzOffsetMinutes * 60 * 1000);
+  const dayStart = startOfDay(utc);
+  return new Date(dayStart.getTime() + tzOffsetMinutes * 60 * 1000);
 }
 
 function roundUpTo15Min(d: Date): Date {
@@ -494,8 +519,7 @@ export function scoreAndPrioritize(
     .map((item) => {
       // Urgency (1-5)
       let urgency = 1;
-      if (item.status === "overdue") urgency = 5;
-      else if (item.hoursUntilDue !== null) {
+      if (item.hoursUntilDue !== null) {
         if (item.hoursUntilDue <= 6) urgency = 5;
         else if (item.hoursUntilDue <= 24) urgency = 4;
         else if (item.hoursUntilDue <= 48) urgency = 3;
@@ -716,11 +740,12 @@ export async function runStudyPlanPipeline(
   userId: string,
   mode: "day" | "week",
   now: Date,
-  calendarEvents: CalendarEvent[] = []
+  calendarEvents: CalendarEvent[] = [],
+  tzOffsetMinutes: number = 0
 ): Promise<StudyPlanResult> {
   // Stage 1: Gather
   const { workItems, busyBlocks, availableSlots } = await gatherWorkItems(
-    userId, mode, now, calendarEvents
+    userId, mode, now, calendarEvents, tzOffsetMinutes
   );
 
   // Load learning signals for scoring

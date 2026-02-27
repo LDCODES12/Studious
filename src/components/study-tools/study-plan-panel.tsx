@@ -65,7 +65,7 @@ export function StudyPlanPanel() {
       const res = await fetch("/api/study-plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode, tzOffset: new Date().getTimezoneOffset() }),
       });
 
       if (!res.ok) {
@@ -385,11 +385,6 @@ function ScheduleBlockCard({ block }: { block: StudySession }) {
           <span className="text-[11px] font-medium text-muted-foreground">
             {block.courseName}
           </span>
-          {block.item?.status === "overdue" && (
-            <span className="rounded-full bg-destructive/10 px-1.5 py-0.5 text-[9px] font-medium text-destructive">
-              OVERDUE
-            </span>
-          )}
           {block.item?.status === "due_today" && (
             <span className="rounded-full bg-orange-500/10 px-1.5 py-0.5 text-[9px] font-medium text-orange-600 dark:text-orange-400">
               DUE TODAY
