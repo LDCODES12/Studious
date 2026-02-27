@@ -47,12 +47,60 @@ interface GradescopeAssignment {
   maxScore: number | null;
   status: string;
   gradescopeAssignmentId: string | null;
+  gradescopeFingerprint?: string | null;
   dueDate: string | null;
 }
 
 interface GradescopeCourse {
   gradescopeCourseId: string;
   assignments: GradescopeAssignment[];
+}
+
+function normalizeTitle(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function canonicalDueDate(dueDate: string | null | undefined): string | null {
+  if (!dueDate) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return dueDate;
+  const parsed = new Date(dueDate);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function makeFingerprint(title: string, dueDate: string | null | undefined): string {
+  return `${normalizeTitle(title)}|${canonicalDueDate(dueDate) ?? "no-date"}`;
+}
+
+function isConcreteGsId(gsId: string | null | undefined): boolean {
+  return !!gsId && !gsId.startsWith("fp:") && !gsId.startsWith("synthetic:");
+}
+
+function sameDueDay(a: string | null | undefined, b: string | null | undefined): boolean {
+  const aa = canonicalDueDate(a);
+  const bb = canonicalDueDate(b);
+  if (!aa || !bb) return true;
+  return aa === bb;
+}
+
+function mapDbStatus(status: string | null | undefined): "graded" | "submitted" | "not_started" {
+  const s = (status ?? "").toLowerCase().trim();
+  if (s === "graded") return "graded";
+  if (s === "submitted" || s === "pending_review" || s === "ungraded") return "submitted";
+  return "not_started";
+}
+
+function isMissingAssignment(
+  status: string | null | undefined,
+  dbStatus: "graded" | "submitted" | "not_started",
+  dueDate: string | null | undefined,
+  now: Date,
+): boolean {
+  const s = (status ?? "").toLowerCase();
+  if (s === "missing" || s.includes("late due date passed") || s.includes("due date passed")) return true;
+  const due = canonicalDueDate(dueDate);
+  if (!due) return false;
+  return dbStatus === "not_started" && new Date(`${due}T23:59:59.999Z`) < now;
 }
 
 export async function POST(request: NextRequest) {
@@ -114,97 +162,144 @@ export async function POST(request: NextRequest) {
     let courseUpdated = 0;
     let courseCreated = 0;
 
-    // Normalize title for fuzzy assignment matching within a course
-    const normalize = (s: string) =>
-      s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    const localAssignments = [...matchedCourse.assignments];
+    const byGsId = new Map<string, (typeof localAssignments)[number]>();
+    const byFingerprint = new Map<string, (typeof localAssignments)[number]>();
+    for (const a of localAssignments) {
+      if (a.gradescopeId) byGsId.set(a.gradescopeId, a);
+      const fp = makeFingerprint(a.title, a.dueDate);
+      if (!byFingerprint.has(fp)) byFingerprint.set(fp, a);
+    }
 
     for (const gsAssignment of gsCourse.assignments) {
-      const { title, score, maxScore, status, gradescopeAssignmentId, dueDate } = gsAssignment;
+      const { title, score, maxScore, status, gradescopeAssignmentId, dueDate, gradescopeFingerprint } = gsAssignment;
+      if (!title?.trim()) continue;
 
-      const dbStatus =
-        status === "graded"
-          ? "graded"
-          : status === "submitted"
-            ? "submitted"
-            : "not_started";
-      const isMissing =
-        status === "missing" ||
-        (dbStatus === "not_started" && !!dueDate && new Date(dueDate) < now);
+      const incomingGsId = gradescopeAssignmentId?.trim() || null;
+      const fingerprint = gradescopeFingerprint?.trim() || makeFingerprint(title, dueDate);
+      const syntheticGsId = `fp:${fingerprint}`;
+      const dbStatus = mapDbStatus(status);
+      const isMissing = isMissingAssignment(status, dbStatus, dueDate, now);
 
-      // 1. Exact GS assignment ID match (best — already linked from a prior sync)
-      if (gradescopeAssignmentId) {
-        const existing = matchedCourse.assignments.find(
-          (a) => a.gradescopeId === gradescopeAssignmentId,
-        );
-        if (existing) {
-          const data: Record<string, unknown> = {};
-          if (score !== null && maxScore !== null) {
-            data.gradescopeScore = score;
-            data.gradescopeMaxScore = maxScore;
-          }
-          if (dueDate && !existing.dueDate) data.dueDate = dueDate;
-          data.status = dbStatus;
-          data.missing = isMissing;
-
-          await db.assignment.update({ where: { id: existing.id }, data });
-          updated++;
-          courseUpdated++;
-          continue;
-        }
-      }
-
-      // 2. Title match within the same course (safe — course is already confirmed)
-      const gsNorm = normalize(title);
-      const canvasMatch = matchedCourse.assignments.find(
-        (a) => !a.gradescopeId && normalize(a.title) === gsNorm,
-      );
-
-      if (canvasMatch) {
-        const data: Record<string, unknown> = {};
+      const applyUpdate = async (target: (typeof localAssignments)[number], attachId: string | null) => {
+        const data: Record<string, unknown> = {
+          status: dbStatus,
+          missing: isMissing,
+        };
         if (score !== null && maxScore !== null) {
           data.gradescopeScore = score;
           data.gradescopeMaxScore = maxScore;
         }
-        if (gradescopeAssignmentId) data.gradescopeId = gradescopeAssignmentId;
-        if (dueDate && !canvasMatch.dueDate) data.dueDate = dueDate;
-        data.status = dbStatus;
-        data.missing = isMissing;
+        if (dueDate && (!target.dueDate || !sameDueDay(target.dueDate, dueDate))) {
+          data.dueDate = canonicalDueDate(dueDate);
+        }
+        if (attachId && target.gradescopeId !== attachId) data.gradescopeId = attachId;
 
-        await db.assignment.update({ where: { id: canvasMatch.id }, data });
+        await db.assignment.update({ where: { id: target.id }, data });
+        if (data.dueDate) target.dueDate = String(data.dueDate);
+        target.status = dbStatus;
+        target.missing = isMissing;
+        if (attachId) {
+          target.gradescopeId = attachId;
+          byGsId.set(attachId, target);
+        }
+        byFingerprint.set(makeFingerprint(target.title, target.dueDate), target);
+      };
+
+      // 1) Exact GS ID / synthetic fingerprint ID match
+      let matched =
+        (incomingGsId ? byGsId.get(incomingGsId) : null) ??
+        byGsId.get(syntheticGsId);
+      if (matched) {
+        const attachId = incomingGsId || matched.gradescopeId || syntheticGsId;
+        await applyUpdate(matched, attachId);
         updated++;
         courseUpdated++;
         continue;
       }
 
-      // 3. No match → create a Gradescope-only assignment
-      if (!gradescopeAssignmentId) {
-        log.info("gs skip: no assignment ID", { title, course: matchedCourse.name });
-        continue;
-      }
-
-      const alreadyCreated = await db.assignment.findFirst({
-        where: { courseId, gradescopeId: gradescopeAssignmentId },
-        select: { id: true },
+      // 2) Deterministic title (+ optional date) match inside already-confirmed course
+      const gsNorm = normalizeTitle(title);
+      matched = localAssignments.find((a) => {
+        if (normalizeTitle(a.title) !== gsNorm) return false;
+        if (!sameDueDay(a.dueDate, dueDate)) return false;
+        if (!incomingGsId) return true;
+        return !isConcreteGsId(a.gradescopeId) || a.gradescopeId === incomingGsId;
       });
-      if (alreadyCreated) {
-        log.info("gs skip: already exists", { title, gsId: gradescopeAssignmentId, course: matchedCourse.name });
+      if (!matched) matched = byFingerprint.get(fingerprint);
+
+      if (matched) {
+        const attachId = incomingGsId || matched.gradescopeId || syntheticGsId;
+        await applyUpdate(matched, attachId);
+        updated++;
+        courseUpdated++;
         continue;
       }
 
-      await db.assignment.create({
+      // 3) Not in memory — verify DB to avoid duplicate creates
+      const dbIdToCheck = incomingGsId || syntheticGsId;
+      const existingById = await db.assignment.findFirst({
+        where: { courseId, gradescopeId: dbIdToCheck },
+        select: { id: true, title: true, dueDate: true, status: true, missing: true, score: true, gradescopeId: true },
+      });
+      if (existingById) {
+        await db.assignment.update({
+          where: { id: existingById.id },
+          data: {
+            status: dbStatus,
+            missing: isMissing,
+            dueDate: canonicalDueDate(dueDate) ?? existingById.dueDate,
+            gradescopeId: incomingGsId || existingById.gradescopeId,
+            ...(score !== null && maxScore !== null
+              ? { gradescopeScore: score, gradescopeMaxScore: maxScore }
+              : {}),
+          },
+        });
+        updated++;
+        courseUpdated++;
+        continue;
+      }
+
+      const existingByTitleDue = await db.assignment.findFirst({
+        where: { courseId, title, dueDate: canonicalDueDate(dueDate) },
+        select: { id: true, title: true, dueDate: true, status: true, missing: true, score: true, gradescopeId: true },
+      });
+      if (existingByTitleDue) {
+        await db.assignment.update({
+          where: { id: existingByTitleDue.id },
+          data: {
+            status: dbStatus,
+            missing: isMissing,
+            gradescopeId: incomingGsId || existingByTitleDue.gradescopeId || syntheticGsId,
+            ...(score !== null && maxScore !== null
+              ? { gradescopeScore: score, gradescopeMaxScore: maxScore }
+              : {}),
+          },
+        });
+        updated++;
+        courseUpdated++;
+        continue;
+      }
+
+      // 4) Create Gradescope-only assignment (including rows with no concrete GS ID)
+      const createdRow = await db.assignment.create({
         data: {
           courseId,
           title,
           type: inferType(title),
-          dueDate: dueDate ?? null,
+          dueDate: canonicalDueDate(dueDate) ?? null,
           status: dbStatus,
-          gradescopeId: gradescopeAssignmentId,
+          gradescopeId: incomingGsId || syntheticGsId,
           gradescopeScore: score,
           gradescopeMaxScore: maxScore,
           pointsPossible: maxScore,
           missing: isMissing,
         },
+        select: { id: true, title: true, score: true, gradescopeId: true, dueDate: true, status: true, missing: true },
       });
+      localAssignments.push(createdRow);
+      if (createdRow.gradescopeId) byGsId.set(createdRow.gradescopeId, createdRow);
+      byFingerprint.set(makeFingerprint(createdRow.title, createdRow.dueDate), createdRow);
       created++;
       courseCreated++;
     }

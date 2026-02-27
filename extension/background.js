@@ -443,109 +443,225 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
         const [courseResult] = await chrome.scripting.executeScript({
           target: { tabId: gsTabId },
           func: () => {
-            const rows = document.querySelectorAll(
-              "table.table--assignments tbody tr, table.js-assignmentsTable tbody tr, " +
-              "table.table tbody tr, table.js-assignmentTable tbody tr, " +
-              ".assignments tbody tr, [data-testid='assignment-row'], tbody tr"
-            );
             const results = [];
             const seen = new Set();
+            const debug = {
+              candidateContainers: 0,
+              parsed: 0,
+              skippedNoTitle: 0,
+              missingId: 0,
+              missingDue: 0,
+              statusCounts: { graded: 0, submitted: 0, missing: 0, unsubmitted: 0 },
+            };
+
+            const courseIdFromPath = window.location.pathname.match(/\/courses\/(\d+)/)?.[1] ?? "unknown";
+            const normalizeTitle = (s) =>
+              (s || "")
+                .toLowerCase()
+                .replace(/[^a-z0-9\s]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+            const canonicalDueDate = (value) => {
+              if (!value) return null;
+              try {
+                const d = new Date(value);
+                if (!Number.isFinite(d.getTime())) return null;
+                return d.toISOString().split("T")[0];
+              } catch {
+                return null;
+              }
+            };
+            const parseDueDateText = (text) => {
+              if (!text) return null;
+              const flat = text.replace(/\s+/g, " ").trim();
+              const monthRx = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[ap]m)?\b/i;
+              const slashRx = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?:\s+\d{1,2}:\d{2}\s*[ap]m?)?\b/i;
+              const m = flat.match(monthRx) || flat.match(slashRx);
+              if (!m) return null;
+              const fragment = m[0];
+              const withYear = /\b\d{4}\b/.test(fragment)
+                ? fragment
+                : `${fragment}, ${new Date().getFullYear()}`;
+              return canonicalDueDate(withYear);
+            };
+            const extractDueDate = (container) => {
+              const timeTags = Array.from(container.querySelectorAll("time[datetime]"));
+              let fallback = null;
+              for (const tag of timeTags) {
+                const dt = tag.getAttribute("datetime");
+                if (!dt) continue;
+                const label = (
+                  `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${tag.parentElement?.textContent || ""}`
+                ).toLowerCase();
+                if (label.includes("release")) continue;
+                if (label.includes("late due") || label.includes("hard due")) continue;
+                const parsed = canonicalDueDate(dt);
+                if (!parsed) continue;
+                if (label.includes("due")) return parsed;
+                if (!fallback) fallback = parsed;
+              }
+              if (fallback) return fallback;
+
+              const cells = Array.from(container.querySelectorAll("td,th,span,div"));
+              for (const cell of cells.slice(0, 24)) {
+                const txt = cell.textContent?.trim() || "";
+                if (!txt || txt.length > 140) continue;
+                const parsed = parseDueDateText(txt);
+                if (parsed) return parsed;
+              }
+              return null;
+            };
+            const getAttrFirst = (els, attr) => {
+              for (const el of els) {
+                const v = el?.getAttribute?.(attr);
+                if (v && String(v).trim()) return String(v).trim();
+              }
+              return null;
+            };
+            const extractAssignmentId = (container) => {
+              const candidateEls = [
+                container,
+                ...Array.from(container.querySelectorAll("[data-assignment-id],a[href*='/assignments/'],button.js-submitAssignment,button[data-assignment-id],th a,td a")),
+              ];
+              const fromData =
+                getAttrFirst(candidateEls, "data-assignment-id") ||
+                container?.dataset?.assignmentId ||
+                null;
+              if (fromData) return fromData;
+
+              const containerId = container?.id?.replace(/^assignment-/, "").trim();
+              if (containerId) return containerId;
+
+              for (const el of candidateEls) {
+                const href = el?.getAttribute?.("href") || "";
+                const m = href.match(/\/assignments\/(\d+)/);
+                if (m?.[1]) return m[1];
+                const onclick = el?.getAttribute?.("onclick") || "";
+                const mo = onclick.match(/assignment[^0-9]*(\d+)/i) || onclick.match(/(\d{5,})/);
+                if (mo?.[1]) return mo[1];
+              }
+              return null;
+            };
+            const extractTitle = (container) => {
+              const titleNode = container.querySelector(
+                "th a[href*='/assignments/'], td a[href*='/assignments/'], button.js-submitAssignment, button[data-assignment-id], [data-testid='assignment-title'], .table--primaryLink a"
+              );
+              const raw =
+                titleNode?.textContent?.trim() ||
+                container.querySelector("th, td, [role='cell']")?.textContent?.trim() ||
+                null;
+              if (!raw) return null;
+              const cleaned = raw.replace(/\s+/g, " ").trim();
+              return cleaned.length >= 2 ? cleaned : null;
+            };
+            const deriveStatusAndScores = (container) => {
+              const blob = (container.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+              const scoreMatch = blob.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/);
+              if (scoreMatch) {
+                return {
+                  status: "graded",
+                  score: parseFloat(scoreMatch[1]),
+                  maxScore: parseFloat(scoreMatch[2]),
+                };
+              }
+              const maxOnly = blob.match(/[-–]\s*\/\s*(\d+(?:\.\d+)?)/);
+              if (blob.includes("late due date passed") || blob.includes("due date passed") || blob.includes("missing")) {
+                return { status: "missing", score: null, maxScore: maxOnly ? parseFloat(maxOnly[1]) : null };
+              }
+              if (blob.includes("no submission") || blob.includes("not submitted") || blob.includes("unsubmitted")) {
+                return { status: "unsubmitted", score: null, maxScore: maxOnly ? parseFloat(maxOnly[1]) : null };
+              }
+              if (blob.includes("submitted") || blob.includes("ungraded") || blob.includes("pending review")) {
+                return { status: "submitted", score: null, maxScore: maxOnly ? parseFloat(maxOnly[1]) : null };
+              }
+              return { status: "unsubmitted", score: null, maxScore: maxOnly ? parseFloat(maxOnly[1]) : null };
+            };
+
+            const candidates = new Set();
+            const registerCandidate = (el) => {
+              if (!el) return;
+              candidates.add(el);
+            };
+            for (const el of document.querySelectorAll(
+              "table.table--assignments tbody tr, table.js-assignmentsTable tbody tr, " +
+              "table.table tbody tr, table.js-assignmentTable tbody tr, tr[role='row'], [data-testid='assignment-row']"
+            )) {
+              registerCandidate(el);
+            }
+            for (const trigger of document.querySelectorAll(
+              "button.js-submitAssignment, button[data-assignment-id], a[href*='/assignments/']"
+            )) {
+              registerCandidate(trigger.closest("tr,[role='row'],[data-testid='assignment-row'],li,article,div"));
+            }
+            debug.candidateContainers = candidates.size;
+
             const pushResult = (item) => {
               const key = item.gradescopeAssignmentId
                 ? `id:${item.gradescopeAssignmentId}`
-                : `title:${(item.title || "").toLowerCase()}`;
+                : `fp:${item.gradescopeFingerprint}`;
               if (!item.title || seen.has(key)) return;
               seen.add(key);
               results.push(item);
             };
-            for (const row of rows) {
-              const titleLink = row.querySelector("th a, td a[href*='/assignments/']");
-              const titleCell = row.querySelector("th, td:first-child");
-              const title = titleLink?.textContent?.trim() || titleCell?.textContent?.trim();
-              if (!title || title.length < 2) continue;
 
-              const gradescopeAssignmentId =
-                row.dataset?.assignmentId ||
-                row.id?.replace(/^assignment-/, "") ||
-                (titleLink ? titleLink.getAttribute("href")?.match(/\/assignments\/(\d+)/)?.[1] : null) ||
-                null;
-
-              const cells = Array.from(row.querySelectorAll("td"));
-              let score = null, maxScore = null, status = "unsubmitted";
-              for (const cell of cells) {
-                const ct = cell.textContent?.trim() ?? "";
-                const m = ct.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-                if (m) { score = parseFloat(m[1]); maxScore = parseFloat(m[2]); status = "graded"; break; }
-                const lower = ct.toLowerCase();
-                if (
-                  lower.includes("late due date passed") ||
-                  lower.includes("due date passed")
-                ) {
-                  status = "missing";
-                }
-                if (lower.includes("graded")) status = "graded";
-                else if (lower.includes("submitted") && status !== "graded") status = "submitted";
+            for (const container of candidates) {
+              const text = (container?.textContent || "").toLowerCase();
+              if (
+                !container?.querySelector?.("a[href*='/assignments/'],button[data-assignment-id],button.js-submitAssignment,time[datetime]") &&
+                !/(submission|submitted|no submission|due|graded|late due date passed|ungraded)/i.test(text)
+              ) {
+                continue;
+              }
+              const title = extractTitle(container);
+              if (!title) {
+                debug.skippedNoTitle++;
+                continue;
               }
 
-              // Extract due date from <time datetime="..."> elements in the row.
-              // Gradescope rows can have multiple time tags (released, due).
-              // The due date is typically the last one.
-              let dueDate = null;
-              const timeTags = row.querySelectorAll("time[datetime]");
-              if (timeTags.length > 0) {
-                const dt = timeTags[timeTags.length - 1].getAttribute("datetime");
-                if (dt) {
-                  try { dueDate = new Date(dt).toISOString().split("T")[0]; } catch { /* skip */ }
-                }
-              }
+              const gradescopeAssignmentId = extractAssignmentId(container);
+              if (!gradescopeAssignmentId) debug.missingId++;
 
-              pushResult({ title, score, maxScore, status, gradescopeAssignmentId, dueDate });
-            }
+              const dueDate = extractDueDate(container);
+              if (!dueDate) debug.missingDue++;
 
-            // Fallback pass: some Gradescope variants don't render standard table rows
-            // (or hide rows behind different wrappers). Scan assignment links directly.
-            for (const a of document.querySelectorAll("a[href*='/assignments/']")) {
-              const href = a.getAttribute("href") || "";
-              const m = href.match(/\/assignments\/(\d+)/);
-              const title = a.textContent?.trim();
-              if (!m || !title || title.length < 2) continue;
-
-              const container =
-                a.closest("tr,[data-testid='assignment-row'],li,div") || a.parentElement;
-              const blob = (container?.textContent || "").toLowerCase();
-              let status = "unsubmitted";
-              if (blob.includes("late due date passed") || blob.includes("due date passed")) {
-                status = "missing";
-              } else if (blob.includes("graded")) {
-                status = "graded";
-              } else if (blob.includes("submitted")) {
-                status = "submitted";
-              }
-
-              let dueDate = null;
-              const timeTags = container?.querySelectorAll?.("time[datetime]") || [];
-              if (timeTags.length > 0) {
-                const dt = timeTags[timeTags.length - 1].getAttribute("datetime");
-                if (dt) {
-                  try { dueDate = new Date(dt).toISOString().split("T")[0]; } catch { /* skip */ }
-                }
-              }
+              const normTitle = normalizeTitle(title);
+              const gradescopeFingerprint = `${courseIdFromPath}|${normTitle}|${dueDate || "no-date"}`;
+              const { status, score, maxScore } = deriveStatusAndScores(container);
+              if (debug.statusCounts[status] !== undefined) debug.statusCounts[status]++;
 
               pushResult({
                 title,
-                score: null,
-                maxScore: null,
+                score,
+                maxScore,
                 status,
-                gradescopeAssignmentId: m[1],
+                gradescopeAssignmentId,
+                gradescopeFingerprint,
                 dueDate,
               });
+              debug.parsed++;
             }
-            return results;
+            return { assignments: results, debug };
           },
         });
 
-        const assignments = courseResult?.result ?? [];
-        syncLog("gs_course", { cid, canvas: course.name, assignments: assignments.length });
+        const payload = Array.isArray(courseResult?.result)
+          ? { assignments: courseResult.result, debug: null }
+          : (courseResult?.result ?? { assignments: [], debug: null });
+        const assignments = Array.isArray(payload.assignments) ? payload.assignments : [];
+        syncLog("gs_course", {
+          cid,
+          canvas: course.name,
+          assignments: assignments.length,
+          scrape: payload.debug
+            ? {
+                candidates: payload.debug.candidateContainers,
+                parsed: payload.debug.parsed,
+                skippedNoTitle: payload.debug.skippedNoTitle,
+                missingId: payload.debug.missingId,
+                missingDue: payload.debug.missingDue,
+              }
+            : undefined,
+        });
         allCourses.push({ gradescopeCourseId: cid, assignments });
       } catch (err) {
         syncLog("gs_course_err", { cid, error: err?.message });
