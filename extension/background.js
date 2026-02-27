@@ -565,6 +565,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               let releasedAt = null;
               let dueAt = null;
               let lateDueAt = null;
+              let dueSource = null;
 
               const row = container.matches?.("tr,[role='row']") ? container : container.closest?.("tr,[role='row']");
               const idx = getColumnIndexes(container);
@@ -577,6 +578,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                   const due = parseDueFields(cells[idx.due]);
                   dueAt = due.dueAt;
                   lateDueAt = due.lateDueAt;
+                  if (dueAt) dueSource = "due_column";
                 }
               }
               // Robust structural fallback: most GS rows are Name | Status | Released | Due.
@@ -588,6 +590,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                   const due = parseDueFields(dueCell);
                   if (due.dueAt) dueAt = due.dueAt;
                   if (due.lateDueAt) lateDueAt = due.lateDueAt;
+                  if (dueAt) dueSource = "row_tail_due";
                   if (!releasedAt) releasedAt = parseReleasedAt(releasedCell);
                 }
               }
@@ -602,7 +605,10 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                   ).toLowerCase();
                   if (!releasedAt && label.includes("release")) releasedAt = parsed;
                   if (!lateDueAt && (label.includes("late due") || label.includes("hard due"))) lateDueAt = parsed;
-                  if (!dueAt && label.includes("due") && !label.includes("late")) dueAt = parsed;
+                  if (!dueAt && label.includes("due") && !label.includes("late")) {
+                    dueAt = parsed;
+                    dueSource = "time_label_due";
+                  }
                 }
               }
 
@@ -614,12 +620,13 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                   const parsed = parseDateTimesFromText(txt);
                   if (parsed.length) {
                     dueAt = parsed[0];
+                    dueSource = "text_fallback";
                     break;
                   }
                 }
               }
 
-              return { releasedAt, dueAt, lateDueAt };
+              return { releasedAt, dueAt, lateDueAt, dueSource };
             };
             const getAttrFirst = (els, attr) => {
               for (const el of els) {
@@ -731,7 +738,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               const gradescopeAssignmentId = extractAssignmentId(container);
               if (!gradescopeAssignmentId) debug.missingId++;
 
-              const { releasedAt, dueAt, lateDueAt } = extractDateFields(container);
+              const { releasedAt, dueAt, lateDueAt, dueSource } = extractDateFields(container);
               if (!dueAt) debug.missingDue++;
 
               const normTitle = normalizeTitle(title);
@@ -751,6 +758,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 dueAt: dueAt || null,
                 releasedAt: releasedAt || null,
                 lateDueAt: lateDueAt || null,
+                dueSource: dueSource || null,
               });
               debug.parsed++;
             }

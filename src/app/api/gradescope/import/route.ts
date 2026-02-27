@@ -52,6 +52,7 @@ interface GradescopeAssignment {
   dueAt?: string | null;
   releasedAt?: string | null;
   lateDueAt?: string | null;
+  dueSource?: string | null;
 }
 
 interface GradescopeCourse {
@@ -91,6 +92,24 @@ function parseDeadlineInstant(value: string | null | undefined): Date | null {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed;
+}
+
+function isHighConfidenceDueSource(source: string | null | undefined): boolean {
+  return source === "due_column" || source === "row_tail_due" || source === "time_label_due";
+}
+
+function shouldApplyDueDate(
+  existingDue: string | null | undefined,
+  incomingDue: string | null | undefined,
+  isCanvasBacked: boolean,
+  dueSource: string | null | undefined,
+): boolean {
+  if (!incomingDue) return false;
+  if (!existingDue) return true;
+  if (sameDueDay(existingDue, incomingDue)) return false;
+  if (!isCanvasBacked) return true;
+  // Repair previously-corrupted rows only when GS due extraction is high-confidence.
+  return isHighConfidenceDueSource(dueSource);
 }
 
 function makeFingerprint(title: string, dueDate: string | null | undefined): string {
@@ -219,6 +238,7 @@ export async function POST(request: NextRequest) {
         dueAt,
         releasedAt,
         lateDueAt,
+        dueSource,
         gradescopeFingerprint,
       } = gsAssignment;
       if (!title?.trim()) continue;
@@ -242,13 +262,8 @@ export async function POST(request: NextRequest) {
           data.gradescopeScore = score;
           data.gradescopeMaxScore = maxScore;
         }
-        if (normalizedDue) {
-          if (!target.dueDate) {
-            data.dueDate = normalizedDue;
-          } else if (!isCanvasBacked && !sameDueDay(target.dueDate, normalizedDue)) {
-            // GS-only rows can move when instructors edit deadlines in Gradescope.
-            data.dueDate = normalizedDue;
-          }
+        if (shouldApplyDueDate(target.dueDate, normalizedDue, isCanvasBacked, dueSource)) {
+          data.dueDate = normalizedDue;
         }
         if (normalizedReleased && (!target.availableFrom || !isCanvasBacked)) {
           data.availableFrom = normalizedReleased;
@@ -329,11 +344,9 @@ export async function POST(request: NextRequest) {
           data: {
             status: dbStatus,
             missing: isMissing,
-            dueDate: !existingById.dueDate
-              ? normalizedDue ?? existingById.dueDate
-              : (!isCanvasBacked && normalizedDue && !sameDueDay(existingById.dueDate, normalizedDue))
-                ? normalizedDue
-                : existingById.dueDate,
+            dueDate: shouldApplyDueDate(existingById.dueDate, normalizedDue, isCanvasBacked, dueSource)
+              ? normalizedDue
+              : existingById.dueDate,
             availableFrom: normalizedReleased && (!existingById.availableFrom || !isCanvasBacked)
               ? normalizedReleased
               : existingById.availableFrom,
