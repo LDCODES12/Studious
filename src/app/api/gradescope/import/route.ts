@@ -52,7 +52,6 @@ interface GradescopeAssignment {
   dueAt?: string | null;
   releasedAt?: string | null;
   lateDueAt?: string | null;
-  dueSource?: string | null;
 }
 
 interface GradescopeCourse {
@@ -94,22 +93,16 @@ function parseDeadlineInstant(value: string | null | undefined): Date | null {
   return parsed;
 }
 
-function isHighConfidenceDueSource(source: string | null | undefined): boolean {
-  return source === "due_column" || source === "row_tail_due" || source === "time_label_due";
-}
-
 function shouldApplyDueDate(
   existingDue: string | null | undefined,
   incomingDue: string | null | undefined,
   isCanvasBacked: boolean,
-  dueSource: string | null | undefined,
 ): boolean {
   if (!incomingDue) return false;
   if (!existingDue) return true;
   if (sameDueDay(existingDue, incomingDue)) return false;
-  if (!isCanvasBacked) return true;
-  // Repair previously-corrupted rows only when GS due extraction is high-confidence.
-  return isHighConfidenceDueSource(dueSource);
+  // In clean-sync flow Canvas due dates are authoritative for Canvas-backed rows.
+  return !isCanvasBacked;
 }
 
 function makeFingerprint(title: string, dueDate: string | null | undefined): string {
@@ -238,7 +231,6 @@ export async function POST(request: NextRequest) {
         dueAt,
         releasedAt,
         lateDueAt,
-        dueSource,
         gradescopeFingerprint,
       } = gsAssignment;
       if (!title?.trim()) continue;
@@ -262,7 +254,7 @@ export async function POST(request: NextRequest) {
           data.gradescopeScore = score;
           data.gradescopeMaxScore = maxScore;
         }
-        if (shouldApplyDueDate(target.dueDate, normalizedDue, isCanvasBacked, dueSource)) {
+        if (shouldApplyDueDate(target.dueDate, normalizedDue, isCanvasBacked)) {
           data.dueDate = normalizedDue;
         }
         if (normalizedReleased && (!target.availableFrom || !isCanvasBacked)) {
@@ -344,7 +336,7 @@ export async function POST(request: NextRequest) {
           data: {
             status: dbStatus,
             missing: isMissing,
-            dueDate: shouldApplyDueDate(existingById.dueDate, normalizedDue, isCanvasBacked, dueSource)
+            dueDate: shouldApplyDueDate(existingById.dueDate, normalizedDue, isCanvasBacked)
               ? normalizedDue
               : existingById.dueDate,
             availableFrom: normalizedReleased && (!existingById.availableFrom || !isCanvasBacked)
