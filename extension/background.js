@@ -488,13 +488,70 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
             };
             const parseDateFragment = (fragment) => {
               if (!fragment) return null;
-              const currentYear = new Date().getFullYear();
-              const withYear = /\b\d{4}\b/.test(fragment)
-                ? fragment
-                : /\bat\b/i.test(fragment)
-                  ? fragment.replace(/\s+at\s+/i, `, ${currentYear} at `)
-                  : `${fragment}, ${currentYear}`;
-              return canonicalDateTime(withYear);
+              const text = fragment.replace(/\s+/g, " ").trim();
+              const monthMap = {
+                jan: 0, january: 0,
+                feb: 1, february: 1,
+                mar: 2, march: 2,
+                apr: 3, april: 3,
+                may: 4,
+                jun: 5, june: 5,
+                jul: 6, july: 6,
+                aug: 7, august: 7,
+                sep: 8, sept: 8, september: 8,
+                oct: 9, october: 9,
+                nov: 10, november: 10,
+                dec: 11, december: 11,
+              };
+              const normalizeYear = (y) => {
+                if (!y) return new Date().getFullYear();
+                const n = Number(y);
+                if (!Number.isFinite(n)) return new Date().getFullYear();
+                if (y.length === 2) return 2000 + n;
+                return n;
+              };
+              const to24h = (hourRaw, ampmRaw) => {
+                if (!hourRaw) return 0;
+                let h = Number(hourRaw);
+                if (!Number.isFinite(h)) return 0;
+                const ampm = (ampmRaw || "").toLowerCase();
+                if (ampm === "pm" && h < 12) h += 12;
+                if (ampm === "am" && h === 12) h = 0;
+                return h;
+              };
+              const buildIso = (year, month, day, hour = 0, minute = 0) => {
+                const d = new Date(year, month, day, hour, minute, 0, 0);
+                if (!Number.isFinite(d.getTime())) return null;
+                return d.toISOString();
+              };
+
+              let m = text.match(
+                /^([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{2,4}))?(?:(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm]))?$/
+              );
+              if (m) {
+                const monKey = m[1].toLowerCase();
+                const month = monthMap[monKey];
+                if (month === undefined) return null;
+                const day = Number(m[2]);
+                const year = normalizeYear(m[3] || "");
+                const hour = to24h(m[4] || "", m[6] || "");
+                const minute = m[5] ? Number(m[5]) : 0;
+                return buildIso(year, month, day, hour, minute);
+              }
+
+              m = text.match(
+                /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm]))?$/
+              );
+              if (m) {
+                const month = Number(m[1]) - 1;
+                const day = Number(m[2]);
+                const year = normalizeYear(m[3] || "");
+                const hour = to24h(m[4] || "", m[6] || "");
+                const minute = m[5] ? Number(m[5]) : 0;
+                return buildIso(year, month, day, hour, minute);
+              }
+
+              return canonicalDateTime(text);
             };
             const parseDateTimesFromText = (text) => {
               const out = [];
