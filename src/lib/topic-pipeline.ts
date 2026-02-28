@@ -9,7 +9,8 @@
  *   2. CLASSIFY   — AI classifies Canvas modules as content/assessment/admin
  *   3. EXTRACT    — existing parseSyllabusTopics with expanded windowing
  *   3b. CALENDAR  — algorithmic lecture-to-date mapping (no AI)
- *   4. ENRICH     — AI combines ALL sources into one detailed timeline
+ *   3c. GROUP     — algorithmic: group per-lecture entries into calendar weeks
+ *   4. ENRICH     — AI adds module data + readings to pre-grouped weeks
  *   5. VALIDATE   — algorithmic sanity checks
  */
 
@@ -322,115 +323,194 @@ function buildLectureCalendar(
   return weeks;
 }
 
-// ─── Stage 4: ENRICH (replaces FUSE) ─────────────────────────────────────────
+// ─── Stage 3c: GROUP lectures into weeks (algorithmic) ──────────────────────
+
+/**
+ * If AI extracted individual lectures (e.g. 41 entries for 41 lectures),
+ * group them into calendar weeks using the lecture calendar.
+ * This is pure math — no AI needed.
+ */
+function groupLecturesIntoWeeks(
+  aiTopics: ParsedTopic[],
+  lectureCalendar: WeekDateRange[],
+  courseName: string,
+): ParsedTopic[] | null {
+  if (lectureCalendar.length === 0) return null;
+
+  // Heuristic: if we have significantly more AI entries than calendar weeks,
+  // the entries are likely per-lecture, not per-week
+  const avgLecturesPerWeek = lectureCalendar.reduce((s, w) => s + w.lectures.length, 0) / lectureCalendar.length;
+  if (aiTopics.length <= lectureCalendar.length * 1.3) {
+    // Already week-level or close — no grouping needed
+    return null;
+  }
+
+  console.log(`[pipeline] ${courseName}: Stage 3c grouping ${aiTopics.length} lecture entries into ${lectureCalendar.length} calendar weeks`);
+
+  // Build a map: lecture number → calendar week
+  const lectureToWeek = new Map<number, WeekDateRange>();
+  for (const week of lectureCalendar) {
+    for (const lec of week.lectures) {
+      lectureToWeek.set(lec.lectureNumber, week);
+    }
+  }
+
+  // Group AI topics by calendar week
+  const weekGroups = new Map<number, { week: WeekDateRange; topics: ParsedTopic[] }>();
+
+  for (const topic of aiTopics) {
+    // Match by weekNumber (which is lecture number for per-lecture extraction)
+    const calWeek = lectureToWeek.get(topic.weekNumber);
+    if (calWeek) {
+      if (!weekGroups.has(calWeek.weekNumber)) {
+        weekGroups.set(calWeek.weekNumber, { week: calWeek, topics: [] });
+      }
+      weekGroups.get(calWeek.weekNumber)!.topics.push(topic);
+    }
+  }
+
+  // Handle unmatched topics (lecture numbers beyond calendar range)
+  const matchedCount = [...weekGroups.values()].reduce((s, g) => s + g.topics.length, 0);
+  const unmatchedTopics = aiTopics.filter((t) => !lectureToWeek.has(t.weekNumber));
+
+  if (matchedCount === 0) return null; // no matches at all
+
+  // Build grouped weeks
+  const grouped: ParsedTopic[] = [];
+  const sortedWeekNums = [...weekGroups.keys()].sort((a, b) => a - b);
+
+  for (const wn of sortedWeekNums) {
+    const { week, topics } = weekGroups.get(wn)!;
+
+    // Combine all lecture topics into one week entry
+    const allTopics: string[] = [];
+    const allReadings: string[] = [];
+    const allNotes: string[] = [];
+
+    for (const t of topics) {
+      // Prefix with lecture label for detail preservation
+      const lecNum = t.weekNumber;
+      const prefix = `Lec ${lecNum}`;
+      if (t.topics && t.topics.length > 0) {
+        allTopics.push(`${prefix}: ${t.topics.join(", ")}`);
+      } else if (t.weekLabel) {
+        allTopics.push(`${prefix}: ${t.weekLabel}`);
+      }
+      if (t.readings) allReadings.push(...t.readings);
+      if (t.notes) allNotes.push(t.notes);
+    }
+
+    // Generate a week label from the primary theme
+    const firstTopic = topics[0];
+    const lastTopic = topics[topics.length - 1];
+    let weekLabel = firstTopic.weekLabel;
+    if (topics.length > 1 && lastTopic.weekLabel !== firstTopic.weekLabel) {
+      // Combine first and last topic themes
+      const first3Words = firstTopic.weekLabel.split(/\s+/).slice(0, 3).join(" ");
+      const last3Words = lastTopic.weekLabel.split(/\s+/).slice(0, 3).join(" ");
+      weekLabel = `${first3Words} to ${last3Words}`;
+    }
+
+    grouped.push({
+      weekNumber: wn,
+      weekLabel,
+      startDate: week.startDate,
+      topics: allTopics,
+      readings: [...new Set(allReadings)], // dedupe
+      notes: allNotes.length > 0 ? allNotes.join("; ") : undefined,
+      courseName: firstTopic.courseName,
+    });
+  }
+
+  // Append any unmatched topics to the last week
+  if (unmatchedTopics.length > 0 && grouped.length > 0) {
+    const lastWeek = grouped[grouped.length - 1];
+    for (const t of unmatchedTopics) {
+      if (t.topics && t.topics.length > 0) {
+        lastWeek.topics.push(`Lec ${t.weekNumber}: ${t.topics.join(", ")}`);
+      }
+      if (t.readings) lastWeek.readings.push(...t.readings);
+    }
+    console.log(`[pipeline] ${courseName}: Stage 3c appended ${unmatchedTopics.length} unmatched lectures to last week`);
+  }
+
+  console.log(`[pipeline] ${courseName}: Stage 3c produced ${grouped.length} grouped weeks from ${matchedCount} matched lectures`);
+  return grouped;
+}
+
+// ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
 
 interface EnrichInput {
   contentModules: { weekLabel: string; topics: string[]; readings: string[] }[];
-  aiTopics: ParsedTopic[];
-  lectureCalendar: WeekDateRange[];
-  classSchedule: ClassScheduleInfo | null;
-  termStartDate: string | null;
-  termEndDate: string | null;
-  assignments: { title: string; dueDate: string | null }[];
+  groupedTopics: ParsedTopic[];
   courseName: string;
 }
 
 async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
-  try {
-    const lecturesPerWeek = input.lectureCalendar.length > 0
-      ? Math.round(input.lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0) / input.lectureCalendar.length)
-      : 0;
+  if (input.contentModules.length === 0) {
+    // No modules to enrich with — grouped topics are already good
+    return input.groupedTopics;
+  }
 
+  try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-2024-08-06",
+      model: "gpt-4o-mini-2024-07-18",
       temperature: 0,
       seed: 1,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: `You build a detailed week-by-week course timeline by COMBINING all data sources.
-Your job is to PRESERVE MAXIMUM DETAIL from every source — never summarize or discard information.
+          content: `You enrich a course timeline with additional data from Canvas modules.
 
-INPUTS:
-1. SYLLABUS TOPICS: AI-extracted entries — may be one entry per WEEK or one entry per LECTURE. If entries have labels like "Lecture 1", "Lecture 2" etc., they are individual lectures that need to be grouped into calendar weeks.
-2. CANVAS MODULES: Module names and their content items from the course LMS (content modules only — admin/assessment already filtered)
-3. LECTURE CALENDAR: Pre-computed mapping of lecture numbers to exact calendar dates, grouped by week. Each week shows which lectures fall on which dates. USE THIS to match syllabus lecture numbers to dates and group them into weeks.
-4. CLASS SCHEDULE: Meeting pattern (e.g. MWF) and term dates
-5. ASSIGNMENTS: Titles with due dates for anchoring
+You will receive:
+1. GROUPED TIMELINE: Pre-grouped weekly topics with dates and per-lecture detail already assigned. This is the PRIMARY source — do not rearrange, regroup, or remove any entries.
+2. CANVAS MODULES: Module names and their content items (slides, handouts, worksheets, etc.)
 
-CRITICAL RULES:
-- COMBINE all sources. If the syllabus says "Lecture 1: Law of Mass Action" and a Canvas module says "Unit 1: Chemical Equilibria" with items ["Lecture 1 Notes", "Practice Problems"], include BOTH the detailed topic AND the module items.
-- When the syllabus has per-lecture entries, GROUP them into calendar weeks using the LECTURE CALENDAR. Example: if the lecture calendar says Week 1 has Lectures 1-3, then Week 1's topics array should have 3 entries — one per lecture, each preserving the full lecture detail.
-- Each week's "topics" array should list EVERY lecture's content for that week as separate items, e.g. ["Lec 1: Law of Mass Action, equilibrium intro", "Lec 2: Equilibrium constant, K values", "Lec 3: Le Chatelier's principle"]
-- ${lecturesPerWeek > 0 ? `This course has ~${lecturesPerWeek} lectures per week. Each week should contain ~${lecturesPerWeek} lecture topics.` : "Group content into calendar weeks based on available date information."}
-- NEVER summarize or collapse lecture details. "Lec 14: 1st Law of Thermodynamics, systems, energy transfer" is BETTER than "Thermodynamics".
-- If Canvas module items mention content not in the syllabus (additional resources, supplementary material), ADD them to readings.
-
-DATE ASSIGNMENT:
-- The LECTURE CALENDAR provides exact dates. Use them directly.
-- Match syllabus entries to the lecture calendar by number: syllabus "Lecture 1" = lecture calendar entry #1, "Lecture 14" = entry #14, etc. The calendar tells you which week each lecture falls in.
-- If no lecture numbers, use assignment due dates and term dates to anchor content.
-- startDate for each week = the Monday of that calendar week.
-
-WEEK LABELS:
-- Use the primary topic theme for that week, 3-7 words (e.g. "Chemical Equilibrium Fundamentals", "Acid-Base Equilibria and Buffers")
-- Never use generic labels like "Week 1" or "Introduction"
+YOUR JOB — ENRICH, never delete:
+- Match each Canvas module to the corresponding week(s) in the timeline by topic/unit overlap
+- ADD useful readings from modules (slides, handouts, worksheets, problem sets) to the week's readings array
+- If a module mentions content not in any week's topics, ADD it as a new topic entry
+- KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
+- KEEP all existing dates, weekNumbers, and weekLabels unchanged
 
 OUTPUT: { "weeks": [...] }
-Each week: { weekNumber, weekLabel, startDate (YYYY-MM-DD), topics (array — one entry per lecture or topic), readings (array), notes (optional), courseName }
+Same structure as input: { weekNumber, weekLabel, startDate, topics, readings, notes, courseName }
 
-IMPORTANT: Produce one entry per CALENDAR WEEK of the semester. The number of weeks should match the actual semester length (~14-16 weeks), NOT the number of lectures or units.`,
+If you cannot match a module to any week, skip it — do not force it.`,
         },
         {
           role: "user",
           content: JSON.stringify({
-            syllabusTopics: input.aiTopics.map((t) => ({
+            groupedTimeline: input.groupedTopics.map((t) => ({
               weekNumber: t.weekNumber,
               weekLabel: t.weekLabel,
               startDate: t.startDate,
               topics: t.topics,
               readings: t.readings,
               notes: t.notes,
+              courseName: t.courseName,
             })),
             canvasModules: input.contentModules,
-            lectureCalendar: input.lectureCalendar.map((w) => ({
-              weekNumber: w.weekNumber,
-              startDate: w.startDate,
-              lectures: w.lectures.map((l) => ({
-                lectureNumber: l.lectureNumber,
-                date: l.date,
-                day: l.dayOfWeek,
-              })),
-            })),
-            classSchedule: input.classSchedule
-              ? {
-                  meetings: input.classSchedule.meetings.map((m) => ({
-                    label: m.label,
-                    days: m.days,
-                    startTime: m.startTime,
-                    endTime: m.endTime,
-                  })),
-                  semesterStart: input.classSchedule.semesterStart,
-                  semesterEnd: input.classSchedule.semesterEnd,
-                }
-              : null,
-            termStartDate: input.termStartDate,
-            termEndDate: input.termEndDate,
-            assignments: input.assignments.filter((a) => a.dueDate).slice(0, 30),
-            courseName: input.courseName,
           }),
         },
       ],
-    }, { timeout: 60_000 });
+    }, { timeout: 45_000 });
 
     const content = response.choices[0]?.message?.content;
-    if (!content) return [];
+    if (!content) return input.groupedTopics;
     const parsed = JSON.parse(content);
-    return Array.isArray(parsed.weeks) ? parsed.weeks : [];
+    const enriched = Array.isArray(parsed.weeks) ? parsed.weeks as ParsedTopic[] : [];
+
+    // Safety: enriched must have roughly same number of weeks
+    if (enriched.length >= input.groupedTopics.length * 0.8 && enriched.length <= input.groupedTopics.length * 1.2) {
+      return enriched;
+    }
+    console.warn(`[pipeline] enrichTimeline produced ${enriched.length} weeks vs ${input.groupedTopics.length} input — keeping original`);
+    return input.groupedTopics;
   } catch (err) {
     console.warn(`[pipeline] enrichTimeline failed:`, err);
-    return [];
+    return input.groupedTopics;
   }
 }
 
@@ -542,10 +622,10 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   // ── STAGE 3: EXTRACT from syllabus ──
   const extraction = await extractTopicsExpanded(input.candidates, input.courseName);
-  const aiTopics = extraction.topics;
+  let aiTopics = extraction.topics;
   debug.stage3Weeks = aiTopics.length;
 
-  console.log(`[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} weeks from ${input.candidates.length} source(s)`);
+  console.log(`[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries from ${input.candidates.length} source(s)`);
 
   // ── STAGE 3b: BUILD LECTURE CALENDAR ──
   const lectureCalendar = buildLectureCalendar(
@@ -562,31 +642,33 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     );
   }
 
-  // ── STAGE 4: ENRICH ──
+  // ── STAGE 3c: GROUP lectures into weeks (algorithmic) ──
+  const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
+  if (grouped) {
+    aiTopics = grouped;
+  }
+
+  // ── STAGE 4: ENRICH with module data ──
   let finalTopics: ParsedTopic[];
   let moduleIdsToDelete: string[];
 
   if (aiTopics.length === 0 && contentModules.length === 0) {
-    // Nothing from either source
     finalTopics = [];
     moduleIdsToDelete = [];
     debug.fallbackUsed = true;
     console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no data from either source`);
 
   } else if (aiTopics.length === 0) {
-    // No syllabus topics — keep content modules, delete only admin/assessment
     finalTopics = [];
     moduleIdsToDelete = nonContentModuleIds;
     debug.fallbackUsed = true;
     console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no AI topics, keeping ${contentModules.length} content modules`);
 
   } else {
-    // We have AI topics — enrich with everything we have
-    const hasModules = contentModules.length > 0;
+    // Enrich grouped topics with module data
     console.log(
-      `[pipeline] ${input.courseName}: Stage 4 enriching ${aiTopics.length} AI topics` +
-      (hasModules ? ` + ${contentModules.length} content modules` : "") +
-      (lectureCalendar.length > 0 ? ` + ${lectureCalendar.length}-week lecture calendar` : ""),
+      `[pipeline] ${input.courseName}: Stage 4 enriching ${aiTopics.length} weeks` +
+      (contentModules.length > 0 ? ` with ${contentModules.length} content modules` : ""),
     );
 
     const enriched = await enrichTimeline({
@@ -595,28 +677,14 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
         topics: m.topics,
         readings: m.readings,
       })),
-      aiTopics,
-      lectureCalendar,
-      classSchedule: input.classSchedule,
-      termStartDate: input.termStartDate,
-      termEndDate: input.termEndDate,
-      assignments: input.assignments,
+      groupedTopics: aiTopics,
       courseName: input.courseName,
     });
 
-    if (enriched.length > 0) {
-      finalTopics = enriched;
-      // Delete ALL old module topics — the enriched timeline contains their data
-      moduleIdsToDelete = input.modules.map((m) => m.id);
-      debug.stage4OutputWeeks = enriched.length;
-      console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${enriched.length} enriched weeks`);
-    } else {
-      // Enrich failed — use AI topics as-is, keep content modules
-      console.warn(`[pipeline] ${input.courseName}: Stage 4 enrich returned 0 weeks, falling back to Stage 3`);
-      finalTopics = aiTopics;
-      moduleIdsToDelete = nonContentModuleIds;
-      debug.fallbackUsed = true;
-    }
+    finalTopics = enriched;
+    moduleIdsToDelete = input.modules.map((m) => m.id);
+    debug.stage4OutputWeeks = enriched.length;
+    console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${enriched.length} enriched weeks`);
   }
 
   // ── STAGE 5: VALIDATE ──
