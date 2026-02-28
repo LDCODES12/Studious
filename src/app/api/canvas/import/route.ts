@@ -1036,17 +1036,27 @@ export async function POST(request: NextRequest) {
         const pipelineResult = await runTopicPipeline(pipelineInput);
         const topics = pipelineResult.topics;
 
-        // Delete identified module topics
-        if (pipelineResult.moduleIdsToDelete.length > 0) {
+        // Only delete + replace when pipeline produced actual results
+        // NEVER delete existing data if the pipeline produced nothing — that destroys data
+        if (topics.length > 0) {
+          // Delete identified module topics (being replaced by enriched timeline)
+          if (pipelineResult.moduleIdsToDelete.length > 0) {
+            await db.courseTopic.deleteMany({
+              where: { id: { in: pipelineResult.moduleIdsToDelete } },
+            });
+          }
+
+          // Delete any prior AI-sourced topics (avoid duplicates)
+          await db.courseTopic.deleteMany({
+            where: { courseId: scCourseId, canvasModuleId: null },
+          });
+        } else if (pipelineResult.moduleIdsToDelete.length > 0 && pipelineResult.debug.fallbackUsed) {
+          // Pipeline explicitly identified non-content modules to delete (admin/assessment cleanup)
+          // but produced no new topics — only delete non-content modules
           await db.courseTopic.deleteMany({
             where: { id: { in: pipelineResult.moduleIdsToDelete } },
           });
         }
-
-        // Delete any prior AI-sourced topics (avoid duplicates)
-        await db.courseTopic.deleteMany({
-          where: { courseId: scCourseId, canvasModuleId: null },
-        });
 
         // Write new unified timeline
         if (topics.length > 0) {
