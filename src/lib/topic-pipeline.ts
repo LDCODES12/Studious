@@ -401,15 +401,9 @@ function groupLecturesIntoWeeks(
     }
 
     // Generate a week label from the primary theme
+    // Use first lecture's label — per-lecture detail is already in topics[]
     const firstTopic = topics[0];
-    const lastTopic = topics[topics.length - 1];
-    let weekLabel = firstTopic.weekLabel;
-    if (topics.length > 1 && lastTopic.weekLabel !== firstTopic.weekLabel) {
-      // Combine first and last topic themes
-      const first3Words = firstTopic.weekLabel.split(/\s+/).slice(0, 3).join(" ");
-      const last3Words = lastTopic.weekLabel.split(/\s+/).slice(0, 3).join(" ");
-      weekLabel = `${first3Words} to ${last3Words}`;
-    }
+    const weekLabel = firstTopic.weekLabel;
 
     grouped.push({
       weekNumber: wn,
@@ -738,8 +732,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   // ── STAGE 3b: BUILD LECTURE CALENDAR ──
   const lectureCalendar = buildLectureCalendar(
     input.classSchedule,
-    input.termStartDate ?? input.classSchedule?.semesterStart ?? null,
-    input.termEndDate ?? input.classSchedule?.semesterEnd ?? null,
+    input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
+    input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
   );
   debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
 
