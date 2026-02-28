@@ -229,16 +229,17 @@ export async function auditSchedule(
       {
         role: "system",
         content: `You are a schedule quality auditor. You will receive:
-1. EXTRACTED SCHEDULE — a JSON array of weekly schedule entries (possibly with errors)
+1. EXTRACTED SCHEDULE — a JSON array of schedule entries (possibly with errors). Entries may represent weeks OR individual lectures — preserve whichever granularity was extracted.
 2. ORIGINAL SOURCE — the text window used for extraction (up to 12k chars)
 
 Your job is to fix the extracted schedule:
 - Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
 - Fix vague weekLabels like "Regular Class" or "TBD" — use actual topic names from the source if you can find them.
-- Remove weeks that have no real topics or readings after cleanup.
+- Remove entries that have no real topics or readings after cleanup.
 - Ensure weekNumbers are sequential with no gaps — renumber if needed.
 - Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
 - Do NOT invent topics that aren't in the source. Only fix, never fabricate.
+- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks — that is handled by a downstream stage.
 
 Return JSON: { "weeks": [...] } using the exact same field structure. Return only the corrected array — no explanations, no extra fields.`,
       },
@@ -717,11 +718,11 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
     CRITICAL: Return an empty array ONLY if there are literally zero event names in the entire text.
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
-- Week-based: "Week 1: Introduction, Week 2: ..." → use directly
-- Lecture-based: "Lecture 1, Lecture 2, ..." → group 2-3 lectures per week
-- Date-based: Individual class session dates → calculate week numbers from the dates
-- Module/unit-based: Group modules into sequential weeks
-- Table format: Many syllabi use schedule tables — read every row
+- Week-based: "Week 1: Introduction, Week 2: ..." → use directly, one entry per week
+- Lecture-based: "Lecture 1, Lecture 2, ..." → extract EACH LECTURE as its own entry (weekNumber = lecture number). Do NOT group or collapse lectures together — output every single lecture separately so downstream processing can group them accurately using the class schedule.
+- Date-based: Individual class session dates → one entry per session, weekNumber = sequential
+- Module/unit-based: One entry per module/unit, weekNumber = sequential
+- Table format: Many syllabi use schedule tables — read every row, one entry per row
 - Calendar grid: 7-column Sun-Sat physical calendar → PDF garbles the structure; use proximity-scan to find named events near dates
 
 WHAT TO EXTRACT:

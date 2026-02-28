@@ -353,22 +353,23 @@ async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
 Your job is to PRESERVE MAXIMUM DETAIL from every source — never summarize or discard information.
 
 INPUTS:
-1. SYLLABUS TOPICS: AI-extracted topics (may be organized by week, lecture, or unit)
+1. SYLLABUS TOPICS: AI-extracted entries — may be one entry per WEEK or one entry per LECTURE. If entries have labels like "Lecture 1", "Lecture 2" etc., they are individual lectures that need to be grouped into calendar weeks.
 2. CANVAS MODULES: Module names and their content items from the course LMS (content modules only — admin/assessment already filtered)
-3. LECTURE CALENDAR: Pre-computed mapping of lecture numbers to exact calendar dates, grouped by week. Each week shows which lectures fall on which dates.
+3. LECTURE CALENDAR: Pre-computed mapping of lecture numbers to exact calendar dates, grouped by week. Each week shows which lectures fall on which dates. USE THIS to match syllabus lecture numbers to dates and group them into weeks.
 4. CLASS SCHEDULE: Meeting pattern (e.g. MWF) and term dates
 5. ASSIGNMENTS: Titles with due dates for anchoring
 
 CRITICAL RULES:
 - COMBINE all sources. If the syllabus says "Lecture 1: Law of Mass Action" and a Canvas module says "Unit 1: Chemical Equilibria" with items ["Lecture 1 Notes", "Practice Problems"], include BOTH the detailed topic AND the module items.
-- When multiple sources describe the same content at different detail levels, keep the MORE DETAILED version. If the syllabus has per-lecture topics, keep them per-lecture — do NOT collapse "Lecture 14: 1st Law", "Lecture 15: Adiabatic processes", "Lecture 16: Work by gas expansion" into a single vague "Thermodynamics" entry.
-- Each week's "topics" array should list EVERY lecture's content for that week as separate items, e.g. ["Lec 14: 1st Law of Thermodynamics, systems, energy transfer", "Lec 15: Adiabatic/isothermal processes, free expansion", "Lec 16: Work done by gas expansion, PV diagrams"]
+- When the syllabus has per-lecture entries, GROUP them into calendar weeks using the LECTURE CALENDAR. Example: if the lecture calendar says Week 1 has Lectures 1-3, then Week 1's topics array should have 3 entries — one per lecture, each preserving the full lecture detail.
+- Each week's "topics" array should list EVERY lecture's content for that week as separate items, e.g. ["Lec 1: Law of Mass Action, equilibrium intro", "Lec 2: Equilibrium constant, K values", "Lec 3: Le Chatelier's principle"]
 - ${lecturesPerWeek > 0 ? `This course has ~${lecturesPerWeek} lectures per week. Each week should contain ~${lecturesPerWeek} lecture topics.` : "Group content into calendar weeks based on available date information."}
+- NEVER summarize or collapse lecture details. "Lec 14: 1st Law of Thermodynamics, systems, energy transfer" is BETTER than "Thermodynamics".
 - If Canvas module items mention content not in the syllabus (additional resources, supplementary material), ADD them to readings.
 
 DATE ASSIGNMENT:
 - The LECTURE CALENDAR provides exact dates. Use them directly.
-- If the syllabus has lecture numbers (e.g. "Lecture 1", "Lecture 14"), match them to the lecture calendar dates.
+- Match syllabus entries to the lecture calendar by number: syllabus "Lecture 1" = lecture calendar entry #1, "Lecture 14" = entry #14, etc. The calendar tells you which week each lecture falls in.
 - If no lecture numbers, use assignment due dates and term dates to anchor content.
 - startDate for each week = the Monday of that calendar week.
 
