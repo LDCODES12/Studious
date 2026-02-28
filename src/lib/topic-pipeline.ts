@@ -582,6 +582,114 @@ function validateTimeline(
   return { topics, warnings };
 }
 
+// ─── Module-Only Fallback: organize modules into a timeline ─────────────────
+
+/**
+ * When AI extraction fails but we have content modules, parse unit/lecture
+ * structure from module labels and build a proper timeline.
+ *
+ * Handles patterns like:
+ *   "Unit 1 (Lectures 1-5) - Quiz on 1/29/26"  → unit 1, lectures 1-5
+ *   "Unit 7 (Lectures 20-23) - No Quiz"         → unit 7, lectures 20-23
+ *   "Module 3 - Thermodynamics"                  → unit 3
+ *   "Week 5: Acid-Base Equilibria"               → unit 5
+ */
+function organizeModulesAsTimeline(
+  contentModules: CanvasModuleInfo[],
+  lectureCalendar: WeekDateRange[],
+  courseName: string,
+): ParsedTopic[] {
+  if (contentModules.length === 0) return [];
+
+  // Parse unit number and lecture range from each module label
+  const parsed = contentModules.map((m) => {
+    const label = m.weekLabel;
+
+    // Extract unit/module/week number
+    const unitMatch = label.match(/\b(?:unit|module|week)\s*(\d+)/i);
+    const unitNum = unitMatch ? parseInt(unitMatch[1], 10) : null;
+
+    // Extract lecture range: "Lectures 1-5" or "Lectures 20-23"
+    const lecMatch = label.match(/lectures?\s*(\d+)\s*[-–]\s*(\d+)/i);
+    const lecStart = lecMatch ? parseInt(lecMatch[1], 10) : null;
+    const lecEnd = lecMatch ? parseInt(lecMatch[2], 10) : null;
+
+    // Clean label: remove quiz/exam dates and "No Quiz" suffixes
+    let cleanLabel = label
+      .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
+      .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
+      .trim();
+
+    // If label is just "Unit N", keep it simple
+    if (/^unit\s+\d+$/i.test(cleanLabel)) {
+      cleanLabel = `Unit ${unitNum}`;
+    }
+
+    return { module: m, unitNum, lecStart, lecEnd, cleanLabel };
+  });
+
+  // Sort by unit number (ascending), then by first lecture number
+  parsed.sort((a, b) => {
+    if (a.unitNum !== null && b.unitNum !== null) return a.unitNum - b.unitNum;
+    if (a.unitNum !== null) return -1;
+    if (b.unitNum !== null) return 1;
+    if (a.lecStart !== null && b.lecStart !== null) return a.lecStart - b.lecStart;
+    return 0;
+  });
+
+  // Filter useful readings (slides, worksheets, problem sets, handouts)
+  // Remove quiz blanks/keys, exam blanks/keys, and generic items
+  const USEFUL_READING_RX = /slide|worksheet|handout|problem\s+set|packet|review|derivation|video|reading/i;
+  const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope/i;
+
+  // Build lecture-to-calendar-week map for date assignment
+  const lectureToWeek = new Map<number, WeekDateRange>();
+  for (const week of lectureCalendar) {
+    for (const lec of week.lectures) {
+      lectureToWeek.set(lec.lectureNumber, week);
+    }
+  }
+
+  // Build timeline entries
+  const timeline: ParsedTopic[] = [];
+
+  for (let i = 0; i < parsed.length; i++) {
+    const p = parsed[i];
+
+    // Filter topics: remove generic Canvas item-type names
+    const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
+    const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
+
+    // Filter readings
+    const usefulReadings = p.module.readings.filter(
+      (r) => USEFUL_READING_RX.test(r) && !SKIP_READING_RX.test(r),
+    );
+
+    // Find date from lecture calendar
+    let startDate: string | undefined;
+    if (p.lecStart !== null) {
+      const calWeek = lectureToWeek.get(p.lecStart);
+      if (calWeek) startDate = calWeek.startDate;
+    }
+
+    timeline.push({
+      weekNumber: i + 1,
+      weekLabel: p.cleanLabel,
+      startDate,
+      topics: usefulTopics.length > 0
+        ? usefulTopics
+        : p.lecStart !== null && p.lecEnd !== null
+          ? [`Lectures ${p.lecStart}–${p.lecEnd}`]
+          : [],
+      readings: usefulReadings,
+      courseName,
+    });
+  }
+
+  console.log(`[pipeline] ${courseName}: module fallback organized ${contentModules.length} modules → ${timeline.length} timeline entries`);
+  return timeline;
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 export async function runTopicPipeline(input: PipelineInput): Promise<PipelineResult> {
@@ -659,10 +767,20 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no data from either source`);
 
   } else if (aiTopics.length === 0) {
-    finalTopics = [];
-    moduleIdsToDelete = nonContentModuleIds;
-    debug.fallbackUsed = true;
-    console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no AI topics, keeping ${contentModules.length} content modules`);
+    // No AI topics but we have content modules — organize them into a timeline
+    const organizedModules = organizeModulesAsTimeline(contentModules, lectureCalendar, input.courseName);
+    if (organizedModules.length > 0) {
+      finalTopics = organizedModules;
+      moduleIdsToDelete = input.modules.map((m) => m.id); // delete all old modules, we're replacing them
+      debug.stage4OutputWeeks = organizedModules.length;
+      debug.fallbackUsed = true;
+      console.log(`[pipeline] ${input.courseName}: Stage 4 module-only fallback → ${organizedModules.length} organized entries`);
+    } else {
+      finalTopics = [];
+      moduleIdsToDelete = nonContentModuleIds;
+      debug.fallbackUsed = true;
+      console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no AI topics, keeping ${contentModules.length} content modules`);
+    }
 
   } else {
     // Enrich grouped topics with module data

@@ -670,6 +670,7 @@ export async function POST(request: NextRequest) {
             where: { courseId: scCourseId, fileName: st.fileName },
             select: { id: true },
           });
+          const storedText = pdfText.slice(0, 60_000); // Syllabi need more — course outlines are often on the last pages
           if (!existing) {
             const material = await db.courseMaterial.create({
               data: {
@@ -678,7 +679,7 @@ export async function POST(request: NextRequest) {
                 detectedType: "syllabus",
                 summary: "Syllabus automatically imported from Canvas.",
                 relatedTopics: [],
-                rawText: pdfText.slice(0, 25_000),
+                rawText: storedText,
                 storedForAI: false,
               },
             });
@@ -691,6 +692,12 @@ export async function POST(request: NextRequest) {
                 WHERE id = ${material.id}
               `;
             } catch { /* embedding failure never blocks import */ }
+          } else {
+            // Update stored text if we have a longer version (previous truncation may have lost data)
+            await db.courseMaterial.update({
+              where: { id: existing.id },
+              data: { rawText: storedText },
+            });
           }
         } catch (matErr) {
           console.error(`[sync] ${c.name}: material save failed for ${st.fileName}:`, matErr);
@@ -796,6 +803,24 @@ export async function POST(request: NextRequest) {
         } catch (candErr) {
           console.error(`[sync] ${c.name}: candidate upsert failed:`, candErr);
         }
+      }
+
+      // Fallback: if client didn't send syllabus text, try stored CourseMaterial
+      if (candidates.length === 0) {
+        try {
+          const storedSyllabus = await db.courseMaterial.findMany({
+            where: { courseId: scCourseId, detectedType: "syllabus" },
+            select: { fileName: true, rawText: true },
+          });
+          for (const stored of storedSyllabus) {
+            if (stored.rawText && stored.rawText.length >= 100) {
+              const win = bestWindow(stored.rawText);
+              const score = scheduleScore(win);
+              candidates.push({ text: stored.rawText, score, label: `stored:${stored.fileName}` });
+              console.log(`[sync] ${c.name}: using stored syllabus text "${stored.fileName}" (${stored.rawText.length}c, score=${score.toFixed(3)})`);
+            }
+          }
+        } catch { /* non-fatal */ }
       }
 
       // Pick highest-scoring candidate; fall back to longest if all score 0
@@ -947,11 +972,17 @@ export async function POST(request: NextRequest) {
       }
 
       // ── d) AI topic extraction ─────────────────────────────────────────────
-      const aiStatus = !shouldRunAI ? `skip:has-ai-topics(${existingAiTopics})`
-        : syllabusText.length < 500 ? `skip:too-short(${syllabusText.length}c)`
-        : `run(${syllabusText.length}c)`;
+      // Count existing module topics to decide if pipeline should run for module cleanup
+      const existingModuleCount = await db.courseTopic.count({
+        where: { courseId: scCourseId, canvasModuleId: { not: null } },
+      });
+      const hasModulesToProcess = existingModuleCount > 0;
 
-      if (!shouldRunAI || syllabusText.length < 500) {
+      const aiStatus = !shouldRunAI ? `skip:has-ai-topics(${existingAiTopics})`
+        : syllabusText.length < 500 && !hasModulesToProcess ? `skip:too-short(${syllabusText.length}c)`
+        : `run(${syllabusText.length}c${hasModulesToProcess ? ',modules=' + existingModuleCount : ''})`;
+
+      if (!shouldRunAI || (syllabusText.length < 500 && !hasModulesToProcess)) {
         dbg.status = aiStatus;
         allCourseDebug.push(dbg);
         console.log(`[sync] ${c.name}: ${aiStatus} | sources: ${candidatesSummary}`);
