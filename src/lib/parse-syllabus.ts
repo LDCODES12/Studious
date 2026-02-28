@@ -760,3 +760,70 @@ If you cannot find an explicit schedule, return {"weeks": []}.`,
     return [];
   }
 }
+
+// ─── Shared Helpers (used by both route.ts and topic-pipeline.ts) ─────────────
+
+/**
+ * Scores how "schedule-dense" a text block is. Higher = more likely to contain
+ * the actual week/lecture schedule rather than policy boilerplate.
+ */
+export function scheduleScore(text: string): number {
+  if (!text || text.length < 50) return 0;
+  const t = text.toLowerCase();
+  const weekHits   = (t.match(/\b(week|lecture|class|session|module|experiment|lab|unit)\s*\d+/g) ?? []).length;
+  const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
+  const topicHits  = (t.match(/\b(introduction|overview|chapter|ch\.\s*\d|topic[s]?:|reading[s]?:)/g) ?? []).length;
+  const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
+  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 - policyHits * 1;
+  return raw / (text.length / 500);
+}
+
+/**
+ * Picks the densest schedule-content window from a long text.
+ * Evaluates 4 evenly-spaced windows and returns the one with highest scheduleScore.
+ */
+export function bestWindow(text: string, maxLen = 12_000): string {
+  if (text.length <= maxLen) return text;
+  const end = text.length - maxLen;
+  const offsets = [0, Math.floor(end / 3), Math.floor(end * 2 / 3), end];
+  let best = "";
+  let bestScore = -Infinity;
+  for (const offset of offsets) {
+    const slice = text.slice(offset, offset + maxLen);
+    const s = scheduleScore(slice);
+    if (s > bestScore) { bestScore = s; best = slice; }
+  }
+  return best;
+}
+
+/**
+ * Detect the structural format of a text blob so the AI knows how to parse it.
+ */
+export function detectSourceFormat(text: string): string {
+  const lines = text.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return "short text";
+  const dayNameHits = (text.match(
+    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/gi
+  ) ?? []).length;
+  const tabLines = lines.filter((l) => l.includes("\t")).length;
+  const hasTabStructure = lines.length > 0 && tabLines / lines.length > 0.15;
+  if (dayNameHits >= 5 && hasTabStructure) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
+  if (tabLines / lines.length > 0.25) return "tab-separated table";
+  const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
+  const shortLineRatio = lines.filter((l) => l.length < 120).length / lines.length;
+  if (avgLen < 90 && shortLineRatio > 0.65 && lines.length > 4)
+    return "structured schedule (one entry per line)";
+  const bulletRatio =
+    lines.filter((l) => /^[-•*·]\s/.test(l.trim())).length / lines.length;
+  if (bulletRatio > 0.25) return "bulleted list";
+  return "paragraph text";
+}
+
+/** Returns true if an AI-returned topic has at least one piece of content. */
+export function isContentfulTopic(t: ParsedTopic): boolean {
+  if (Array.isArray(t.topics) && t.topics.length > 0) return true;
+  if (Array.isArray(t.readings) && t.readings.length > 0) return true;
+  if (typeof t.notes === "string" && t.notes.trim().length > 0) return true;
+  if (typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)) return true;
+  return false;
+}

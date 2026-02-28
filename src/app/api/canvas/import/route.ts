@@ -4,17 +4,16 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
 import {
-  parseSyllabusTopics,
-    sanitizeSchedule,
-    renumberSequentialWeeks,
-    auditSchedule,
-  needsAudit,
   extractDropRules,
   extractClassSchedule,
   extractScheduleFromCalendarEvents,
   parseSyllabusText,
+  scheduleScore,
+  bestWindow,
+  detectSourceFormat,
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
+import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
 import { generateTasksForUser } from "@/lib/tasks";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
@@ -185,101 +184,6 @@ function inferType(
 function normalizeDueDate(iso: string | null): string | null {
   if (!iso) return null;
   return iso;
-}
-
-/**
- * Score a text blob for schedule-content density.
- * Higher = more likely to contain a real week-by-week schedule.
- * Used to pick the best source when multiple are available.
- */
-function scheduleScore(text: string): number {
-  if (!text || text.length < 50) return 0;
-  const t = text.toLowerCase();
-  // Strong indicators: explicit week/lecture/experiment/lab markers with numbers
-  const weekHits   = (t.match(/\b(week|lecture|class|session|module|experiment|lab|unit)\s*\d+/g) ?? []).length;
-  // Medium: date patterns (Jan 13, 1/13, 01/13)
-  const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
-  // Medium: topic indicators
-  const topicHits  = (t.match(/\b(introduction|overview|chapter|ch\.\s*\d|topic[s]?:|reading[s]?:)/g) ?? []).length;
-  // Penalty: heavy policy language — indicates admin-only content
-  const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
-
-  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 - policyHits * 1;
-  // Normalise per 500 chars of text — measures schedule density, not absolute count.
-  // Linear normalisation: a 10k-char policy page with the same hit count as a
-  // 1k-char schedule table correctly scores 10x lower.
-  return raw / (text.length / 500);
-}
-
-/**
- * Detect the structural format of a text blob so the AI knows how to parse it.
- * Returns a short description that is prepended to the AI prompt as [Source: ...].
- */
-function detectSourceFormat(text: string): string {
-  const lines = text.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length < 2) return "short text";
-
-  // Detect Sun-Mon-Tue-Wed-Thu-Fri-Sat calendar grid (common in lab/science syllabi)
-  // These appear as color-coded weekly grids with day-names as column headers.
-  // Match both full day names (Sunday) and common abbreviations (Sun, Su, Mo, Tu...).
-  // The PDF extractor preserves rows as tab-separated lines; the AI uses tabs to parse.
-  // REQUIRE both day-name hits AND actual tab characters: day names alone appear in any
-  // syllabus that says "Monday/Wednesday lectures" or lists office hours by day. Tabs
-  // confirm that assembleLines() actually preserved a physical grid's column structure.
-  const dayNameHits = (text.match(
-    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/gi
-  ) ?? []).length;
-  const tabLines = lines.filter((l) => l.includes("\t")).length;
-  const hasTabStructure = lines.length > 0 && tabLines / lines.length > 0.15;
-  if (dayNameHits >= 5 && hasTabStructure) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
-
-  if (tabLines / lines.length > 0.25) return "tab-separated table";
-  const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
-  const shortLineRatio = lines.filter((l) => l.length < 120).length / lines.length;
-  if (avgLen < 90 && shortLineRatio > 0.65 && lines.length > 4)
-    return "structured schedule (one entry per line)";
-  const bulletRatio =
-    lines.filter((l) => /^[-•*·]\s/.test(l.trim())).length / lines.length;
-  if (bulletRatio > 0.25) return "bulleted list";
-  return "paragraph text";
-}
-
-/** Returns true if an AI-returned topic has at least one piece of content.
- *  Also accepts date-only entries (seminar meeting dates) that have a valid
- *  ISO startDate even when topics/readings/notes are empty — those are real
- *  calendar markers worth keeping. */
-function isContentfulTopic(t: ParsedTopic): boolean {
-  if (Array.isArray(t.topics) && t.topics.length > 0) return true;
-  if (Array.isArray(t.readings) && t.readings.length > 0) return true;
-  if (typeof t.notes === "string" && t.notes.trim().length > 0) return true;
-  // Accept date-only sessions (e.g. seminars that only list meeting dates)
-  return typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate);
-}
-
-/**
- * For long texts, pick the 12k-char window most likely to contain the
- * weekly schedule rather than always slicing from the front.
- *
- * Many syllabi open with a multi-page policy preamble (grading, attendance,
- * late work, academic integrity) before the actual week-by-week table — a
- * 40k-char PDF can have its schedule starting at char 15k or later.
- *
- * We evaluate 4 evenly-spaced windows (0%, 33%, 66%, 100% from the end)
- * and return the one with the highest scheduleScore. If the text fits in
- * maxLen already, the full text is returned unchanged.
- */
-function bestWindow(text: string, maxLen = 12_000): string {
-  if (text.length <= maxLen) return text;
-  const end = text.length - maxLen;
-  const offsets = [0, Math.floor(end / 3), Math.floor(end * 2 / 3), end];
-  let best = "";
-  let bestScore = -Infinity;
-  for (const offset of offsets) {
-    const slice = text.slice(offset, offset + maxLen);
-    const s = scheduleScore(slice);
-    if (s > bestScore) { bestScore = s; best = slice; }
-  }
-  return best;
 }
 
 /** Strip HTML tags and decode common entities to plain text.
@@ -1055,231 +959,93 @@ export async function POST(request: NextRequest) {
       }
 
       try {
-        // Build a format hint for the AI based on the winning source
-        const bestFormat = detectSourceFormat(syllabusText);
+        // ── Topic Pipeline: classify modules, extract topics, fuse timeline ──
 
-        // ── Role 3: Extractor (merge-all-sources) ──────────────────────
-        // Try every candidate source and merge results by week number.
-        // Each source may cover different parts of the semester; merging
-        // ensures we don't lose weeks that only appear in one source.
-        const allGoodResults: { result: ReturnType<typeof sanitizeSchedule>; label: string; fmt: string; win: string }[] = [];
-        let usedLabel = bestLabel;
-        let usedFormat = bestFormat;
-        let usedWindow = bestWindow(best?.text ?? "");
-
-        for (let ci = 0; ci < candidates.length; ci++) {
-          const src    = candidates[ci];
-          const win    = bestWindow(src.text);
-          const fmt    = detectSourceFormat(src.text);
-          const hint   = `${src.label}, format: ${fmt}`;
-          const raw    = await parseSyllabusTopics(win, hint);
-          const result = sanitizeSchedule(raw).filter(isContentfulTopic);
-
-          const richWeeks = result.filter(
-            (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0
-          ).length;
-          const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
-
-          dbg.aiAttempts.push({
-            source: src.label,
-            format: fmt,
-            weeksTotal: result.length,
-            weeksRich: richWeeks,
-            accepted: isGoodResult,
-          });
-          console.log(`[sync] ${c.name} attempt[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
-
-          if (isGoodResult) {
-            allGoodResults.push({ result, label: src.label, fmt, win });
-          }
-        }
-
-        if (allGoodResults.length === 0) {
-          dbg.status = `ai-0-weeks(${candidates.length} sources tried)`;
-          allCourseDebug.push(dbg);
-          console.log(`[sync] ${c.name}: 0 contentful weeks from all ${candidates.length} source(s) | ${candidatesSummary}`);
-          return;
-        }
-
-        // Merge: start with the highest-coverage source, fill gaps from others
-        allGoodResults.sort((a, b) => b.result.length - a.result.length);
-        const merged = new Map<number, ReturnType<typeof sanitizeSchedule>[number]>();
-        const sourceLabels: string[] = [];
-        for (const { result, label, fmt, win } of allGoodResults) {
-          let contributed = false;
-          for (const week of result) {
-            const existing = merged.get(week.weekNumber);
-            if (!existing) {
-              merged.set(week.weekNumber, week);
-              contributed = true;
-            } else {
-              // Merge richer content into existing week
-              const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
-              const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
-              if (newRich > existingRich) {
-                merged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
-                contributed = true;
-              } else if (!existing.startDate && week.startDate) {
-                existing.startDate = week.startDate;
-                contributed = true;
-              }
-            }
-          }
-          if (contributed) sourceLabels.push(label);
-          if (sourceLabels.length === 1) { usedFormat = fmt; usedWindow = win; }
-        }
-
-        let topics = [...merged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
-        usedLabel = sourceLabels.length > 1
-          ? `merged(${sourceLabels.join("+")})`
-          : sourceLabels[0] ?? bestLabel;
-        console.log(`[sync] ${c.name}: merged ${allGoodResults.length} source(s) → ${topics.length} weeks from [${sourceLabels.join(", ")}]`);
-
-        // ── Role 5: Auditor ───────────────────────────────────────────────
-        // Second AI pass — only fires when the result looks partial or messy.
-        // Corrects week labels, removes hallucinated topics, fixes date order.
-        // Passes the same bestWindow the extractor used — critical for calendar grid
-        // PDFs where the calendar is in the middle/end, not the first 6k chars.
-        const preAuditCount = topics.length;
-        const auditFired = needsAudit(topics);
-        dbg.auditFired = auditFired;
-        if (auditFired) {
-          const audited = await auditSchedule(topics, usedWindow);
-          if (audited.length > 0) {
-            topics    = audited;
-            usedLabel = usedLabel + `+audited(${preAuditCount}→${audited.length})`;
-            dbg.auditDelta = `${preAuditCount}→${audited.length}`;
-          } else {
-            dbg.auditDelta = `${preAuditCount}→unchanged(audit returned 0)`;
-          }
-        }
-
-        // Renumber only after cross-source merge/audit so partial sources don't
-        // collide (e.g. a source that only covers weeks 9-14 should not be
-        // renumbered to 1-6 before merging).
-        topics = renumberSequentialWeeks(topics);
-
-        // Fetch existing module-based topics to preserve those covering
-        // weeks that no AI source extracted (merge, not replace).
+        // Fetch existing module-based topics
         const existingModuleTopics = await db.courseTopic.findMany({
           where: { courseId: scCourseId, canvasModuleId: { not: null } },
-          select: { id: true, weekNumber: true, weekLabel: true },
+          select: { id: true, weekNumber: true, weekLabel: true, topics: true, readings: true, canvasModuleId: true },
         });
 
-        const aiWeekNumbers = new Set(topics.map((t) =>
-          Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || 0)
-        ));
+        // Fetch class schedule (already stored earlier in this after() block)
+        const courseRecord = await db.course.findUnique({
+          where: { id: scCourseId },
+          select: { classSchedule: true },
+        });
 
-        // Suppress module carryover when AI coverage is already strong and the
-        // module labels look like non-weekly buckets (Unit/Orientation/Exam/etc).
-        const termWeeks = c.termStartAt && c.termEndAt
-          ? Math.max(
-              0,
-              Math.round(
-                (new Date(c.termEndAt).getTime() - new Date(c.termStartAt).getTime()) / (7 * 86400_000)
-              )
-            )
-          : null;
-        const aiDatedWeeks = topics.filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)).length;
-        let aiDatesLookWeekly = false;
-        if (aiDatedWeeks >= 6) {
-          const dated = topics
-            .filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate))
-            .map((t) => new Date(`${t.startDate}T00:00:00Z`).getTime())
-            .sort((a, b) => a - b);
-          let weeklyishGaps = 0;
-          for (let i = 1; i < dated.length; i++) {
-            const days = Math.round((dated[i] - dated[i - 1]) / 86400_000);
-            if (days >= 5 && days <= 10) weeklyishGaps++;
-          }
-          aiDatesLookWeekly = weeklyishGaps >= Math.max(4, dated.length - 2);
-        }
-        const strongAiCoverage = (termWeeks && termWeeks > 0
-          ? topics.length >= Math.max(8, Math.round(termWeeks * 0.6))
-          : topics.length >= 10)
-          || (topics.length >= 8 && aiDatedWeeks >= 6)
-          || (topics.length >= 8 && aiDatedWeeks >= 5 && aiDatesLookWeekly);
-        const nonWeeklyModuleRx = /\b(unit|orientation|welcome|exam|quiz|aktiv|discussion module|module)\b/i;
-        const nonWeeklyModuleCount = existingModuleTopics.filter((mt) => nonWeeklyModuleRx.test(mt.weekLabel)).length;
-        const nonWeeklyModuleRatio = existingModuleTopics.length > 0
-          ? nonWeeklyModuleCount / existingModuleTopics.length
-          : 0;
-        const suppressModuleCarryover = strongAiCoverage && nonWeeklyModuleRatio >= 0.4;
+        // Fetch assignment due dates for date anchoring
+        const courseAssignments = await db.assignment.findMany({
+          where: { courseId: scCourseId, dueDate: { not: null } },
+          select: { title: true, dueDate: true },
+          orderBy: { dueDate: "asc" },
+          take: 40,
+        });
 
-        if (existingModuleTopics.length > 0 || topics.length > 0) {
-          console.log(
-            `[sync-debug] ${c.name}: module-carryover decision ` +
-            JSON.stringify({
-              aiWeeks: topics.length,
-              aiDatedWeeks,
-              aiDatesLookWeekly,
-              termWeeks,
-              strongAiCoverage,
-              moduleTopics: existingModuleTopics.length,
-              nonWeeklyModuleCount,
-              nonWeeklyModuleRatio: Number(nonWeeklyModuleRatio.toFixed(2)),
-              suppressModuleCarryover,
-            })
-          );
-        }
+        const pipelineInput: PipelineInput = {
+          courseId: scCourseId,
+          courseName: c.name,
+          candidates: candidates.map((src) => ({ text: src.text, score: src.score, label: src.label })),
+          modules: existingModuleTopics.map((mt) => ({
+            id: mt.id,
+            canvasModuleId: mt.canvasModuleId!,
+            weekNumber: mt.weekNumber,
+            weekLabel: mt.weekLabel,
+            topics: mt.topics,
+            readings: mt.readings,
+          })),
+          classSchedule: (courseRecord?.classSchedule as PipelineInput["classSchedule"]) ?? null,
+          termStartDate: c.termStartAt ? c.termStartAt.split("T")[0] : null,
+          termEndDate: c.termEndAt ? c.termEndAt.split("T")[0] : null,
+          assignments: courseAssignments.map((a) => ({
+            title: a.title,
+            dueDate: a.dueDate,
+          })),
+        };
 
-        // Delete module topics either:
-        // 1) all of them when they are likely non-weekly scaffolding and AI is good, or
-        // 2) only the overlapping week numbers when module carryover is still useful.
-        const moduleIdsToDelete = suppressModuleCarryover
-          ? existingModuleTopics.map((mt) => mt.id)
-          : existingModuleTopics
-              .filter((mt) => aiWeekNumbers.has(mt.weekNumber))
-              .map((mt) => mt.id);
+        const pipelineResult = await runTopicPipeline(pipelineInput);
+        const topics = pipelineResult.topics;
 
-        if (moduleIdsToDelete.length > 0) {
+        // Delete identified module topics
+        if (pipelineResult.moduleIdsToDelete.length > 0) {
           await db.courseTopic.deleteMany({
-            where: { id: { in: moduleIdsToDelete } },
+            where: { id: { in: pipelineResult.moduleIdsToDelete } },
           });
         }
 
-        // Also delete any prior AI-sourced topics so we don't create duplicates
+        // Delete any prior AI-sourced topics (avoid duplicates)
         await db.courseTopic.deleteMany({
           where: { courseId: scCourseId, canvasModuleId: null },
         });
 
-        await db.courseTopic.createMany({
-          data: topics.map((t, i) => ({
-            courseId: scCourseId,
-            weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
-            weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
-            startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
-            topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
-            readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
-            notes: typeof t.notes === "string" ? t.notes : null,
-            canvasModuleId: null,
-          })),
-        });
+        // Write new unified timeline
+        if (topics.length > 0) {
+          await db.courseTopic.createMany({
+            data: topics.map((t, i) => ({
+              courseId: scCourseId,
+              weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
+              weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
+              startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
+              topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
+              readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
+              notes: typeof t.notes === "string" ? t.notes : null,
+              canvasModuleId: null,
+            })),
+          });
+        }
 
         aiTopicsCreated += topics.length;
         dbg.weeksWritten = topics.length;
-        dbg.status = "ok";
-
-        // Coverage warning: flag if week count seems low for a standard term
-        const keptModuleWeeks = existingModuleTopics.length - moduleIdsToDelete.length;
-        const totalWeeks = topics.length + keptModuleWeeks;
-        if (totalWeeks > 0 && totalWeeks < 10 && c.termEndAt && c.termStartAt) {
-          const termWeeks = Math.round(
-            (new Date(c.termEndAt).getTime() - new Date(c.termStartAt).getTime()) / (7 * 86400_000)
-          );
-          if (termWeeks >= 14 && totalWeeks < termWeeks * 0.6) {
-            dbg.coverageWarning = `${totalWeeks} weeks extracted for a ${termWeeks}-week term`;
-            console.warn(`[sync] ${c.name}: LOW COVERAGE — ${totalWeeks} weeks for ${termWeeks}-week term`);
-          }
-        }
+        dbg.status = topics.length > 0 ? "ok" : "pipeline-0-weeks";
 
         allCourseDebug.push(dbg);
         console.log(
-          `[sync] ${c.name}: OK ${topics.length} weeks written` +
-          (keptModuleWeeks > 0 ? ` + ${keptModuleWeeks} module weeks kept` : "") +
-          (suppressModuleCarryover ? ` modules-suppressed(nonweekly=${nonWeeklyModuleCount}/${existingModuleTopics.length})` : "") +
-          ` | src=${usedLabel} fmt=${usedFormat}` +
-          (auditFired ? ` audit(${dbg.auditDelta})` : ` audit-skipped`)
+          `[sync] ${c.name}: pipeline → ${topics.length} weeks` +
+          ` | deleted ${pipelineResult.moduleIdsToDelete.length} module topics` +
+          ` | stage2=${pipelineResult.debug.stage2Classifications.length} modules classified` +
+          ` | stage3=${pipelineResult.debug.stage3Weeks} ai weeks` +
+          ` | stage4=${pipelineResult.debug.stage4OutputWeeks} fused weeks` +
+          (pipelineResult.debug.fallbackUsed ? " | FALLBACK" : "") +
+          (pipelineResult.debug.stage5Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage5Warnings.length}` : "")
         );
       } catch (err) {
         dbg.status = "error";
