@@ -21,7 +21,7 @@ import {
   renumberSequentialWeeks,
   needsAudit,
   auditSchedule,
-  bestWindow,
+  scheduleScore,
   detectSourceFormat,
   isContentfulTopic,
   type ParsedTopic,
@@ -144,37 +144,112 @@ interface ExtractionResult {
   usedWindow: string;
 }
 
+/**
+ * Generate overlapping windows that cover the entire text.
+ * Each window is ~windowSize chars with ~overlap chars shared between adjacent windows.
+ * This ensures no content falls in a gap between windows.
+ */
+function generateWindows(text: string, windowSize: number, overlap: number): string[] {
+  if (text.length <= windowSize) return [text];
+
+  const windows: string[] = [];
+  const step = windowSize - overlap;
+  let offset = 0;
+
+  while (offset < text.length) {
+    const end = Math.min(offset + windowSize, text.length);
+    windows.push(text.slice(offset, end));
+    if (end >= text.length) break;
+    offset += step;
+  }
+
+  return windows;
+}
+
 async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
 ): Promise<ExtractionResult> {
   const FULL_TEXT_THRESHOLD = 30_000;
-  const LARGE_WINDOW_SIZE = 30_000; // bigger window captures more schedule content
+  const WINDOW_SIZE = 18_000;  // each window sent to AI
+  const WINDOW_OVERLAP = 3_000; // overlap between adjacent windows
 
   const allGoodResults: { result: ParsedTopic[]; label: string; fmt: string; win: string }[] = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
     const src = candidates[ci];
-
-    // Expanded windowing: send full text for PDFs under 30k chars
-    const win = src.text.length <= FULL_TEXT_THRESHOLD
-      ? src.text
-      : bestWindow(src.text, LARGE_WINDOW_SIZE);
-
     const fmt = detectSourceFormat(src.text);
-    const hint = `${src.label}, format: ${fmt}`;
-    const raw = await parseSyllabusTopics(win, hint);
-    const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
-    const richWeeks = result.filter(
-      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
-    ).length;
-    const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
+    if (src.text.length <= FULL_TEXT_THRESHOLD) {
+      // Short text: send full text in a single call (no change from before)
+      const hint = `${src.label}, format: ${fmt}`;
+      const raw = await parseSyllabusTopics(src.text, hint);
+      const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
-    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+      const richWeeks = result.filter(
+        (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+      ).length;
+      const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
 
-    if (isGoodResult) {
-      allGoodResults.push({ result, label: src.label, fmt, win });
+      console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt} full-text(${src.text.length}ch): ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+
+      if (isGoodResult) {
+        allGoodResults.push({ result, label: src.label, fmt, win: src.text });
+      }
+    } else {
+      // Long text: split into overlapping windows, extract from each in parallel, merge
+      const windows = generateWindows(src.text, WINDOW_SIZE, WINDOW_OVERLAP);
+      console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt} multi-window: ${src.text.length}ch → ${windows.length} windows of ~${WINDOW_SIZE}ch`);
+
+      // Run all window extractions in parallel
+      const windowResults = await Promise.all(
+        windows.map(async (win, wi) => {
+          const winFmt = detectSourceFormat(win);
+          const hint = `${src.label} (section ${wi + 1}/${windows.length}), format: ${winFmt}`;
+          const raw = await parseSyllabusTopics(win, hint);
+          const result = sanitizeSchedule(raw).filter(isContentfulTopic);
+
+          const richWeeks = result.filter(
+            (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+          ).length;
+
+          console.log(`[pipeline] ${courseName} extract[${ci}] window ${wi + 1}/${windows.length} (offset ${wi * (WINDOW_SIZE - WINDOW_OVERLAP)}): ${result.length} weeks, ${richWeeks} rich`);
+          return result;
+        }),
+      );
+
+      // Merge all window results: by weekNumber, keep richer entries
+      const windowMerged = new Map<number, ParsedTopic>();
+      for (const windowTopics of windowResults) {
+        for (const week of windowTopics) {
+          const existing = windowMerged.get(week.weekNumber);
+          if (!existing) {
+            windowMerged.set(week.weekNumber, week);
+          } else {
+            const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
+            const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
+            if (newRich > existingRich) {
+              windowMerged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
+            } else if (!existing.startDate && week.startDate) {
+              existing.startDate = week.startDate;
+            }
+          }
+        }
+      }
+
+      const result = [...windowMerged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
+      const richWeeks = result.filter(
+        (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+      ).length;
+      const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
+
+      console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} multi-window merged: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+
+      if (isGoodResult) {
+        // Use the window with the highest schedule score as the "representative" window for audit
+        const bestWin = windows.reduce((best, w) => scheduleScore(w) > scheduleScore(best) ? w : best);
+        allGoodResults.push({ result, label: `${src.label}(${windows.length}win)`, fmt, win: bestWin });
+      }
     }
   }
 
@@ -182,7 +257,7 @@ async function extractTopicsExpanded(
     return { topics: [], usedLabel: "none", usedWindow: "" };
   }
 
-  // Merge: start with highest-coverage source, fill gaps from others
+  // Merge across candidates: start with highest-coverage source, fill gaps from others
   allGoodResults.sort((a, b) => b.result.length - a.result.length);
   const merged = new Map<number, ParsedTopic>();
   const sourceLabels: string[] = [];
