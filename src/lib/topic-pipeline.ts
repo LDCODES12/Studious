@@ -148,8 +148,8 @@ async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
 ): Promise<ExtractionResult> {
-  const FULL_TEXT_THRESHOLD = 30_000;
-  const LARGE_WINDOW_SIZE = 20_000;
+  const FULL_TEXT_THRESHOLD = 50_000; // ~12.5k tokens — well within gpt-4o-mini's 128k context
+  const LARGE_WINDOW_SIZE = 30_000;
 
   const allGoodResults: { result: ParsedTopic[]; label: string; fmt: string; win: string }[] = [];
 
