@@ -275,7 +275,7 @@ async function runConversation(
 
   const fmt = detectSourceFormat(candidate.text);
   const hint = `${candidate.label}, format: ${fmt}`;
-  const userContent = `[Source: ${hint}]\n\n${win}`;
+  const userContent = `Extract the course schedule from this syllabus and return JSON.\n\n[Source: ${hint}]\n\n${win}`;
 
   // Calendar grid format → gpt-4o for spatial reasoning, everything else → gpt-4o-mini
   const isCalendarGrid = fmt.includes("weekly calendar grid");
@@ -328,7 +328,7 @@ async function runConversation(
       model: "gpt-4o-mini-2024-07-18",
       previous_response_id: turn1.id,
       instructions: GROUP_DATE_PROMPT,
-      input: JSON.stringify(scheduleInfo),
+      input: `Group these lectures into calendar weeks and return JSON.\n\n${JSON.stringify(scheduleInfo)}`,
       text: { format: { type: "json_object" } },
       temperature: 0,
       store: true,
@@ -357,7 +357,7 @@ async function runConversation(
           model: "gpt-4o-mini-2024-07-18",
           previous_response_id: turn2.id,
           instructions: ENRICH_PROMPT,
-          input: JSON.stringify({ canvasModules: moduleData }),
+          input: `Enrich the timeline with these Canvas modules and return JSON.\n\n${JSON.stringify({ canvasModules: moduleData })}`,
           text: { format: { type: "json_object" } },
           temperature: 0,
           store: true,
