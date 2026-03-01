@@ -1,21 +1,22 @@
 /**
- * Topic Pipeline: Multi-turn AI conversation for course content timelines.
+ * Topic Pipeline: Multi-stage AI enrichment for course content timelines.
  *
  * Philosophy: NEVER throw away data. Enhance and combine all sources.
  * Use as many AI calls as needed to produce the richest possible timeline.
  *
- * Architecture:
+ * Stages:
  *   1. COLLECT    — gather inputs (done by caller)
  *   2. CLASSIFY   — AI classifies Canvas modules as content/assessment/admin
- *   3. CONVERSATION — multi-turn Responses API:
- *      Turn 1: EXTRACT — per-lecture schedule from syllabus
- *      Turn 2: GROUP + DATE — group into calendar weeks, assign dates
- *      Turn 3: ENRICH — add module readings/content to matching weeks
- *   4. VALIDATE   — algorithmic sanity checks
+ *   3. EXTRACT    — existing parseSyllabusTopics with expanded windowing
+ *   3b. CALENDAR  — algorithmic lecture-to-date mapping (no AI)
+ *   3c. GROUP     — algorithmic: group per-lecture entries into calendar weeks
+ *   4. ENRICH     — AI adds module data + readings to pre-grouped weeks
+ *   5. VALIDATE   — algorithmic sanity checks
  */
 
 import OpenAI from "openai";
 import {
+  parseSyllabusTopics,
   sanitizeSchedule,
   renumberSequentialWeeks,
   needsAudit,
@@ -77,8 +78,8 @@ export interface PipelineDebug {
   stage2Classifications: { name: string; category: string }[];
   stage3Sources: number;
   stage3Weeks: number;
-  conversationTurnsReached: number;
-  conversationStateMode: "conversations_api" | "previous_response_id" | "none" | "mixed";
+  lectureCalendarDates: number;
+  stage4OutputWeeks: number;
   stage5Warnings: string[];
   fallbackUsed: boolean;
 }
@@ -135,500 +136,60 @@ Return JSON: { "classifications": [{ "name": "<exact module name>", "category": 
   }
 }
 
-// ─── System Prompts for Multi-Turn Conversation ─────────────────────────────
+// ─── Stage 3: EXTRACT ───────────────────────────────────────────────────────
 
-const EXTRACT_PROMPT = `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
-
-CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY written in the text as a schedule. If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITHOUT a clear topic schedule, return {"weeks": []}. Never invent or infer topics from the course name.
-
-A real schedule looks like:
-- "Week 1 (Jan 13): Introduction to Calculus, Limits"
-- "Lecture 3: The French Revolution, Ch. 4"
-- A table with dates/weeks in one column and topics in another
-
-Course policies text (return empty for this):
-- "Attendance Policy: ...", "Grading: 40% exams...", "Late work: -10% per day..."
-
-SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing the format.
-- "structured schedule (one entry per line)" → each line is likely one week/lecture row; parse carefully
-- "tab-separated table" → columns are tab-separated; first column is usually week/date, others are topic/readings
-- "html-list" → bullet or numbered list items are individual schedule entries
-- "paragraph text" → schedule may be embedded in prose; look harder for patterns
-- "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)" →
-    The PDF extractor preserves the calendar structure: each calendar ROW becomes ONE text line,
-    with TAB characters (\\t) separating the 7 day cells (Sun\\tMon\\tTue\\tWed\\tThu\\tFri\\tSat).
-    Primary strategy — use the tab structure:
-    1. Find the header line containing day names separated by tabs (Sun/Mon/.../Sat or full names).
-    2. Each subsequent line = one week. Split on \\t to get the 7 day cells.
-    3. Each cell may contain a date, an event name like "Experiment 1: Gas Constant", both, or be empty.
-    4. Collect all event names from the 7 cells of that line → that is ONE week entry.
-    5. Set startDate to the Monday date found in that line (YYYY-MM-DD).
-    6. weekLabel = the main event name(s) (e.g. "Experiment 1: Gas Constant").
-       Also add each event name to topics[] — e.g. topics: ["Experiment 1: Gas Constant"].
-    7. If a cell says "No experiment", "No class", "MLK Day" etc., record it as notes for that week.
-    Fallback (if tab structure is garbled or absent): scan for named events near dates using proximity.
-    CRITICAL: Return an empty array ONLY if there are literally zero event names in the entire text.
-
-IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
-- Week-based: "Week 1: Introduction, Week 2: ..." → use directly, one entry per week
-- Lecture-based: "Lecture 1, Lecture 2, ..." → extract EACH LECTURE as its own entry (weekNumber = lecture number). Do NOT group or collapse lectures together — output every single lecture separately so downstream processing can group them accurately using the class schedule.
-- Date-based: Individual class session dates → one entry per session, weekNumber = sequential
-- Module/unit-based: One entry per module/unit, weekNumber = sequential
-- Table format: Many syllabi use schedule tables — read every row, one entry per row
-- Calendar grid: 7-column Sun-Sat physical calendar → PDF garbles the structure; use proximity-scan to find named events near dates
-
-WHAT TO EXTRACT:
-- Every topic title, subtopic, and specific concept explicitly listed in the schedule
-- All readings: textbook chapters with numbers, papers, articles — include page ranges and chapter titles when listed
-- Lab or recitation topics if different from lecture content
-- The start date for each week if you can determine it from dates in the schedule
-- Class meeting dates even when NO topic names are listed (e.g. a seminar that only provides meeting dates) — include these sessions with notes = "No topics listed — class meeting date" so the date survives as a calendar marker. Set weekLabel to something like "Seminar Session 1", "Meeting 1", etc.
-
-WHAT NOT TO EXTRACT:
-- Graded items with due dates (homework, quizzes, exams, projects) — those are handled separately
-- Grading policies, office hours, late policy, attendance rules
-- Administrative dates (registration deadlines, drop dates)
-
-OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include EVERY week — do not truncate. Each week must have:
-- weekNumber: integer starting at 1
-- weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class"). For date-only sessions use descriptive labels like "Seminar Session 1".
-- startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
-- topics: array of ALL topics/concepts for this week
-- readings: array of ALL readings (chapter numbers, titles, page ranges, paper names)
-- notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
-- courseName: exact course name/code from the syllabus header
-
-If you cannot find an explicit schedule, return {"weeks": []}.`;
-
-const GROUP_DATE_PROMPT = `You are a course schedule organizer. You previously extracted a lecture-by-lecture or session-by-session schedule from a syllabus. Now you must GROUP those entries into calendar weeks and ASSIGN real dates.
-
-You will receive:
-- meetingPattern: the class meeting schedule (e.g. "Lecture MO WE FR 09:00-09:50" means 3 lectures per week on Monday, Wednesday, Friday)
-- semesterStartFromSchedule: semester start date extracted from the syllabus/class schedule (may be null)
-- semesterStartFromCanvas: semester start date from Canvas LMS term data (may be null)
-- semesterEndFromSchedule: semester end date from syllabus (may be null)
-- semesterEndFromCanvas: semester end date from Canvas (may be null)
-- assignmentDates: known graded item dates from Canvas — use these as anchoring points
-
-YOUR TASK:
-1. Determine the semester start date. Use the EARLIER of the two provided start dates (it is likely the actual first day of classes). If only one is available, use that.
-2. Count lecture days per week from the meeting pattern (e.g. MO WE FR = 3 lectures/week, TU TH = 2/week). If unknown, default to 3/week.
-3. Starting from Week 1 (the Monday of the week containing the semester start), map each lecture from your previous extraction to its calendar week. Lecture 1 falls on the first lecture day of the semester, Lecture 2 on the next lecture day, etc.
-4. Group all lectures falling in the same calendar week into ONE week entry.
-5. For each grouped week:
-   - weekNumber: sequential starting at 1
-   - startDate: the Monday of that calendar week (YYYY-MM-DD)
-   - topics: combine topics from all lectures in this week. Prefix each with its lecture number for detail (e.g. "Lec 1: Introduction to equilibrium, Law of Mass Action", "Lec 2: Equilibrium constant, manipulation of K values")
-   - readings: combine readings from all lectures (deduplicate exact matches)
-   - weekLabel: 3-7 word summary of the week's primary topic(s)
-   - notes: include break notes if applicable (e.g. "Spring Break — No Class")
-   - courseName: same as from your extraction
-
-IMPORTANT RULES:
-- Do NOT drop any lectures from your previous extraction. Every single lecture must appear in exactly one week.
-- Account for common academic breaks: if there is a week-long gap suggested by assignment dates or standard academic calendars (spring break typically in March), insert a break week.
-- If the semester end date is not available, assume a standard 15-16 week semester.
-- startDates must be chronological Mondays.
-- Use assignment due dates as reality checks — if Quiz 1 is on Jan 29, topics before that date should make sense chronologically.
-
-OUTPUT: Return JSON with { "weeks": [...] }
-Each week: { weekNumber, weekLabel, startDate, topics: [...], readings: [...], notes (optional), courseName }`;
-
-const ENRICH_PROMPT = `You enrich a course timeline with additional data from Canvas LMS modules.
-
-You will receive Canvas module data: module names and their content items (topics, readings like slides, handouts, worksheets, etc.)
-
-You have full context of the course timeline you just created. Your job:
-- Match each Canvas module to the corresponding week(s) by topic/unit overlap
-- ADD useful readings from modules (slides, handouts, worksheets, problem sets) to the matching week's readings array
-- If a module mentions content not covered in any week's topics, ADD it as a new topic entry in the most appropriate week
-- KEEP all existing topics, dates, weekNumbers, and weekLabels EXACTLY as they are — do not rename, summarize, reorder, or remove anything
-- If you cannot match a module to any week, skip it — do not force it
-
-OUTPUT: Return the complete updated timeline as JSON with { "weeks": [...] }
-Same structure: { weekNumber, weekLabel, startDate, topics, readings, notes (optional), courseName }`;
-
-// ─── Multi-Turn Conversation ────────────────────────────────────────────────
-
-interface ConversationResult {
-  extractedTopics: ParsedTopic[]; // Turn 1 result (for quality check)
-  finalTopics: ParsedTopic[];     // Best result from Turn 2 or 3
-  turnsReached: number;
-  label: string;
-  window: string; // for audit pass
-  stateMode: "conversations_api" | "previous_response_id";
+interface ExtractionResult {
+  topics: ParsedTopic[];
+  usedLabel: string;
+  usedWindow: string;
 }
 
-async function runConversation(
-  candidate: ScoredSource,
+async function extractTopicsExpanded(
+  candidates: ScoredSource[],
   courseName: string,
-  classSchedule: ClassScheduleInfo | null,
-  termStartDate: string | null,
-  termEndDate: string | null,
-  assignments: AssignmentDateInfo[],
-  contentModules: CanvasModuleInfo[],
-): Promise<ConversationResult> {
+): Promise<ExtractionResult> {
   const FULL_TEXT_THRESHOLD = 30_000;
   const LARGE_WINDOW_SIZE = 20_000;
 
-  const win = candidate.text.length <= FULL_TEXT_THRESHOLD
-    ? candidate.text
-    : bestWindow(candidate.text, LARGE_WINDOW_SIZE);
-
-  const fmt = detectSourceFormat(candidate.text);
-  const hint = `${candidate.label}, format: ${fmt}`;
-  const userContent = `Extract the course schedule from this syllabus and return JSON.\n\n[Source: ${hint}]\n\n${win}`;
-
-  // Calendar grid format → gpt-4o for spatial reasoning, everything else → gpt-4o-mini
-  const isCalendarGrid = fmt.includes("weekly calendar grid");
-  const model = isCalendarGrid ? "gpt-4o-2024-08-06" : "gpt-4o-mini-2024-07-18";
-
-  // Prefer durable Conversations API state. If unavailable, fall back to
-  // previous_response_id chaining so the flow still works.
-  let conversationId: string | null = null;
-  let stateMode: "conversations_api" | "previous_response_id" = "previous_response_id";
-  let previousResponseId: string | null = null;
-
-  const convT0 = Date.now();
-  try {
-    const conv = await openai.conversations.create({
-      metadata: {
-        pipeline: "topic-pipeline",
-        courseName: courseName.slice(0, 120),
-        sourceLabel: candidate.label.slice(0, 120),
-      },
-    }, { timeout: 10_000 });
-    conversationId = conv.id;
-    stateMode = "conversations_api";
-    console.log(`[pipeline] ${courseName} conversation created (${Date.now() - convT0}ms) id=${conv.id}`);
-  } catch (err) {
-    console.warn(`[pipeline] ${courseName} conversation create FAILED (${Date.now() - convT0}ms), falling back to previous_response_id:`, String(err));
-  }
-
-  let turnCounter = 0;
-  const runTurn = async (args: {
-    model: string;
-    instructions: string;
-    input: string;
-  }) => {
-    const turnNum = ++turnCounter;
-    const turnT0 = Date.now();
-    const stateParam = conversationId ? "conversation" : (previousResponseId ? "prev_response_id" : "none");
-    console.log(`[pipeline] ${courseName} Turn ${turnNum} START (model=${args.model}, state=${stateParam}, inputLen=${args.input.length})`);
-    const response = await openai.responses.create({
-      model: args.model,
-      ...(conversationId
-        ? { conversation: conversationId }
-        : (previousResponseId ? { previous_response_id: previousResponseId } : {})),
-      instructions: args.instructions,
-      input: args.input,
-      text: { format: { type: "json_object" } },
-      temperature: 0,
-      store: true,
-      truncation: "auto",
-    }, { timeout: 45_000 });
-    previousResponseId = response.id;
-    console.log(`[pipeline] ${courseName} Turn ${turnNum} DONE (${Date.now() - turnT0}ms, responseLen=${response.output_text.length}, id=${response.id})`);
-    return response;
-  };
-
-  // ── Turn 1: EXTRACT (with retry) ──
-  let turn1;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      turn1 = await runTurn({
-        model,
-        instructions: EXTRACT_PROMPT,
-        input: userContent,
-      });
-      break;
-    } catch (err: any) {
-      const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
-      if (attempt === 0) {
-        if (isLocked && conversationId) {
-          console.warn(`[pipeline] ${courseName} Turn 1 conversation_locked — abandoning conversation ${conversationId}, switching to previous_response_id mode`);
-          conversationId = null;
-          stateMode = "previous_response_id";
-        } else {
-          console.warn(`[pipeline] ${courseName} Turn 1 attempt 1 failed, retrying in 5s:`, err);
-        }
-        await new Promise((r) => setTimeout(r, 5000));
-      } else {
-        console.error(`[pipeline] ${courseName} Turn 1 failed after 2 attempts:`, err);
-        return {
-          extractedTopics: [],
-          finalTopics: [],
-          turnsReached: 0,
-          label: candidate.label,
-          window: win,
-          stateMode,
-        };
-      }
-    }
-  }
-
-  const turn1Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn1!.output_text);
-  const rawTopics = turn1Parsed?.weeks ?? [];
-  const extractedTopics = sanitizeSchedule(rawTopics).filter(isContentfulTopic);
-
-  console.log(`[pipeline] ${courseName} Turn 1 EXTRACT (${candidate.label}, ${model}): ${extractedTopics.length} entries from ${candidate.text.length}ch`);
-
-  if (extractedTopics.length === 0) {
-    return {
-      extractedTopics: [],
-      finalTopics: [],
-      turnsReached: 1,
-      label: candidate.label,
-      window: win,
-      stateMode,
-    };
-  }
-
-  // ── Turn 2: GROUP + DATE ──
-  try {
-    const lectureMeetings = classSchedule?.meetings
-      .filter((m) => m.label.toLowerCase() === "lecture") ?? [];
-
-    const meetingPattern = lectureMeetings.length > 0
-      ? lectureMeetings
-          .map((m) => `${m.label} ${m.days.join(" ")} ${m.startTime}-${m.endTime}`)
-          .join("; ")
-      : "unknown (assume MWF 3 lectures per week)";
-
-    const scheduleInfo = {
-      meetingPattern,
-      semesterStartFromSchedule: classSchedule?.semesterStart ?? null,
-      semesterStartFromCanvas: termStartDate,
-      semesterEndFromSchedule: classSchedule?.semesterEnd ?? null,
-      semesterEndFromCanvas: termEndDate,
-      assignmentDates: assignments
-        .filter((a) => a.dueDate)
-        .slice(0, 30)
-        .map((a) => ({ title: a.title, date: a.dueDate })),
-    };
-
-    const turn2 = await runTurn({
-      model: "gpt-4o-mini-2024-07-18",
-      instructions: GROUP_DATE_PROMPT,
-      input: `Group these lectures into calendar weeks and return JSON.\n\n${JSON.stringify(scheduleInfo)}`,
-    });
-
-    const turn2Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn2.output_text);
-    const groupedTopics = turn2Parsed?.weeks ?? [];
-
-    console.log(`[pipeline] ${courseName} Turn 2 GROUP+DATE: ${groupedTopics.length} weeks (from ${extractedTopics.length} lectures)`);
-
-    if (groupedTopics.length === 0) {
-      // Turn 2 failed to produce anything — fall back to Turn 1
-      return {
-        extractedTopics,
-        finalTopics: extractedTopics,
-        turnsReached: 2,
-        label: candidate.label,
-        window: win,
-        stateMode,
-      };
-    }
-
-    // ── Turn 3: ENRICH (only if content modules exist) ──
-    if (contentModules.length > 0) {
-      try {
-        const moduleData = contentModules.map((m) => ({
-          moduleName: m.weekLabel,
-          topics: m.topics,
-          readings: m.readings,
-        }));
-
-        const turn3 = await runTurn({
-          model: "gpt-4o-mini-2024-07-18",
-          instructions: ENRICH_PROMPT,
-          input: `Enrich the timeline with these Canvas modules and return JSON.\n\n${JSON.stringify({ canvasModules: moduleData })}`,
-        });
-
-        const turn3Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn3.output_text);
-        const enrichedTopics = turn3Parsed?.weeks ?? [];
-
-        console.log(`[pipeline] ${courseName} Turn 3 ENRICH: ${enrichedTopics.length} weeks (with ${contentModules.length} modules)`);
-
-        // Safety: enriched must have roughly same number of weeks as grouped
-        if (enrichedTopics.length >= groupedTopics.length * 0.8 && enrichedTopics.length <= groupedTopics.length * 1.2) {
-          return {
-            extractedTopics,
-            finalTopics: enrichedTopics,
-            turnsReached: 3,
-            label: candidate.label,
-            window: win,
-            stateMode,
-          };
-        }
-        console.warn(`[pipeline] ${courseName} Turn 3 produced ${enrichedTopics.length} weeks vs ${groupedTopics.length} grouped — using Turn 2 result`);
-      } catch (err: any) {
-        const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
-        if (isLocked && conversationId) {
-          console.warn(`[pipeline] ${courseName} Turn 3 conversation_locked — abandoning conversation, retrying with previous_response_id`);
-          conversationId = null;
-          stateMode = "previous_response_id";
-          try {
-            const turn3Retry = await runTurn({
-              model: "gpt-4o-mini-2024-07-18",
-              instructions: ENRICH_PROMPT,
-              input: `Enrich the timeline with these Canvas modules and return JSON.\n\n${JSON.stringify({ canvasModules: contentModules.map((m) => ({ moduleName: m.weekLabel, topics: m.topics, readings: m.readings })) })}`,
-            });
-            const retryParsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn3Retry.output_text);
-            const retryTopics = retryParsed?.weeks ?? [];
-            if (retryTopics.length >= groupedTopics.length * 0.8 && retryTopics.length <= groupedTopics.length * 1.2) {
-              return { extractedTopics, finalTopics: retryTopics, turnsReached: 3, label: candidate.label, window: win, stateMode };
-            }
-          } catch (retryErr) {
-            console.warn(`[pipeline] ${courseName} Turn 3 retry also failed:`, retryErr);
-          }
-        } else {
-          console.warn(`[pipeline] ${courseName} Turn 3 failed, using Turn 2 result:`, err);
-        }
-      }
-    }
-
-    // No modules or Turn 3 failed — use Turn 2 result
-    return {
-      extractedTopics,
-      finalTopics: groupedTopics,
-      turnsReached: contentModules.length > 0 ? 3 : 2,
-      label: candidate.label,
-      window: win,
-      stateMode,
-    };
-
-  } catch (err: any) {
-    const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
-    if (isLocked && conversationId) {
-      console.warn(`[pipeline] ${courseName} Turn 2 conversation_locked — abandoning conversation, retrying with previous_response_id`);
-      conversationId = null;
-      stateMode = "previous_response_id";
-      // Retry Turn 2 once without conversation
-      try {
-        const lectureMeetings = classSchedule?.meetings
-          .filter((m) => m.label.toLowerCase() === "lecture") ?? [];
-        const meetingPattern = lectureMeetings.length > 0
-          ? lectureMeetings.map((m) => `${m.label} ${m.days.join(" ")} ${m.startTime}-${m.endTime}`).join("; ")
-          : "unknown (assume MWF 3 lectures per week)";
-        const scheduleInfo = {
-          meetingPattern,
-          semesterStartFromSchedule: classSchedule?.semesterStart ?? null,
-          semesterStartFromCanvas: termStartDate,
-          semesterEndFromSchedule: classSchedule?.semesterEnd ?? null,
-          semesterEndFromCanvas: termEndDate,
-          assignmentDates: assignments.filter((a) => a.dueDate).slice(0, 30).map((a) => ({ title: a.title, date: a.dueDate })),
-        };
-        const turn2Retry = await runTurn({
-          model: "gpt-4o-mini-2024-07-18",
-          instructions: GROUP_DATE_PROMPT,
-          input: `Group these lectures into calendar weeks and return JSON.\n\n${JSON.stringify(scheduleInfo)}`,
-        });
-        const retryParsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn2Retry.output_text);
-        const retryTopics = retryParsed?.weeks ?? [];
-        if (retryTopics.length > 0) {
-          return { extractedTopics, finalTopics: retryTopics, turnsReached: 2, label: candidate.label, window: win, stateMode };
-        }
-      } catch (retryErr) {
-        console.warn(`[pipeline] ${courseName} Turn 2 retry also failed:`, retryErr);
-      }
-    } else {
-      console.warn(`[pipeline] ${courseName} Turn 2 failed, using Turn 1 result:`, err);
-    }
-    return {
-      extractedTopics,
-      finalTopics: extractedTopics,
-      turnsReached: 2,
-      label: candidate.label,
-      window: win,
-      stateMode,
-    };
-  }
-}
-
-function parseResponseJSON<T>(text: string): T | null {
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Candidate Loop + Merge ─────────────────────────────────────────────────
-
-async function extractAndGroupFromCandidates(
-  candidates: ScoredSource[],
-  courseName: string,
-  classSchedule: ClassScheduleInfo | null,
-  termStartDate: string | null,
-  termEndDate: string | null,
-  assignments: AssignmentDateInfo[],
-  contentModules: CanvasModuleInfo[],
-): Promise<{
-  topics: ParsedTopic[];
-  usedLabel: string;
-  turnsReached: number;
-  stateMode: "conversations_api" | "previous_response_id" | "none" | "mixed";
-}> {
-
-  const allGoodResults: {
-    result: ParsedTopic[];
-    label: string;
-    win: string;
-    turns: number;
-    stateMode: "conversations_api" | "previous_response_id";
-  }[] = [];
+  const allGoodResults: { result: ParsedTopic[]; label: string; fmt: string; win: string }[] = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
-    // Add delay between candidates to avoid OpenAI conversation_locked rate limits
-    if (ci > 0) {
-      console.log(`[pipeline] ${courseName} waiting 3s before candidate[${ci}]`);
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-    const conv = await runConversation(
-      candidates[ci], courseName, classSchedule,
-      termStartDate, termEndDate, assignments, contentModules,
-    );
+    const src = candidates[ci];
 
-    // Quality-check based on Turn 1 extraction
-    // A week is "rich" if it has topics, readings, or a meaningful weekLabel (not just "Week N")
-    const hasRichLabel = (label?: string) =>
-      !!label && label.trim().length > 0 && !/^(week|module|unit|lecture)\s*\d+$/i.test(label.trim());
-    const richWeeks = conv.extractedTopics.filter(
-      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0 || hasRichLabel(t.weekLabel),
+    // Expanded windowing: send full text for PDFs under 30k chars
+    const win = src.text.length <= FULL_TEXT_THRESHOLD
+      ? src.text
+      : bestWindow(src.text, LARGE_WINDOW_SIZE);
+
+    const fmt = detectSourceFormat(src.text);
+    const hint = `${src.label}, format: ${fmt}`;
+    const raw = await parseSyllabusTopics(win, hint);
+    const result = sanitizeSchedule(raw).filter(isContentfulTopic);
+
+    const richWeeks = result.filter(
+      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
     ).length;
-    const isGoodResult = conv.extractedTopics.length > 0 &&
-      (conv.extractedTopics.length < 4 || richWeeks / conv.extractedTopics.length >= 0.3);
+    const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
 
-    console.log(`[pipeline] ${courseName} candidate[${ci}] ${conv.label}: ${conv.extractedTopics.length} extracted, ${conv.finalTopics.length} final (${conv.turnsReached} turns) → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
-    if (isGoodResult && conv.finalTopics.length > 0) {
-      allGoodResults.push({
-        result: conv.finalTopics,
-        label: conv.label,
-        win: conv.window,
-        turns: conv.turnsReached,
-        stateMode: conv.stateMode,
-      });
+    if (isGoodResult) {
+      allGoodResults.push({ result, label: src.label, fmt, win });
     }
   }
 
   if (allGoodResults.length === 0) {
-    return { topics: [], usedLabel: "none", turnsReached: 0, stateMode: "none" };
+    return { topics: [], usedLabel: "none", usedWindow: "" };
   }
 
   // Merge: start with highest-coverage source, fill gaps from others
   allGoodResults.sort((a, b) => b.result.length - a.result.length);
   const merged = new Map<number, ParsedTopic>();
   const sourceLabels: string[] = [];
-  const stateModes = new Set<"conversations_api" | "previous_response_id">();
   let usedWindow = allGoodResults[0].win;
-  let maxTurns = 0;
 
-  for (const { result, label, turns, stateMode } of allGoodResults) {
+  for (const { result, label } of allGoodResults) {
     let contributed = false;
-    maxTurns = Math.max(maxTurns, turns);
-    stateModes.add(stateMode);
     for (const week of result) {
       const existing = merged.get(week.weekNumber);
       if (!existing) {
@@ -654,7 +215,7 @@ async function extractAndGroupFromCandidates(
     ? `merged(${sourceLabels.join("+")})`
     : sourceLabels[0] ?? "none";
 
-  // Audit pass — fires when result looks partial/messy
+  // Audit pass (same as before — fires when result looks partial/messy)
   if (needsAudit(topics)) {
     const audited = await auditSchedule(topics, usedWindow);
     if (audited.length > 0) {
@@ -664,14 +225,287 @@ async function extractAndGroupFromCandidates(
 
   topics = renumberSequentialWeeks(topics);
 
-  const mergedMode =
-    stateModes.size === 0
-      ? "none"
-      : stateModes.size === 1
-        ? [...stateModes][0]
-        : "mixed";
+  return { topics, usedLabel, usedWindow };
+}
 
-  return { topics, usedLabel, turnsReached: maxTurns, stateMode: mergedMode };
+// ─── Stage 3b: LECTURE CALENDAR (algorithmic) ────────────────────────────────
+
+interface LectureDate {
+  lectureNumber: number;
+  date: string; // YYYY-MM-DD
+  dayOfWeek: string; // "MO", "TU", etc.
+}
+
+interface WeekDateRange {
+  weekNumber: number;
+  startDate: string; // YYYY-MM-DD (Monday of week)
+  lectures: LectureDate[];
+}
+
+const DAY_CODES: Record<string, number> = {
+  SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
+};
+
+function buildLectureCalendar(
+  classSchedule: ClassScheduleInfo | null,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): WeekDateRange[] {
+  if (!classSchedule || !termStartDate) return [];
+
+  // Find lecture meetings (not labs, discussions, etc.)
+  const lectureMeetings = classSchedule.meetings.filter(
+    (m) => m.label.toLowerCase() === "lecture",
+  );
+  if (lectureMeetings.length === 0) return [];
+
+  // Get unique lecture days (e.g., [1, 3, 5] for MWF)
+  const lectureDayCodes = new Set<number>();
+  for (const m of lectureMeetings) {
+    for (const d of m.days) {
+      const code = DAY_CODES[d.toUpperCase()];
+      if (code !== undefined) lectureDayCodes.add(code);
+    }
+  }
+  const sortedDays = [...lectureDayCodes].sort((a, b) => a - b);
+  if (sortedDays.length === 0) return [];
+
+  const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  const start = new Date(termStartDate + "T12:00:00");
+  const end = termEndDate ? new Date(termEndDate + "T12:00:00") : new Date(start);
+  if (!termEndDate) {
+    end.setDate(end.getDate() + 16 * 7); // default 16 weeks
+  }
+
+  // Generate all lecture dates
+  const allLectures: LectureDate[] = [];
+  let lectureNum = 1;
+  const cursor = new Date(start);
+
+  while (cursor <= end) {
+    const dow = cursor.getDay();
+    if (lectureDayCodes.has(dow)) {
+      allLectures.push({
+        lectureNumber: lectureNum++,
+        date: cursor.toISOString().slice(0, 10),
+        dayOfWeek: DAY_NAMES[dow],
+      });
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  if (allLectures.length === 0) return [];
+
+  // Group lectures into calendar weeks (Mon-Sun)
+  const weekMap = new Map<string, LectureDate[]>();
+  for (const lec of allLectures) {
+    const lecDate = new Date(lec.date + "T12:00:00");
+    const dayOfWeek = lecDate.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(lecDate);
+    monday.setDate(monday.getDate() + mondayOffset);
+    const mondayStr = monday.toISOString().slice(0, 10);
+
+    if (!weekMap.has(mondayStr)) weekMap.set(mondayStr, []);
+    weekMap.get(mondayStr)!.push(lec);
+  }
+
+  const weeks: WeekDateRange[] = [];
+  const sortedMondays = [...weekMap.keys()].sort();
+  for (let i = 0; i < sortedMondays.length; i++) {
+    weeks.push({
+      weekNumber: i + 1,
+      startDate: sortedMondays[i],
+      lectures: weekMap.get(sortedMondays[i])!,
+    });
+  }
+
+  return weeks;
+}
+
+// ─── Stage 3c: GROUP lectures into weeks (algorithmic) ──────────────────────
+
+/**
+ * If AI extracted individual lectures (e.g. 41 entries for 41 lectures),
+ * group them into calendar weeks using the lecture calendar.
+ * This is pure math — no AI needed.
+ */
+function groupLecturesIntoWeeks(
+  aiTopics: ParsedTopic[],
+  lectureCalendar: WeekDateRange[],
+  courseName: string,
+): ParsedTopic[] | null {
+  if (lectureCalendar.length === 0) return null;
+
+  // Heuristic: if we have significantly more AI entries than calendar weeks,
+  // the entries are likely per-lecture, not per-week
+  const avgLecturesPerWeek = lectureCalendar.reduce((s, w) => s + w.lectures.length, 0) / lectureCalendar.length;
+  if (aiTopics.length <= lectureCalendar.length * 1.3) {
+    // Already week-level or close — no grouping needed
+    return null;
+  }
+
+  console.log(`[pipeline] ${courseName}: Stage 3c grouping ${aiTopics.length} lecture entries into ${lectureCalendar.length} calendar weeks`);
+
+  // Build a map: lecture number → calendar week
+  const lectureToWeek = new Map<number, WeekDateRange>();
+  for (const week of lectureCalendar) {
+    for (const lec of week.lectures) {
+      lectureToWeek.set(lec.lectureNumber, week);
+    }
+  }
+
+  // Group AI topics by calendar week
+  const weekGroups = new Map<number, { week: WeekDateRange; topics: ParsedTopic[] }>();
+
+  for (const topic of aiTopics) {
+    // Match by weekNumber (which is lecture number for per-lecture extraction)
+    const calWeek = lectureToWeek.get(topic.weekNumber);
+    if (calWeek) {
+      if (!weekGroups.has(calWeek.weekNumber)) {
+        weekGroups.set(calWeek.weekNumber, { week: calWeek, topics: [] });
+      }
+      weekGroups.get(calWeek.weekNumber)!.topics.push(topic);
+    }
+  }
+
+  // Handle unmatched topics (lecture numbers beyond calendar range)
+  const matchedCount = [...weekGroups.values()].reduce((s, g) => s + g.topics.length, 0);
+  const unmatchedTopics = aiTopics.filter((t) => !lectureToWeek.has(t.weekNumber));
+
+  if (matchedCount === 0) return null; // no matches at all
+
+  // Build grouped weeks
+  const grouped: ParsedTopic[] = [];
+  const sortedWeekNums = [...weekGroups.keys()].sort((a, b) => a - b);
+
+  for (const wn of sortedWeekNums) {
+    const { week, topics } = weekGroups.get(wn)!;
+
+    // Combine all lecture topics into one week entry
+    const allTopics: string[] = [];
+    const allReadings: string[] = [];
+    const allNotes: string[] = [];
+
+    for (const t of topics) {
+      // Prefix with lecture label for detail preservation
+      const lecNum = t.weekNumber;
+      const prefix = `Lec ${lecNum}`;
+      if (t.topics && t.topics.length > 0) {
+        allTopics.push(`${prefix}: ${t.topics.join(", ")}`);
+      } else if (t.weekLabel) {
+        allTopics.push(`${prefix}: ${t.weekLabel}`);
+      }
+      if (t.readings) allReadings.push(...t.readings);
+      if (t.notes) allNotes.push(t.notes);
+    }
+
+    // Generate a week label from the primary theme
+    // Use first lecture's label — per-lecture detail is already in topics[]
+    const firstTopic = topics[0];
+    const weekLabel = firstTopic.weekLabel;
+
+    grouped.push({
+      weekNumber: wn,
+      weekLabel,
+      startDate: week.startDate,
+      topics: allTopics,
+      readings: [...new Set(allReadings)], // dedupe
+      notes: allNotes.length > 0 ? allNotes.join("; ") : undefined,
+      courseName: firstTopic.courseName,
+    });
+  }
+
+  // Append any unmatched topics to the last week
+  if (unmatchedTopics.length > 0 && grouped.length > 0) {
+    const lastWeek = grouped[grouped.length - 1];
+    for (const t of unmatchedTopics) {
+      if (t.topics && t.topics.length > 0) {
+        lastWeek.topics.push(`Lec ${t.weekNumber}: ${t.topics.join(", ")}`);
+      }
+      if (t.readings) lastWeek.readings.push(...t.readings);
+    }
+    console.log(`[pipeline] ${courseName}: Stage 3c appended ${unmatchedTopics.length} unmatched lectures to last week`);
+  }
+
+  console.log(`[pipeline] ${courseName}: Stage 3c produced ${grouped.length} grouped weeks from ${matchedCount} matched lectures`);
+  return grouped;
+}
+
+// ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
+
+interface EnrichInput {
+  contentModules: { weekLabel: string; topics: string[]; readings: string[] }[];
+  groupedTopics: ParsedTopic[];
+  courseName: string;
+}
+
+async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
+  if (input.contentModules.length === 0) {
+    // No modules to enrich with — grouped topics are already good
+    return input.groupedTopics;
+  }
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini-2024-07-18",
+      temperature: 0,
+      seed: 1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You enrich a course timeline with additional data from Canvas modules.
+
+You will receive:
+1. GROUPED TIMELINE: Pre-grouped weekly topics with dates and per-lecture detail already assigned. This is the PRIMARY source — do not rearrange, regroup, or remove any entries.
+2. CANVAS MODULES: Module names and their content items (slides, handouts, worksheets, etc.)
+
+YOUR JOB — ENRICH, never delete:
+- Match each Canvas module to the corresponding week(s) in the timeline by topic/unit overlap
+- ADD useful readings from modules (slides, handouts, worksheets, problem sets) to the week's readings array
+- If a module mentions content not in any week's topics, ADD it as a new topic entry
+- KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
+- KEEP all existing dates, weekNumbers, and weekLabels unchanged
+
+OUTPUT: { "weeks": [...] }
+Same structure as input: { weekNumber, weekLabel, startDate, topics, readings, notes, courseName }
+
+If you cannot match a module to any week, skip it — do not force it.`,
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            groupedTimeline: input.groupedTopics.map((t) => ({
+              weekNumber: t.weekNumber,
+              weekLabel: t.weekLabel,
+              startDate: t.startDate,
+              topics: t.topics,
+              readings: t.readings,
+              notes: t.notes,
+              courseName: t.courseName,
+            })),
+            canvasModules: input.contentModules,
+          }),
+        },
+      ],
+    }, { timeout: 45_000 });
+
+    const content = response.choices[0]?.message?.content;
+    if (!content) return input.groupedTopics;
+    const parsed = JSON.parse(content);
+    const enriched = Array.isArray(parsed.weeks) ? parsed.weeks as ParsedTopic[] : [];
+
+    // Safety: enriched must have roughly same number of weeks
+    if (enriched.length >= input.groupedTopics.length * 0.8 && enriched.length <= input.groupedTopics.length * 1.2) {
+      return enriched;
+    }
+    console.warn(`[pipeline] enrichTimeline produced ${enriched.length} weeks vs ${input.groupedTopics.length} input — keeping original`);
+    return input.groupedTopics;
+  } catch (err) {
+    console.warn(`[pipeline] enrichTimeline failed:`, err);
+    return input.groupedTopics;
+  }
 }
 
 // ─── Stage 5: VALIDATE ──────────────────────────────────────────────────────
@@ -744,8 +578,19 @@ function validateTimeline(
 
 // ─── Module-Only Fallback: organize modules into a timeline ─────────────────
 
+/**
+ * When AI extraction fails but we have content modules, parse unit/lecture
+ * structure from module labels and build a proper timeline.
+ *
+ * Handles patterns like:
+ *   "Unit 1 (Lectures 1-5) - Quiz on 1/29/26"  → unit 1, lectures 1-5
+ *   "Unit 7 (Lectures 20-23) - No Quiz"         → unit 7, lectures 20-23
+ *   "Module 3 - Thermodynamics"                  → unit 3
+ *   "Week 5: Acid-Base Equilibria"               → unit 5
+ */
 function organizeModulesAsTimeline(
   contentModules: CanvasModuleInfo[],
+  lectureCalendar: WeekDateRange[],
   courseName: string,
 ): ParsedTopic[] {
   if (contentModules.length === 0) return [];
@@ -754,18 +599,22 @@ function organizeModulesAsTimeline(
   const parsed = contentModules.map((m) => {
     const label = m.weekLabel;
 
+    // Extract unit/module/week number
     const unitMatch = label.match(/\b(?:unit|module|week)\s*(\d+)/i);
     const unitNum = unitMatch ? parseInt(unitMatch[1], 10) : null;
 
+    // Extract lecture range: "Lectures 1-5" or "Lectures 20-23"
     const lecMatch = label.match(/lectures?\s*(\d+)\s*[-–]\s*(\d+)/i);
     const lecStart = lecMatch ? parseInt(lecMatch[1], 10) : null;
     const lecEnd = lecMatch ? parseInt(lecMatch[2], 10) : null;
 
+    // Clean label: remove quiz/exam dates and "No Quiz" suffixes
     let cleanLabel = label
       .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
       .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
       .trim();
 
+    // If label is just "Unit N", keep it simple
     if (/^unit\s+\d+$/i.test(cleanLabel)) {
       cleanLabel = `Unit ${unitNum}`;
     }
@@ -773,7 +622,7 @@ function organizeModulesAsTimeline(
     return { module: m, unitNum, lecStart, lecEnd, cleanLabel };
   });
 
-  // Sort by unit number, then by first lecture number
+  // Sort by unit number (ascending), then by first lecture number
   parsed.sort((a, b) => {
     if (a.unitNum !== null && b.unitNum !== null) return a.unitNum - b.unitNum;
     if (a.unitNum !== null) return -1;
@@ -782,24 +631,45 @@ function organizeModulesAsTimeline(
     return 0;
   });
 
+  // Filter useful readings (slides, worksheets, problem sets, handouts)
+  // Remove quiz blanks/keys, exam blanks/keys, and generic items
   const USEFUL_READING_RX = /slide|worksheet|handout|problem\s+set|packet|review|derivation|video|reading/i;
   const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope/i;
 
+  // Build lecture-to-calendar-week map for date assignment
+  const lectureToWeek = new Map<number, WeekDateRange>();
+  for (const week of lectureCalendar) {
+    for (const lec of week.lectures) {
+      lectureToWeek.set(lec.lectureNumber, week);
+    }
+  }
+
+  // Build timeline entries
   const timeline: ParsedTopic[] = [];
 
   for (let i = 0; i < parsed.length; i++) {
     const p = parsed[i];
 
+    // Filter topics: remove generic Canvas item-type names
     const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
     const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
 
+    // Filter readings
     const usefulReadings = p.module.readings.filter(
       (r) => USEFUL_READING_RX.test(r) && !SKIP_READING_RX.test(r),
     );
 
+    // Find date from lecture calendar
+    let startDate: string | undefined;
+    if (p.lecStart !== null) {
+      const calWeek = lectureToWeek.get(p.lecStart);
+      if (calWeek) startDate = calWeek.startDate;
+    }
+
     timeline.push({
       weekNumber: i + 1,
       weekLabel: p.cleanLabel,
+      startDate,
       topics: usefulTopics.length > 0
         ? usefulTopics
         : p.lecStart !== null && p.lecEnd !== null
@@ -821,8 +691,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     stage2Classifications: [],
     stage3Sources: input.candidates.length,
     stage3Weeks: 0,
-    conversationTurnsReached: 0,
-    conversationStateMode: "none",
+    lectureCalendarDates: 0,
+    stage4OutputWeeks: 0,
     stage5Warnings: [],
     fallbackUsed: false,
   };
@@ -852,27 +722,35 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     `${contentModules.length} content, ${nonContentModuleIds.length} non-content`,
   );
 
-  // ── STAGE 3: MULTI-TURN CONVERSATION (Extract → Group+Date → Enrich) ──
-  const { topics: aiTopics, usedLabel, turnsReached, stateMode } = await extractAndGroupFromCandidates(
-    input.candidates,
-    input.courseName,
-    input.classSchedule,
-    input.termStartDate,
-    input.termEndDate,
-    input.assignments,
-    contentModules,
-  );
-
+  // ── STAGE 3: EXTRACT from syllabus ──
+  const extraction = await extractTopicsExpanded(input.candidates, input.courseName);
+  let aiTopics = extraction.topics;
   debug.stage3Weeks = aiTopics.length;
-  debug.conversationTurnsReached = turnsReached;
-  debug.conversationStateMode = stateMode;
 
-  console.log(
-    `[pipeline] ${input.courseName}: Conversation produced ${aiTopics.length} weeks from ${input.candidates.length} source(s) ` +
-    `(${turnsReached} turns, mode=${stateMode}, label: ${usedLabel})`,
+  console.log(`[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries from ${input.candidates.length} source(s)`);
+
+  // ── STAGE 3b: BUILD LECTURE CALENDAR ──
+  const lectureCalendar = buildLectureCalendar(
+    input.classSchedule,
+    input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
+    input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
   );
+  debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
 
-  // ── Determine final topics + module deletion ──
+  if (lectureCalendar.length > 0) {
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 3b built lecture calendar — ` +
+      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks`,
+    );
+  }
+
+  // ── STAGE 3c: GROUP lectures into weeks (algorithmic) ──
+  const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
+  if (grouped) {
+    aiTopics = grouped;
+  }
+
+  // ── STAGE 4: ENRICH with module data ──
   let finalTopics: ParsedTopic[];
   let moduleIdsToDelete: string[];
 
@@ -880,26 +758,45 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     finalTopics = [];
     moduleIdsToDelete = [];
     debug.fallbackUsed = true;
-    console.log(`[pipeline] ${input.courseName}: No data from either source`);
+    console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no data from either source`);
 
   } else if (aiTopics.length === 0) {
-    // No AI topics — organize modules as timeline fallback
-    const organizedModules = organizeModulesAsTimeline(contentModules, input.courseName);
+    // No AI topics but we have content modules — organize them into a timeline
+    const organizedModules = organizeModulesAsTimeline(contentModules, lectureCalendar, input.courseName);
     if (organizedModules.length > 0) {
       finalTopics = organizedModules;
-      moduleIdsToDelete = input.modules.map((m) => m.id);
+      moduleIdsToDelete = input.modules.map((m) => m.id); // delete all old modules, we're replacing them
+      debug.stage4OutputWeeks = organizedModules.length;
       debug.fallbackUsed = true;
-      console.log(`[pipeline] ${input.courseName}: Module-only fallback → ${organizedModules.length} entries`);
+      console.log(`[pipeline] ${input.courseName}: Stage 4 module-only fallback → ${organizedModules.length} organized entries`);
     } else {
       finalTopics = [];
       moduleIdsToDelete = nonContentModuleIds;
       debug.fallbackUsed = true;
-      console.log(`[pipeline] ${input.courseName}: No AI topics, keeping ${contentModules.length} content modules`);
+      console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no AI topics, keeping ${contentModules.length} content modules`);
     }
 
   } else {
-    finalTopics = aiTopics;
+    // Enrich grouped topics with module data
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 4 enriching ${aiTopics.length} weeks` +
+      (contentModules.length > 0 ? ` with ${contentModules.length} content modules` : ""),
+    );
+
+    const enriched = await enrichTimeline({
+      contentModules: contentModules.map((m) => ({
+        weekLabel: m.weekLabel,
+        topics: m.topics,
+        readings: m.readings,
+      })),
+      groupedTopics: aiTopics,
+      courseName: input.courseName,
+    });
+
+    finalTopics = enriched;
     moduleIdsToDelete = input.modules.map((m) => m.id);
+    debug.stage4OutputWeeks = enriched.length;
+    console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${enriched.length} enriched weeks`);
   }
 
   // ── STAGE 5: VALIDATE ──
