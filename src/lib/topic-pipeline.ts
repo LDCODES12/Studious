@@ -342,10 +342,17 @@ async function runConversation(
         input: userContent,
       });
       break;
-    } catch (err) {
+    } catch (err: any) {
+      const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
       if (attempt === 0) {
-        console.warn(`[pipeline] ${courseName} Turn 1 attempt 1 failed, retrying:`, err);
-        await new Promise((r) => setTimeout(r, 1500));
+        if (isLocked && conversationId) {
+          console.warn(`[pipeline] ${courseName} Turn 1 conversation_locked — abandoning conversation ${conversationId}, switching to previous_response_id mode`);
+          conversationId = null;
+          stateMode = "previous_response_id";
+        } else {
+          console.warn(`[pipeline] ${courseName} Turn 1 attempt 1 failed, retrying in 5s:`, err);
+        }
+        await new Promise((r) => setTimeout(r, 5000));
       } else {
         console.error(`[pipeline] ${courseName} Turn 1 failed after 2 attempts:`, err);
         return {
@@ -455,8 +462,29 @@ async function runConversation(
           };
         }
         console.warn(`[pipeline] ${courseName} Turn 3 produced ${enrichedTopics.length} weeks vs ${groupedTopics.length} grouped — using Turn 2 result`);
-      } catch (err) {
-        console.warn(`[pipeline] ${courseName} Turn 3 failed, using Turn 2 result:`, err);
+      } catch (err: any) {
+        const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
+        if (isLocked && conversationId) {
+          console.warn(`[pipeline] ${courseName} Turn 3 conversation_locked — abandoning conversation, retrying with previous_response_id`);
+          conversationId = null;
+          stateMode = "previous_response_id";
+          try {
+            const turn3Retry = await runTurn({
+              model: "gpt-4o-mini-2024-07-18",
+              instructions: ENRICH_PROMPT,
+              input: `Enrich the timeline with these Canvas modules and return JSON.\n\n${JSON.stringify({ canvasModules: contentModules.map((m) => ({ moduleName: m.weekLabel, topics: m.topics, readings: m.readings })) })}`,
+            });
+            const retryParsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn3Retry.output_text);
+            const retryTopics = retryParsed?.weeks ?? [];
+            if (retryTopics.length >= groupedTopics.length * 0.8 && retryTopics.length <= groupedTopics.length * 1.2) {
+              return { extractedTopics, finalTopics: retryTopics, turnsReached: 3, label: candidate.label, window: win, stateMode };
+            }
+          } catch (retryErr) {
+            console.warn(`[pipeline] ${courseName} Turn 3 retry also failed:`, retryErr);
+          }
+        } else {
+          console.warn(`[pipeline] ${courseName} Turn 3 failed, using Turn 2 result:`, err);
+        }
       }
     }
 
@@ -470,8 +498,43 @@ async function runConversation(
       stateMode,
     };
 
-  } catch (err) {
-    console.warn(`[pipeline] ${courseName} Turn 2 failed, using Turn 1 result:`, err);
+  } catch (err: any) {
+    const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
+    if (isLocked && conversationId) {
+      console.warn(`[pipeline] ${courseName} Turn 2 conversation_locked — abandoning conversation, retrying with previous_response_id`);
+      conversationId = null;
+      stateMode = "previous_response_id";
+      // Retry Turn 2 once without conversation
+      try {
+        const lectureMeetings = classSchedule?.meetings
+          .filter((m) => m.label.toLowerCase() === "lecture") ?? [];
+        const meetingPattern = lectureMeetings.length > 0
+          ? lectureMeetings.map((m) => `${m.label} ${m.days.join(" ")} ${m.startTime}-${m.endTime}`).join("; ")
+          : "unknown (assume MWF 3 lectures per week)";
+        const scheduleInfo = {
+          meetingPattern,
+          semesterStartFromSchedule: classSchedule?.semesterStart ?? null,
+          semesterStartFromCanvas: termStartDate,
+          semesterEndFromSchedule: classSchedule?.semesterEnd ?? null,
+          semesterEndFromCanvas: termEndDate,
+          assignmentDates: assignments.filter((a) => a.dueDate).slice(0, 30).map((a) => ({ title: a.title, date: a.dueDate })),
+        };
+        const turn2Retry = await runTurn({
+          model: "gpt-4o-mini-2024-07-18",
+          instructions: GROUP_DATE_PROMPT,
+          input: `Group these lectures into calendar weeks and return JSON.\n\n${JSON.stringify(scheduleInfo)}`,
+        });
+        const retryParsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn2Retry.output_text);
+        const retryTopics = retryParsed?.weeks ?? [];
+        if (retryTopics.length > 0) {
+          return { extractedTopics, finalTopics: retryTopics, turnsReached: 2, label: candidate.label, window: win, stateMode };
+        }
+      } catch (retryErr) {
+        console.warn(`[pipeline] ${courseName} Turn 2 retry also failed:`, retryErr);
+      }
+    } else {
+      console.warn(`[pipeline] ${courseName} Turn 2 failed, using Turn 1 result:`, err);
+    }
     return {
       extractedTopics,
       finalTopics: extractedTopics,
@@ -517,17 +580,25 @@ async function extractAndGroupFromCandidates(
   }[] = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
+    // Add delay between candidates to avoid OpenAI conversation_locked rate limits
+    if (ci > 0) {
+      console.log(`[pipeline] ${courseName} waiting 3s before candidate[${ci}]`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
     const conv = await runConversation(
       candidates[ci], courseName, classSchedule,
       termStartDate, termEndDate, assignments, contentModules,
     );
 
     // Quality-check based on Turn 1 extraction
+    // A week is "rich" if it has topics, readings, or a meaningful weekLabel (not just "Week N")
+    const hasRichLabel = (label?: string) =>
+      !!label && label.trim().length > 0 && !/^(week|module|unit|lecture)\s*\d+$/i.test(label.trim());
     const richWeeks = conv.extractedTopics.filter(
-      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0 || hasRichLabel(t.weekLabel),
     ).length;
     const isGoodResult = conv.extractedTopics.length > 0 &&
-      (conv.extractedTopics.length < 4 || richWeeks / conv.extractedTopics.length >= 0.4);
+      (conv.extractedTopics.length < 4 || richWeeks / conv.extractedTopics.length >= 0.3);
 
     console.log(`[pipeline] ${courseName} candidate[${ci}] ${conv.label}: ${conv.extractedTopics.length} extracted, ${conv.finalTopics.length} final (${conv.turnsReached} turns) → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
