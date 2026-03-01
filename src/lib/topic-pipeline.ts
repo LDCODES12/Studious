@@ -343,7 +343,7 @@ async function runConversation(
       });
       break;
     } catch (err: any) {
-      const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
+      const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
       if (attempt === 0) {
         if (isLocked && conversationId) {
           console.warn(`[pipeline] ${courseName} Turn 1 conversation_locked — abandoning conversation ${conversationId}, switching to previous_response_id mode`);
@@ -463,7 +463,7 @@ async function runConversation(
         }
         console.warn(`[pipeline] ${courseName} Turn 3 produced ${enrichedTopics.length} weeks vs ${groupedTopics.length} grouped — using Turn 2 result`);
       } catch (err: any) {
-        const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
+        const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
         if (isLocked && conversationId) {
           console.warn(`[pipeline] ${courseName} Turn 3 conversation_locked — abandoning conversation, retrying with previous_response_id`);
           conversationId = null;
@@ -499,7 +499,7 @@ async function runConversation(
     };
 
   } catch (err: any) {
-    const isLocked = err?.status === 400 && String(err?.message ?? err).includes("conversation_locked");
+    const isLocked = err?.code === "conversation_locked" || (err?.status === 400 && String(err?.message ?? err).includes("conversation_locked"));
     if (isLocked && conversationId) {
       console.warn(`[pipeline] ${courseName} Turn 2 conversation_locked — abandoning conversation, retrying with previous_response_id`);
       conversationId = null;
