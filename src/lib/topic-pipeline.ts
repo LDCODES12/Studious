@@ -78,6 +78,7 @@ export interface PipelineDebug {
   stage3Sources: number;
   stage3Weeks: number;
   conversationTurnsReached: number;
+  conversationStateMode: "conversations_api" | "previous_response_id" | "none" | "mixed";
   stage5Warnings: string[];
   fallbackUsed: boolean;
 }
@@ -255,6 +256,7 @@ interface ConversationResult {
   turnsReached: number;
   label: string;
   window: string; // for audit pass
+  stateMode: "conversations_api" | "previous_response_id";
 }
 
 async function runConversation(
@@ -281,15 +283,52 @@ async function runConversation(
   const isCalendarGrid = fmt.includes("weekly calendar grid");
   const model = isCalendarGrid ? "gpt-4o-2024-08-06" : "gpt-4o-mini-2024-07-18";
 
+  // Prefer durable Conversations API state. If unavailable, fall back to
+  // previous_response_id chaining so the flow still works.
+  let conversationId: string | null = null;
+  let stateMode: "conversations_api" | "previous_response_id" = "previous_response_id";
+  let previousResponseId: string | null = null;
+
+  try {
+    const conv = await openai.conversations.create({
+      metadata: {
+        pipeline: "topic-pipeline",
+        courseName: courseName.slice(0, 120),
+        sourceLabel: candidate.label.slice(0, 120),
+      },
+    }, { timeout: 10_000 });
+    conversationId = conv.id;
+    stateMode = "conversations_api";
+  } catch (err) {
+    console.warn(`[pipeline] ${courseName} conversation create failed, falling back to previous_response_id:`, err);
+  }
+
+  const runTurn = async (args: {
+    model: string;
+    instructions: string;
+    input: string;
+  }) => {
+    const response = await openai.responses.create({
+      model: args.model,
+      ...(conversationId
+        ? { conversation: conversationId }
+        : (previousResponseId ? { previous_response_id: previousResponseId } : {})),
+      instructions: args.instructions,
+      input: args.input,
+      text: { format: { type: "json_object" } },
+      temperature: 0,
+      store: true,
+    }, { timeout: 45_000 });
+    previousResponseId = response.id;
+    return response;
+  };
+
   // ── Turn 1: EXTRACT ──
-  const turn1 = await openai.responses.create({
+  const turn1 = await runTurn({
     model,
     instructions: EXTRACT_PROMPT,
     input: userContent,
-    text: { format: { type: "json_object" } },
-    temperature: 0,
-    store: true,
-  }, { timeout: 45_000 });
+  });
 
   const turn1Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn1.output_text);
   const rawTopics = turn1Parsed?.weeks ?? [];
@@ -298,7 +337,14 @@ async function runConversation(
   console.log(`[pipeline] ${courseName} Turn 1 EXTRACT (${candidate.label}, ${model}): ${extractedTopics.length} entries from ${candidate.text.length}ch`);
 
   if (extractedTopics.length === 0) {
-    return { extractedTopics: [], finalTopics: [], turnsReached: 1, label: candidate.label, window: win };
+    return {
+      extractedTopics: [],
+      finalTopics: [],
+      turnsReached: 1,
+      label: candidate.label,
+      window: win,
+      stateMode,
+    };
   }
 
   // ── Turn 2: GROUP + DATE ──
@@ -324,15 +370,11 @@ async function runConversation(
         .map((a) => ({ title: a.title, date: a.dueDate })),
     };
 
-    const turn2 = await openai.responses.create({
+    const turn2 = await runTurn({
       model: "gpt-4o-mini-2024-07-18",
-      previous_response_id: turn1.id,
       instructions: GROUP_DATE_PROMPT,
       input: `Group these lectures into calendar weeks and return JSON.\n\n${JSON.stringify(scheduleInfo)}`,
-      text: { format: { type: "json_object" } },
-      temperature: 0,
-      store: true,
-    }, { timeout: 45_000 });
+    });
 
     const turn2Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn2.output_text);
     const groupedTopics = turn2Parsed?.weeks ?? [];
@@ -341,7 +383,14 @@ async function runConversation(
 
     if (groupedTopics.length === 0) {
       // Turn 2 failed to produce anything — fall back to Turn 1
-      return { extractedTopics, finalTopics: extractedTopics, turnsReached: 2, label: candidate.label, window: win };
+      return {
+        extractedTopics,
+        finalTopics: extractedTopics,
+        turnsReached: 2,
+        label: candidate.label,
+        window: win,
+        stateMode,
+      };
     }
 
     // ── Turn 3: ENRICH (only if content modules exist) ──
@@ -353,15 +402,11 @@ async function runConversation(
           readings: m.readings,
         }));
 
-        const turn3 = await openai.responses.create({
+        const turn3 = await runTurn({
           model: "gpt-4o-mini-2024-07-18",
-          previous_response_id: turn2.id,
           instructions: ENRICH_PROMPT,
           input: `Enrich the timeline with these Canvas modules and return JSON.\n\n${JSON.stringify({ canvasModules: moduleData })}`,
-          text: { format: { type: "json_object" } },
-          temperature: 0,
-          store: true,
-        }, { timeout: 45_000 });
+        });
 
         const turn3Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn3.output_text);
         const enrichedTopics = turn3Parsed?.weeks ?? [];
@@ -370,7 +415,14 @@ async function runConversation(
 
         // Safety: enriched must have roughly same number of weeks as grouped
         if (enrichedTopics.length >= groupedTopics.length * 0.8 && enrichedTopics.length <= groupedTopics.length * 1.2) {
-          return { extractedTopics, finalTopics: enrichedTopics, turnsReached: 3, label: candidate.label, window: win };
+          return {
+            extractedTopics,
+            finalTopics: enrichedTopics,
+            turnsReached: 3,
+            label: candidate.label,
+            window: win,
+            stateMode,
+          };
         }
         console.warn(`[pipeline] ${courseName} Turn 3 produced ${enrichedTopics.length} weeks vs ${groupedTopics.length} grouped — using Turn 2 result`);
       } catch (err) {
@@ -379,11 +431,25 @@ async function runConversation(
     }
 
     // No modules or Turn 3 failed — use Turn 2 result
-    return { extractedTopics, finalTopics: groupedTopics, turnsReached: contentModules.length > 0 ? 2 : 3, label: candidate.label, window: win };
+    return {
+      extractedTopics,
+      finalTopics: groupedTopics,
+      turnsReached: contentModules.length > 0 ? 3 : 2,
+      label: candidate.label,
+      window: win,
+      stateMode,
+    };
 
   } catch (err) {
     console.warn(`[pipeline] ${courseName} Turn 2 failed, using Turn 1 result:`, err);
-    return { extractedTopics, finalTopics: extractedTopics, turnsReached: 1, label: candidate.label, window: win };
+    return {
+      extractedTopics,
+      finalTopics: extractedTopics,
+      turnsReached: 2,
+      label: candidate.label,
+      window: win,
+      stateMode,
+    };
   }
 }
 
@@ -405,9 +471,20 @@ async function extractAndGroupFromCandidates(
   termEndDate: string | null,
   assignments: AssignmentDateInfo[],
   contentModules: CanvasModuleInfo[],
-): Promise<{ topics: ParsedTopic[]; usedLabel: string; turnsReached: number }> {
+): Promise<{
+  topics: ParsedTopic[];
+  usedLabel: string;
+  turnsReached: number;
+  stateMode: "conversations_api" | "previous_response_id" | "none" | "mixed";
+}> {
 
-  const allGoodResults: { result: ParsedTopic[]; label: string; win: string; turns: number }[] = [];
+  const allGoodResults: {
+    result: ParsedTopic[];
+    label: string;
+    win: string;
+    turns: number;
+    stateMode: "conversations_api" | "previous_response_id";
+  }[] = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
     const conv = await runConversation(
@@ -425,24 +502,32 @@ async function extractAndGroupFromCandidates(
     console.log(`[pipeline] ${courseName} candidate[${ci}] ${conv.label}: ${conv.extractedTopics.length} extracted, ${conv.finalTopics.length} final (${conv.turnsReached} turns) → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
     if (isGoodResult && conv.finalTopics.length > 0) {
-      allGoodResults.push({ result: conv.finalTopics, label: conv.label, win: conv.window, turns: conv.turnsReached });
+      allGoodResults.push({
+        result: conv.finalTopics,
+        label: conv.label,
+        win: conv.window,
+        turns: conv.turnsReached,
+        stateMode: conv.stateMode,
+      });
     }
   }
 
   if (allGoodResults.length === 0) {
-    return { topics: [], usedLabel: "none", turnsReached: 0 };
+    return { topics: [], usedLabel: "none", turnsReached: 0, stateMode: "none" };
   }
 
   // Merge: start with highest-coverage source, fill gaps from others
   allGoodResults.sort((a, b) => b.result.length - a.result.length);
   const merged = new Map<number, ParsedTopic>();
   const sourceLabels: string[] = [];
+  const stateModes = new Set<"conversations_api" | "previous_response_id">();
   let usedWindow = allGoodResults[0].win;
   let maxTurns = 0;
 
-  for (const { result, label, turns } of allGoodResults) {
+  for (const { result, label, turns, stateMode } of allGoodResults) {
     let contributed = false;
     maxTurns = Math.max(maxTurns, turns);
+    stateModes.add(stateMode);
     for (const week of result) {
       const existing = merged.get(week.weekNumber);
       if (!existing) {
@@ -478,7 +563,14 @@ async function extractAndGroupFromCandidates(
 
   topics = renumberSequentialWeeks(topics);
 
-  return { topics, usedLabel, turnsReached: maxTurns };
+  const mergedMode =
+    stateModes.size === 0
+      ? "none"
+      : stateModes.size === 1
+        ? [...stateModes][0]
+        : "mixed";
+
+  return { topics, usedLabel, turnsReached: maxTurns, stateMode: mergedMode };
 }
 
 // ─── Stage 5: VALIDATE ──────────────────────────────────────────────────────
@@ -629,6 +721,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     stage3Sources: input.candidates.length,
     stage3Weeks: 0,
     conversationTurnsReached: 0,
+    conversationStateMode: "none",
     stage5Warnings: [],
     fallbackUsed: false,
   };
@@ -659,7 +752,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   );
 
   // ── STAGE 3: MULTI-TURN CONVERSATION (Extract → Group+Date → Enrich) ──
-  const { topics: aiTopics, usedLabel, turnsReached } = await extractAndGroupFromCandidates(
+  const { topics: aiTopics, usedLabel, turnsReached, stateMode } = await extractAndGroupFromCandidates(
     input.candidates,
     input.courseName,
     input.classSchedule,
@@ -671,8 +764,12 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   debug.stage3Weeks = aiTopics.length;
   debug.conversationTurnsReached = turnsReached;
+  debug.conversationStateMode = stateMode;
 
-  console.log(`[pipeline] ${input.courseName}: Conversation produced ${aiTopics.length} weeks from ${input.candidates.length} source(s) (${turnsReached} turns, label: ${usedLabel})`);
+  console.log(
+    `[pipeline] ${input.courseName}: Conversation produced ${aiTopics.length} weeks from ${input.candidates.length} source(s) ` +
+    `(${turnsReached} turns, mode=${stateMode}, label: ${usedLabel})`,
+  );
 
   // ── Determine final topics + module deletion ──
   let finalTopics: ParsedTopic[];

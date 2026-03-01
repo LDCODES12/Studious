@@ -1085,6 +1085,7 @@ export async function POST(request: NextRequest) {
           ` | stage2=${pipelineResult.debug.stage2Classifications.length} modules classified` +
           ` | stage3=${pipelineResult.debug.stage3Weeks} ai weeks` +
           ` | turns=${pipelineResult.debug.conversationTurnsReached}` +
+          ` | mode=${pipelineResult.debug.conversationStateMode}` +
           (pipelineResult.debug.fallbackUsed ? " | FALLBACK" : "") +
           (pipelineResult.debug.stage5Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage5Warnings.length}` : "")
         );
