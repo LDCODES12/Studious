@@ -318,19 +318,41 @@ async function runConversation(
       text: { format: { type: "json_object" } },
       temperature: 0,
       store: true,
+      truncation: "auto",
     }, { timeout: 45_000 });
     previousResponseId = response.id;
     return response;
   };
 
-  // ── Turn 1: EXTRACT ──
-  const turn1 = await runTurn({
-    model,
-    instructions: EXTRACT_PROMPT,
-    input: userContent,
-  });
+  // ── Turn 1: EXTRACT (with retry) ──
+  let turn1;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      turn1 = await runTurn({
+        model,
+        instructions: EXTRACT_PROMPT,
+        input: userContent,
+      });
+      break;
+    } catch (err) {
+      if (attempt === 0) {
+        console.warn(`[pipeline] ${courseName} Turn 1 attempt 1 failed, retrying:`, err);
+        await new Promise((r) => setTimeout(r, 1500));
+      } else {
+        console.error(`[pipeline] ${courseName} Turn 1 failed after 2 attempts:`, err);
+        return {
+          extractedTopics: [],
+          finalTopics: [],
+          turnsReached: 0,
+          label: candidate.label,
+          window: win,
+          stateMode,
+        };
+      }
+    }
+  }
 
-  const turn1Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn1.output_text);
+  const turn1Parsed = parseResponseJSON<{ weeks: ParsedTopic[] }>(turn1!.output_text);
   const rawTopics = turn1Parsed?.weeks ?? [];
   const extractedTopics = sanitizeSchedule(rawTopics).filter(isContentfulTopic);
 
