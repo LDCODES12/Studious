@@ -289,6 +289,7 @@ async function runConversation(
   let stateMode: "conversations_api" | "previous_response_id" = "previous_response_id";
   let previousResponseId: string | null = null;
 
+  const convT0 = Date.now();
   try {
     const conv = await openai.conversations.create({
       metadata: {
@@ -299,15 +300,21 @@ async function runConversation(
     }, { timeout: 10_000 });
     conversationId = conv.id;
     stateMode = "conversations_api";
+    console.log(`[pipeline] ${courseName} conversation created (${Date.now() - convT0}ms) id=${conv.id}`);
   } catch (err) {
-    console.warn(`[pipeline] ${courseName} conversation create failed, falling back to previous_response_id:`, err);
+    console.warn(`[pipeline] ${courseName} conversation create FAILED (${Date.now() - convT0}ms), falling back to previous_response_id:`, String(err));
   }
 
+  let turnCounter = 0;
   const runTurn = async (args: {
     model: string;
     instructions: string;
     input: string;
   }) => {
+    const turnNum = ++turnCounter;
+    const turnT0 = Date.now();
+    const stateParam = conversationId ? "conversation" : (previousResponseId ? "prev_response_id" : "none");
+    console.log(`[pipeline] ${courseName} Turn ${turnNum} START (model=${args.model}, state=${stateParam}, inputLen=${args.input.length})`);
     const response = await openai.responses.create({
       model: args.model,
       ...(conversationId
@@ -321,6 +328,7 @@ async function runConversation(
       truncation: "auto",
     }, { timeout: 45_000 });
     previousResponseId = response.id;
+    console.log(`[pipeline] ${courseName} Turn ${turnNum} DONE (${Date.now() - turnT0}ms, responseLen=${response.output_text.length}, id=${response.id})`);
     return response;
   };
 

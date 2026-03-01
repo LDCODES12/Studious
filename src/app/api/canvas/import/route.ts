@@ -557,7 +557,8 @@ export async function POST(request: NextRequest) {
   // the extension receives it.
   after(async () => {
     const bgLog = apiLogger("POST /api/canvas/import [after]", user.id);
-    bgLog.info("background AI processing started", { courses: courses.length });
+    const afterT0 = Date.now();
+    bgLog.info("after() ENTER", { courses: courses.length, courseNames: courses.map(c => c.name) });
     await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: new Date() } });
 
   try {
@@ -605,8 +606,9 @@ export async function POST(request: NextRequest) {
   await Promise.all(
     courses.map(async (c) => {
       try {
+      const courseT0 = Date.now();
       const scCourseId = courseIdMap.get(c.id);
-      if (!scCourseId) return;
+      if (!scCourseId) { bgLog.warn("course skipped: no scCourseId", { course: c.name }); return; }
 
       // ── a) Check whether AI topics already exist ─────────────────────────
       const existingAiTopics = await db.courseTopic.count({
@@ -614,6 +616,7 @@ export async function POST(request: NextRequest) {
       });
       // If we already parsed this course's syllabus, don't overwrite
       const shouldRunAI = existingAiTopics === 0;
+      bgLog.info("course START", { course: c.name, existingAiTopics, shouldRunAI, syllabusBodyLen: c.syllabusBody?.length ?? 0, syllabusTextsCount: (c.syllabusTexts ?? []).length });
 
       const dbg: CourseDebug = {
         name: c.name,
@@ -834,6 +837,8 @@ export async function POST(request: NextRequest) {
         ? "none"
         : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
 
+      bgLog.info("course CANDIDATES", { course: c.name, count: candidates.length, best: bestLabel, all: candidatesSummary });
+
       // Record ranked candidates in debug info
       dbg.candidates = candidates.map(cd => ({
         label: cd.label,
@@ -985,9 +990,11 @@ export async function POST(request: NextRequest) {
       if (!shouldRunAI || (syllabusText.length < 500 && !hasModulesToProcess)) {
         dbg.status = aiStatus;
         allCourseDebug.push(dbg);
-        console.log(`[sync] ${c.name}: ${aiStatus} | sources: ${candidatesSummary}`);
+        bgLog.info("course SKIP", { course: c.name, reason: aiStatus, durationMs: Date.now() - courseT0 });
         return;
       }
+
+      bgLog.info("course PIPELINE START", { course: c.name, syllabusLen: syllabusText.length, modules: existingModuleCount, candidates: candidates.length });
 
       try {
         // ── Topic Pipeline: classify modules, extract topics, fuse timeline ──
@@ -1033,8 +1040,23 @@ export async function POST(request: NextRequest) {
           })),
         };
 
+        const pipelineT0 = Date.now();
         const pipelineResult = await runTopicPipeline(pipelineInput);
         const topics = pipelineResult.topics;
+        const pipelineDuration = Date.now() - pipelineT0;
+
+        bgLog.info("course PIPELINE DONE", {
+          course: c.name,
+          weeks: topics.length,
+          turns: pipelineResult.debug.conversationTurnsReached,
+          mode: pipelineResult.debug.conversationStateMode,
+          stage2Modules: pipelineResult.debug.stage2Classifications.length,
+          stage3Weeks: pipelineResult.debug.stage3Weeks,
+          fallback: pipelineResult.debug.fallbackUsed,
+          warnings: pipelineResult.debug.stage5Warnings,
+          modulesToDelete: pipelineResult.moduleIdsToDelete.length,
+          pipelineDurationMs: pipelineDuration,
+        });
 
         // Only delete + replace when pipeline produced actual results
         // NEVER delete existing data if the pipeline produced nothing — that destroys data
@@ -1079,43 +1101,47 @@ export async function POST(request: NextRequest) {
         dbg.status = topics.length > 0 ? "ok" : "pipeline-0-weeks";
 
         allCourseDebug.push(dbg);
-        console.log(
-          `[sync] ${c.name}: pipeline → ${topics.length} weeks` +
-          ` | deleted ${pipelineResult.moduleIdsToDelete.length} module topics` +
-          ` | stage2=${pipelineResult.debug.stage2Classifications.length} modules classified` +
-          ` | stage3=${pipelineResult.debug.stage3Weeks} ai weeks` +
-          ` | turns=${pipelineResult.debug.conversationTurnsReached}` +
-          ` | mode=${pipelineResult.debug.conversationStateMode}` +
-          (pipelineResult.debug.fallbackUsed ? " | FALLBACK" : "") +
-          (pipelineResult.debug.stage5Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage5Warnings.length}` : "")
-        );
+        bgLog.info("course COMPLETE", {
+          course: c.name,
+          status: dbg.status,
+          weeksWritten: topics.length,
+          totalDurationMs: Date.now() - courseT0,
+        });
       } catch (err) {
         dbg.status = "error";
         dbg.error = String(err);
         allCourseDebug.push(dbg);
-        console.error(`[sync] ${c.name}: ERROR ${err} | sources: ${candidatesSummary}`);
+        bgLog.error("course PIPELINE ERROR", {
+          course: c.name,
+          error: String(err),
+          stack: err instanceof Error ? err.stack?.slice(0, 500) : undefined,
+          durationMs: Date.now() - courseT0,
+        });
       }
       } catch (courseErr) {
-        console.error(`[sync] ${c.name}: UNHANDLED course-level error:`, courseErr);
+        bgLog.error("course UNHANDLED ERROR", {
+          course: c.name,
+          error: String(courseErr),
+          stack: courseErr instanceof Error ? courseErr.stack?.slice(0, 500) : undefined,
+        });
       }
     })
   );
 
-  if (scheduleRows.length > 0) {
-    console.log("[sync] classSchedule:\n" + scheduleRows.join("\n"));
-  }
-
-  bgLog.info("background AI processing complete", {
+  bgLog.info("after() ALL COURSES DONE", {
     aiWeeks: aiTopicsCreated,
     filesImported: syllabusFilesImported,
     coursesProcessed: allCourseDebug.length,
+    totalDurationMs: Date.now() - afterT0,
+    perCourse: allCourseDebug.map(d => ({ name: d.name, status: d.status, weeks: d.weeksWritten, error: d.error })),
   });
   await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
 
   } catch (err) {
-    bgLog.error("background AI processing CRASHED", {
+    bgLog.error("after() CRASHED", {
       error: String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      stack: err instanceof Error ? err.stack?.slice(0, 1000) : undefined,
+      durationMs: Date.now() - afterT0,
     });
     await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
   }
