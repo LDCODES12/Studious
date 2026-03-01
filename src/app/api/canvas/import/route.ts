@@ -1048,8 +1048,8 @@ export async function POST(request: NextRequest) {
         bgLog.info("course PIPELINE DONE", {
           course: c.name,
           weeks: topics.length,
-          turns: pipelineResult.debug.conversationTurnsReached,
-          mode: pipelineResult.debug.conversationStateMode,
+          lectureCalendarDates: pipelineResult.debug.lectureCalendarDates,
+          stage4OutputWeeks: pipelineResult.debug.stage4OutputWeeks,
           stage2Modules: pipelineResult.debug.stage2Classifications.length,
           stage3Weeks: pipelineResult.debug.stage3Weeks,
           fallback: pipelineResult.debug.fallbackUsed,
