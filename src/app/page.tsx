@@ -22,7 +22,10 @@ export default async function DashboardPage() {
     .toISOString()
     .slice(0, 10);
 
-  const [courses, tasks, learningSignals, interventionOutcomes, userStatus] = await Promise.all([
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const [courses, tasks, learningSignals, interventionOutcomes, userStatus, todayPreClassReflections] = await Promise.all([
     userId
       ? db.course.findMany({
           where: { userId },
@@ -65,6 +68,16 @@ export default async function DashboardPage() {
           select: { bgSyncProcessingAt: true },
         })
       : null,
+    userId
+      ? db.reflection.findMany({
+          where: {
+            userId,
+            type: "pre_class",
+            createdAt: { gte: todayStart },
+          },
+          select: { courseId: true },
+        })
+      : [],
   ]);
 
   const assignments = (courses as Awaited<typeof courses>).flatMap((c) =>
@@ -118,9 +131,14 @@ export default async function DashboardPage() {
   const isSemanticTopic = (name: string) =>
     !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
 
+  const answeredCourseIds = new Set(
+    todayPreClassReflections.map((r) => r.courseId).filter(Boolean)
+  );
+
   const preClassPrompts = courseContexts
     .map(({ course, context }) => {
       if (!context.nextClassMeeting) return null;
+      if (answeredCourseIds.has(course.id)) return null;
 
       const semanticCurrent = (context.currentWeek?.topics ?? []).filter(isSemanticTopic);
       const semanticNext = (context.nextWeek?.topics ?? []).filter(isSemanticTopic);
