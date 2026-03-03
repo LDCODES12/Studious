@@ -241,7 +241,7 @@ export async function getOrCreateWeekOverview(
 
   if (cached) {
     const meta = cached.metadata as Record<string, unknown>;
-    if (meta.weekKey === weekKey) {
+    if (meta.weekKey === weekKey && Array.isArray(meta.courseNotes)) {
       return meta as unknown as WeekOverviewData;
     }
   }

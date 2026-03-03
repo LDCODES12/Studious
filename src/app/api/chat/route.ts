@@ -128,6 +128,9 @@ export async function POST(request: NextRequest) {
         }
       } catch { /* RAG failure is non-fatal */ }
     }
+    if (!materialContext) {
+      materialContext = "\n\nNote: No course materials were found. If the student asks about specific documents, be honest that you don't have access to them.";
+    }
   }
 
   const instructions = courseId ? SINGLE_COURSE_INSTRUCTIONS : CROSS_COURSE_INSTRUCTIONS;

@@ -86,13 +86,17 @@ export async function POST(request: NextRequest) {
         const materials = await searchMaterials(courseId, vector, 3);
         if (materials.length > 0) {
           materialContext =
-            "\n\nRelevant course material (reference these when helpful):\n" +
+            "\n\nCourse materials you have access to (reference these when helpful):\n" +
             materials
               .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 800)}`)
               .join("\n\n");
+        } else {
+          materialContext = "\n\nNote: No course materials were found for this topic. Be honest about this — do not claim you can see documents you cannot. If the student asks about specific documents, tell them you don't have access to those materials.";
         }
       }
-    } catch { /* RAG failure is non-fatal */ }
+    } catch {
+      materialContext = "\n\nNote: Could not search course materials. If the student asks about specific documents, be honest that you cannot access them right now.";
+    }
   }
 
   // Adaptive rules
