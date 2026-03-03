@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 1 });
 
 export interface ParsedEvent {
   title: string;
@@ -676,10 +676,7 @@ export function extractScheduleFromCalendarEvents(
 export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
 
-  // Calendar grid format requires stronger spatial reasoning to follow the tab structure —
-  // use gpt-4o for those cases. Everything else is fine with gpt-4o-mini.
-  const isCalendarGrid = hint?.includes("weekly calendar grid") ?? false;
-  const model = isCalendarGrid ? "gpt-4o-2024-08-06" : "gpt-4o-mini-2024-07-18";
+  const model = "gpt-4o-2024-08-06";
 
   const response = await openai.chat.completions.create({
     model,
@@ -754,7 +751,7 @@ If you cannot find an explicit schedule, return {"weeks": []}.`,
       },
       { role: "user", content: userContent },
     ],
-  }, { timeout: 45_000 });
+  }, { timeout: 90_000 });
 
   const content = response.choices[0]?.message?.content;
   if (!content) return [];
