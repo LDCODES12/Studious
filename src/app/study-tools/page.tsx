@@ -1,63 +1,79 @@
-"use client";
+import { auth } from "@/lib/auth";
+import { db } from "@/lib/db";
+import { computeCourseContext } from "@/lib/course-context";
+import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
+import { StudyToolsClient } from "@/components/study-tools/study-tools-client";
+import type { TutorTopic } from "@/components/study-tools/tutor-topic-picker";
 
-import { useState } from "react";
-import { Brain, CalendarClock } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { AIChat } from "@/components/chat/ai-chat";
-import { StudyPlanPanel } from "@/components/study-tools/study-plan-panel";
+export default async function StudyToolsPage() {
+  const session = await auth();
+  const userId = session?.user?.id;
 
-const CROSS_COURSE_PROMPTS = [
-  "What should I focus on today?",
-  "Which assignments are most urgent right now?",
-  "Help me plan my study sessions for this week",
-  "What topics should I review before my next class?",
-];
+  // Fetch courses with topics to compute current week
+  const courses = userId
+    ? await db.course.findMany({
+        where: { userId },
+        select: {
+          id: true,
+          name: true,
+          shortName: true,
+          color: true,
+          currentGrade: true,
+          currentScore: true,
+          classSchedule: true,
+          topics: {
+            orderBy: { weekNumber: "asc" },
+            select: {
+              weekNumber: true,
+              weekLabel: true,
+              startDate: true,
+              topics: true,
+              readings: true,
+              completedTopics: true,
+            },
+          },
+          assignments: {
+            where: { omitFromFinalGrade: false },
+            orderBy: { dueDate: "asc" },
+            select: {
+              title: true,
+              type: true,
+              dueDate: true,
+              status: true,
+              pointsPossible: true,
+              omitFromFinalGrade: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      })
+    : [];
 
-type Tab = "chat" | "plan";
+  // Extract current week topics for tutor topic picker
+  const isSemanticTopic = (name: string) =>
+    !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
 
-export default function StudyToolsPage() {
-  const [tab, setTab] = useState<Tab>("chat");
+  const tutorTopics: TutorTopic[] = [];
 
-  return (
-    <div className="flex flex-1 flex-col gap-4 overflow-hidden">
-      {/* Tab header */}
-      <div className="flex items-center gap-1 shrink-0">
-        <button
-          onClick={() => setTab("chat")}
-          className={cn(
-            "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-            tab === "chat"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <Brain className="h-3.5 w-3.5" />
-          Study Assistant
-        </button>
-        <button
-          onClick={() => setTab("plan")}
-          className={cn(
-            "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-            tab === "plan"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <CalendarClock className="h-3.5 w-3.5" />
-          Study Plan
-        </button>
-      </div>
+  for (const course of courses) {
+    const ctx = computeCourseContext({
+      ...course,
+      classSchedule: course.classSchedule as ExtractedClassSchedule | null,
+    });
 
-      {/* Tab content */}
-      {tab === "chat" ? (
-        <AIChat
-          suggestedPrompts={CROSS_COURSE_PROMPTS}
-          emptyMessage="Ask about any of your courses — planning, priorities, study strategies, exam prep."
-          placeholder="Ask across all your courses... (Enter to send)"
-        />
-      ) : (
-        <StudyPlanPanel />
-      )}
-    </div>
-  );
+    if (ctx.currentWeek) {
+      const semanticTopics = ctx.currentWeek.topics.filter(isSemanticTopic);
+      for (const topicName of semanticTopics.slice(0, 3)) {
+        tutorTopics.push({
+          courseId: course.id,
+          courseName: course.name,
+          courseColor: course.color,
+          topicName,
+          readings: ctx.currentWeek.readings,
+        });
+      }
+    }
+  }
+
+  return <StudyToolsClient tutorTopics={tutorTopics} />;
 }
