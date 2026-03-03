@@ -1,7 +1,8 @@
 /**
- * Week Overview — AI-generated weekly summary
+ * Week Overview — AI-generated weekly learning summary
  *
  * Generated once per week on first dashboard visit, cached in LearningEvent.
+ * Focuses on LEARNING CONTENT — topics, readings, key deadlines — not class times.
  * Uses gpt-4o-mini for cost efficiency.
  */
 
@@ -9,40 +10,36 @@ import { generateObject } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { getISOWeek, getISOWeekYear, format, startOfWeek, addDays, parseISO, isValid } from "date-fns";
-import type { CourseContextSnapshot, DeadlineItem } from "@/lib/course-context";
+import { getISOWeek, getISOWeekYear, startOfWeek, addDays, format, parseISO, isValid, getDay } from "date-fns";
+import type { CourseContextSnapshot } from "@/lib/course-context";
 import type { LearningSignals } from "@/lib/learning-signals";
-import type { ExtractedClassSchedule, ClassMeeting } from "@/lib/parse-syllabus";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface WeekOverviewData {
   weekKey: string;
   summary: string;
-  days: { day: string; note: string }[];
+  courseNotes: { courseName: string; note: string }[];
   generatedAt: string;
 }
 
-export interface WeekDayData {
-  dayName: string;        // "Mon", "Tue", etc.
-  date: string;           // "Mar 3"
+export interface WeekCourseData {
+  courseId: string;
+  courseName: string;
+  courseColor: string;
+  weekLabel: string | null;
+  topics: string[];
+  readings: string[];
+  deadlines: { title: string; type: string; dueDay: string; pointsPossible: number | null; status: string }[];
+  aiNote: string | null;
+}
+
+export interface WeekDeadlineDay {
+  dayName: string;
+  date: string;
   isToday: boolean;
-  classes: {
-    courseName: string;
-    courseColor: string;
-    label: string;        // "Lecture", "Lab"
-    time: string;         // "9:00 AM"
-    location: string;
-  }[];
-  deadlines: {
-    title: string;
-    type: string;
-    courseName: string;
-    courseColor: string;
-    pointsPossible: number | null;
-    status: string;
-  }[];
-  aiNote: string;
+  isPast: boolean;
+  deadlines: { title: string; type: string; courseName: string; courseColor: string; status: string }[];
 }
 
 // ── Week key ─────────────────────────────────────────────────────────────────
@@ -51,70 +48,70 @@ export function getCurrentWeekKey(now: Date = new Date()): string {
   return `${getISOWeekYear(now)}-W${String(getISOWeek(now)).padStart(2, "0")}`;
 }
 
-// ── Zod schema for AI output ─────────────────────────────────────────────────
-
-const weekOverviewSchema = z.object({
-  summary: z.string().describe("1-2 sentence overview of the week — priorities, big items, encouragement"),
-  days: z.array(z.object({
-    day: z.enum(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
-    note: z.string().describe("One brief sentence: what to focus on, what's due, or encouragement"),
-  })),
-});
-
-// ── Build structured day data (no AI needed) ─────────────────────────────────
-
-const DAY_CODE_TO_JS: Record<string, number> = {
-  SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
-};
+// ── Build structured week data (no AI needed) ────────────────────────────────
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-export function buildWeekDays(
-  courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot; classSchedule: ExtractedClassSchedule | null }[],
+export function buildWeekCourses(
+  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
   now: Date = new Date(),
-): Omit<WeekDayData, "aiNote">[] {
-  const weekStart = startOfWeek(now, { weekStartsOn: 1 }); // Monday
+): WeekCourseData[] {
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const weekEnd = addDays(weekStart, 6); // Sunday end
+
+  return courseContexts
+    .map(({ course, context }) => {
+      const currentWeek = context.currentWeek;
+
+      // Collect deadlines due this week for this course
+      const allDeadlines = [...context.urgentAssignments, ...context.upcomingAssignments];
+      const deadlines = allDeadlines
+        .filter((a) => {
+          const due = parseISO(a.dueDate);
+          if (!isValid(due)) return false;
+          return due >= weekStart && due <= weekEnd;
+        })
+        .map((a) => {
+          const due = parseISO(a.dueDate);
+          return {
+            title: a.title,
+            type: a.type,
+            dueDay: isValid(due) ? DAY_NAMES[getDay(due)] : "?",
+            pointsPossible: a.pointsPossible,
+            status: a.status,
+          };
+        });
+
+      return {
+        courseId: course.id,
+        courseName: course.name,
+        courseColor: course.color,
+        weekLabel: currentWeek?.weekLabel ?? null,
+        topics: currentWeek?.topics ?? [],
+        readings: currentWeek?.readings ?? [],
+        deadlines,
+        aiNote: null,
+      };
+    })
+    .filter((c) => c.topics.length > 0 || c.readings.length > 0 || c.deadlines.length > 0);
+}
+
+export function buildDeadlineDays(
+  courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot }[],
+  now: Date = new Date(),
+): WeekDeadlineDay[] {
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
   const todayStr = format(now, "yyyy-MM-dd");
 
-  const days: Omit<WeekDayData, "aiNote">[] = [];
+  const days: WeekDeadlineDay[] = [];
 
-  for (let i = 0; i < 5; i++) { // Mon–Fri
+  for (let i = 0; i < 5; i++) {
     const date = addDays(weekStart, i);
     const dateStr = format(date, "yyyy-MM-dd");
-    const dayOfWeek = date.getDay(); // 0=Sun ... 6=Sat
 
-    // Find classes on this day
-    const classes: WeekDayData["classes"] = [];
-    for (const { course, classSchedule } of courseContexts) {
-      if (!classSchedule?.meetings) continue;
-      for (const meeting of classSchedule.meetings) {
-        if (!meeting.days?.length || !meeting.startTime) continue;
-        const meetingDayNums = meeting.days.map((d) => DAY_CODE_TO_JS[d]).filter((n) => n !== undefined);
-        if (meetingDayNums.includes(dayOfWeek)) {
-          const [h, m] = meeting.startTime.split(":").map(Number);
-          const hour12 = h % 12 || 12;
-          const ampm = h < 12 ? "AM" : "PM";
-          const timeStr = m === 0 ? `${hour12} ${ampm}` : `${hour12}:${String(m).padStart(2, "0")} ${ampm}`;
-
-          classes.push({
-            courseName: course.name,
-            courseColor: course.color,
-            label: meeting.label || "Class",
-            time: timeStr,
-            location: meeting.location || "",
-          });
-        }
-      }
-    }
-
-    // Sort classes by time
-    classes.sort((a, b) => a.time.localeCompare(b.time));
-
-    // Find assignments due on this day
-    const deadlines: WeekDayData["deadlines"] = [];
+    const deadlines: WeekDeadlineDay["deadlines"] = [];
     for (const { course, context } of courseContexts) {
-      const allAssignments = [...context.urgentAssignments, ...context.upcomingAssignments];
-      for (const a of allAssignments) {
+      for (const a of [...context.urgentAssignments, ...context.upcomingAssignments]) {
         if (!a.dueDate) continue;
         const dueDate = parseISO(a.dueDate);
         if (!isValid(dueDate)) continue;
@@ -124,7 +121,6 @@ export function buildWeekDays(
             type: a.type,
             courseName: course.name,
             courseColor: course.color,
-            pointsPossible: a.pointsPossible,
             status: a.status,
           });
         }
@@ -132,10 +128,10 @@ export function buildWeekDays(
     }
 
     days.push({
-      dayName: DAY_NAMES[dayOfWeek],
+      dayName: DAY_NAMES[date.getDay()],
       date: format(date, "MMM d"),
       isToday: dateStr === todayStr,
-      classes,
+      isPast: dateStr < todayStr,
       deadlines,
     });
   }
@@ -143,18 +139,27 @@ export function buildWeekDays(
   return days;
 }
 
+// ── Zod schema for AI output ─────────────────────────────────────────────────
+
+const weekOverviewSchema = z.object({
+  summary: z.string().describe("2-3 sentence overview of the week's learning: what are the big topics, what's due, what to prioritize"),
+  courseNotes: z.array(z.object({
+    courseName: z.string(),
+    note: z.string().describe("One sentence about what this course covers this week and what to focus on"),
+  })),
+});
+
 // ── AI generation ────────────────────────────────────────────────────────────
 
 async function generateOverview(
   courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot }[],
   signals: LearningSignals | null,
   now: Date,
-): Promise<{ summary: string; days: { day: string; note: string }[] }> {
-  // Build context for the AI
+): Promise<{ summary: string; courseNotes: { courseName: string; note: string }[] }> {
   const courseLines = courseContexts.map(({ course, context }) => {
     const parts = [`${course.name}:`];
     if (context.currentWeek) {
-      parts.push(`This week: "${context.currentWeek.weekLabel}"`);
+      parts.push(`Week: "${context.currentWeek.weekLabel}"`);
       if (context.currentWeek.topics.length > 0) {
         parts.push(`Topics: ${context.currentWeek.topics.join(", ")}`);
       }
@@ -163,21 +168,20 @@ async function generateOverview(
       }
     }
     parts.push(`Grade: ${context.gradeInfo}`);
+
+    const deadlines = [...context.urgentAssignments, ...context.upcomingAssignments];
+    if (deadlines.length > 0) {
+      const dlStr = deadlines.slice(0, 5).map((a) => {
+        const due = parseISO(a.dueDate);
+        const dayStr = isValid(due) ? format(due, "EEE") : "?";
+        const pts = a.pointsPossible ? ` (${a.pointsPossible}pts)` : "";
+        return `${a.title} (${a.type}) due ${dayStr}${pts}`;
+      }).join("; ");
+      parts.push(`Due: ${dlStr}`);
+    }
+
     return parts.join(" | ");
   });
-
-  const allDeadlines = courseContexts.flatMap(({ context }) =>
-    [...context.urgentAssignments, ...context.upcomingAssignments]
-  );
-  const deadlineLines = allDeadlines
-    .sort((a, b) => a.hoursUntilDue - b.hoursUntilDue)
-    .slice(0, 15)
-    .map((a) => {
-      const pts = a.pointsPossible ? ` (${a.pointsPossible}pts)` : "";
-      const due = parseISO(a.dueDate);
-      const dayStr = isValid(due) ? format(due, "EEE") : "?";
-      return `${a.courseName}: ${a.title} (${a.type}) — due ${dayStr}${pts} [${a.status}]`;
-    });
 
   let studentCtx = "";
   if (signals) {
@@ -201,17 +205,14 @@ async function generateOverview(
   const { object } = await generateObject({
     model: openai("gpt-4o-mini"),
     schema: weekOverviewSchema,
-    system: `You write brief, helpful weekly overviews for a college student. Be specific and practical — reference actual course names, assignment names, and due dates. Keep the summary to 1-2 sentences. Keep each day's note to one short sentence. If it's mid-week, acknowledge what's already passed and focus forward. Be encouraging but honest about heavy workloads.`,
+    system: `You write brief weekly learning overviews for a college student. Focus on CONTENT — what topics they're learning, what readings matter, what assignments to prioritize. Do NOT mention class times or schedules. Be specific — reference actual topic names, assignment names, and readings. Keep the summary to 2-3 sentences. Keep each course note to one concise sentence about what to focus on. Be encouraging but honest about heavy workloads.`,
     prompt: `Today is ${dayOfWeek}, ${format(now, "MMMM d")}.
 
 Courses this week:
 ${courseLines.join("\n")}
-
-Assignments due this week:
-${deadlineLines.length > 0 ? deadlineLines.join("\n") : "None"}
 ${studentCtx}
 
-Write a week overview with a summary and a note for each day Mon–Fri.`,
+Write a learning-focused week overview with a summary and a note for each course.`,
   });
 
   return object;
@@ -221,7 +222,7 @@ Write a week overview with a summary and a note for each day Mon–Fri.`,
 
 export async function getOrCreateWeekOverview(
   userId: string,
-  courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot; classSchedule: ExtractedClassSchedule | null }[],
+  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
   signals: LearningSignals | null,
 ): Promise<WeekOverviewData | null> {
   if (courseContexts.length === 0) return null;
@@ -252,7 +253,7 @@ export async function getOrCreateWeekOverview(
     const data: WeekOverviewData = {
       weekKey,
       summary: result.summary,
-      days: result.days,
+      courseNotes: result.courseNotes,
       generatedAt: now.toISOString(),
     };
 
