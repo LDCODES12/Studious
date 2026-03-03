@@ -729,6 +729,7 @@ IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 WHAT TO EXTRACT:
 - Every topic title, subtopic, and specific concept explicitly listed in the schedule
 - All readings: textbook chapters with numbers, papers, articles — include page ranges and chapter titles when listed
+- In humanities and social sciences, assigned readings are often listed as author surnames (e.g., "Geertz", "Foucault", "Boas"). When standalone proper names appear alongside topic descriptions, these are reading references — put them in the readings array, not topics
 - Lab or recitation topics if different from lecture content
 - The start date for each week if you can determine it from dates in the schedule
 - Class meeting dates even when NO topic names are listed (e.g. a seminar that only provides meeting dates) — include these sessions with notes = "No topics listed — class meeting date" so the date survives as a calendar marker. Set weekLabel to something like "Seminar Session 1", "Meeting 1", etc.

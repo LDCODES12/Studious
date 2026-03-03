@@ -435,14 +435,13 @@ function groupLecturesIntoWeeks(
 // ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
 
 interface EnrichInput {
-  contentModules: { weekLabel: string; topics: string[]; readings: string[] }[];
+  contentModules: { weekLabel: string; topics: string[] }[];
   groupedTopics: ParsedTopic[];
   courseName: string;
 }
 
 async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
-  const modulesWithReadings = input.contentModules.filter(m => m.readings.length > 0).length;
-  console.log(`[pipeline] ${input.courseName}: Stage 4 enrichTimeline — ${input.groupedTopics.length} weeks, ${input.contentModules.length} modules (${modulesWithReadings} with readings)`);
+  console.log(`[pipeline] ${input.courseName}: Stage 4 enrichTimeline — ${input.groupedTopics.length} weeks, ${input.contentModules.length} modules`);
 
   if (input.contentModules.length === 0) {
     console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no content modules`);
@@ -467,9 +466,9 @@ You will receive:
 
 YOUR JOB — ENRICH, never delete:
 - Match each Canvas module to the corresponding week(s) in the timeline by topic/unit overlap
-- ADD useful readings from modules (slides, handouts, worksheets, problem sets) to the week's readings array
 - If a module mentions content not in any week's topics, ADD it as a new topic entry
 - KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
+- KEEP all existing readings exactly as they are — do not add, remove, or rename them
 - KEEP all existing dates, weekNumbers, and weekLabels unchanged
 
 OUTPUT: { "weeks": [...] }
@@ -923,13 +922,12 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       contentModules: contentModules.map((m) => ({
         weekLabel: m.weekLabel,
         topics: m.topics,
-        readings: m.readings,
       })),
       groupedTopics: aiTopics,
       courseName: input.courseName,
     });
 
-    finalTopics = backfillModuleReadings(enriched, contentModules, input.courseName);
+    finalTopics = enriched;
     moduleIdsToDelete = input.modules.map((m) => m.id);
     debug.stage4OutputWeeks = finalTopics.length;
     console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${finalTopics.length} enriched weeks`);
