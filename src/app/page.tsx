@@ -11,6 +11,8 @@ import { computeCourseContext } from "@/lib/course-context";
 import { computeLearningSignals } from "@/lib/learning-signals";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import { SyncStatusBanner } from "@/components/dashboard/sync-status-banner";
+import { WeekOverview } from "@/components/dashboard/week-overview";
+import { getOrCreateWeekOverview, buildWeekDays } from "@/lib/week-overview";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 export default async function DashboardPage() {
@@ -124,8 +126,15 @@ export default async function DashboardPage() {
         currentScore: course.currentScore,
       },
       context: ctx,
+      classSchedule: course.classSchedule as ExtractedClassSchedule | null,
     };
   });
+
+  // Week overview — AI-generated, cached per week
+  const weekOverview = userId && courseContexts.length > 0
+    ? await getOrCreateWeekOverview(userId, courseContexts, learningSignals)
+    : null;
+  const weekDays = courseContexts.length > 0 ? buildWeekDays(courseContexts) : [];
 
   // Pre-class prompts from course contexts
   const isSemanticTopic = (name: string) =>
@@ -162,6 +171,11 @@ export default async function DashboardPage() {
     <div className="space-y-7">
       <GreetingBanner name={session?.user?.name ?? "there"} />
       <SyncStatusBanner initialProcessing={isSyncProcessing} />
+
+      {/* Week overview — AI-generated timeline */}
+      {weekOverview && weekDays.length > 0 && (
+        <WeekOverview overview={weekOverview} days={weekDays} />
+      )}
 
       {/* Pre-class prompts — most time-sensitive, shown first */}
       {preClassPrompts.length > 0 && (
