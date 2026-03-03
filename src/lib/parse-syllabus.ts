@@ -280,6 +280,7 @@ export interface ExtractedClassSchedule {
   meetings: ClassMeeting[];
   semesterStart: string | null;  // ISO YYYY-MM-DD
   semesterEnd: string | null;    // ISO YYYY-MM-DD
+  finalExamDate: string | null;  // ISO YYYY-MM-DD — extracted from "Final exam: May 5" etc.
 }
 
 function to24HourTime(raw: string): string | null {
@@ -489,7 +490,7 @@ function extractClassScheduleDeterministic(
   // Preserve order of appearance while deduping (dedupe already done above).
   chosen.sort((a, b) => a.index - b.index);
   const meetings = chosen.map((c) => c.meeting);
-  return { meetings, semesterStart: null, semesterEnd: null };
+  return { meetings, semesterStart: null, semesterEnd: null, finalExamDate: null };
 }
 
 /**
@@ -505,9 +506,10 @@ export async function extractClassSchedule(
   const deterministic = extractClassScheduleDeterministic(text);
   if (deterministic) return deterministic;
 
-  // Focus on the first ~6000 chars — schedule info lives in the header but
-  // large PDFs often have a full page of title/prerequisites before meeting times.
-  const truncated = text.slice(0, 6000);
+  // Header has meeting times; tail has final exam date
+  const header = text.slice(0, 6000);
+  const tail = text.slice(-3000);
+  const truncated = header + (text.length > 6000 ? "\n\n--- END OF SYLLABUS ---\n\n" + tail : "");
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini-2024-07-18",
@@ -536,14 +538,15 @@ For each distinct meeting type (Lecture, Lab, Discussion, Recitation, etc.) retu
 Also extract:
 - semesterStart: first day of classes as YYYY-MM-DD (often called "Classes begin" or inferred from first week)
 - semesterEnd: last day of classes as YYYY-MM-DD (often "Finals end" or "Semester ends")
+- finalExamDate: the date of the final exam as YYYY-MM-DD. Look for "Final Exam", "Final:", "Final examination" followed by a date. This is separate from recurring meetings.
 
 Rules:
 - Only extract meeting patterns explicitly stated. Never guess.
-- If no clear meeting schedule exists, return { "meetings": [], "semesterStart": null, "semesterEnd": null }
-- Ignore exam/midterm dates — those are single events, not recurring meetings
+- If no clear meeting schedule exists, return { "meetings": [], "semesterStart": null, "semesterEnd": null, "finalExamDate": null }
+- Exam/midterm dates are NOT recurring meetings, but DO extract the final exam date in the finalExamDate field
 - Convert all times to 24-hour format
 
-Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semesterEnd": "YYYY-MM-DD" | null }`,
+Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semesterEnd": "YYYY-MM-DD" | null, "finalExamDate": "YYYY-MM-DD" | null }`,
         },
         { role: "user", content: truncated },
       ],
@@ -659,6 +662,7 @@ export function extractScheduleFromCalendarEvents(
     meetings,
     semesterStart: termStartAt ? termStartAt.split("T")[0] : null,
     semesterEnd:   termEndAt   ? termEndAt.split("T")[0]   : null,
+    finalExamDate: null,
   };
 }
 

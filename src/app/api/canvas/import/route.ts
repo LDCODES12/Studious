@@ -1026,7 +1026,9 @@ export async function POST(request: NextRequest) {
           })),
           classSchedule: (courseRecord?.classSchedule as PipelineInput["classSchedule"]) ?? null,
           termStartDate: c.termStartAt ? c.termStartAt.split("T")[0] : null,
-          termEndDate: c.termEndAt ? c.termEndAt.split("T")[0] : null,
+          termEndDate: c.termEndAt
+            ? c.termEndAt.split("T")[0]
+            : (courseRecord?.classSchedule as { finalExamDate?: string | null })?.finalExamDate ?? null,
           assignments: courseAssignments.map((a) => ({
             title: a.title,
             dueDate: a.dueDate,

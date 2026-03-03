@@ -148,8 +148,8 @@ async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
 ): Promise<ExtractionResult> {
-  const FULL_TEXT_THRESHOLD = 30_000;
-  const LARGE_WINDOW_SIZE = 20_000;
+  const FULL_TEXT_THRESHOLD = 50_000;
+  const LARGE_WINDOW_SIZE = 30_000;
 
   const allGoodResults: { result: ParsedTopic[]; label: string; fmt: string; win: string }[] = [];
 
@@ -441,11 +441,15 @@ interface EnrichInput {
 }
 
 async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
+  const modulesWithReadings = input.contentModules.filter(m => m.readings.length > 0).length;
+  console.log(`[pipeline] ${input.courseName}: Stage 4 enrichTimeline — ${input.groupedTopics.length} weeks, ${input.contentModules.length} modules (${modulesWithReadings} with readings)`);
+
   if (input.contentModules.length === 0) {
-    // No modules to enrich with — grouped topics are already good
+    console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no content modules`);
     return input.groupedTopics;
   }
 
+  const t0 = Date.now();
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini-2024-07-18",
@@ -498,14 +502,146 @@ If you cannot match a module to any week, skip it — do not force it.`,
 
     // Safety: enriched must have roughly same number of weeks
     if (enriched.length >= input.groupedTopics.length * 0.8 && enriched.length <= input.groupedTopics.length * 1.2) {
+      const withReadings = enriched.filter(w => (w.readings ?? []).length > 0).length;
+      console.log(`[pipeline] ${input.courseName}: Stage 4 done in ${Date.now() - t0}ms — ${enriched.length} weeks, ${withReadings} with readings`);
       return enriched;
     }
-    console.warn(`[pipeline] enrichTimeline produced ${enriched.length} weeks vs ${input.groupedTopics.length} input — keeping original`);
+    console.warn(`[pipeline] ${input.courseName}: Stage 4 REJECTED — produced ${enriched.length} weeks vs ${input.groupedTopics.length} input (>20% drift), keeping original`);
     return input.groupedTopics;
   } catch (err) {
-    console.warn(`[pipeline] enrichTimeline failed:`, err);
+    console.warn(`[pipeline] ${input.courseName}: Stage 4 FAILED after ${Date.now() - t0}ms:`, err);
     return input.groupedTopics;
   }
+}
+
+// ─── Stage 4b: BACKFILL MODULE READINGS ─────────────────────────────────────
+// Deterministic (no-AI) safety net: ensures module readings survive even when
+// enrichTimeline fails to incorporate them. Matches modules to AI weeks
+// algorithmically and adds any readings that are missing from the output.
+
+const BACKFILL_SKIP_RX = /\b(quiz|exam|test)\s+(blank|key|answer)\b|regrade\s+request|setup\s+instructions|gradescope|\bgetting\s+started\b|\bcourse\s+info(rmation)?\b/i;
+
+const BACKFILL_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "of", "for", "in", "to", "on", "with",
+  "unit", "module", "week", "lecture", "lectures", "chapter", "introduction",
+]);
+
+function tokenize(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !BACKFILL_STOPWORDS.has(w))
+  );
+}
+
+function backfillModuleReadings(
+  enrichedTopics: ParsedTopic[],
+  contentModules: CanvasModuleInfo[],
+  courseName: string,
+): ParsedTopic[] {
+  if (enrichedTopics.length === 0 || contentModules.length === 0) {
+    return enrichedTopics;
+  }
+
+  // 1. Collect all readings already present (lowercase for dedup)
+  const existingReadings = new Set<string>();
+  for (const week of enrichedTopics) {
+    for (const r of week.readings ?? []) {
+      existingReadings.add(r.toLowerCase().trim());
+    }
+  }
+
+  // 2. For each module, find readings not yet present and not junk
+  const toPlace: { moduleIdx: number; mod: CanvasModuleInfo; readings: string[] }[] = [];
+
+  for (let i = 0; i < contentModules.length; i++) {
+    const mod = contentModules[i];
+    const missing = mod.readings.filter(r => {
+      if (BACKFILL_SKIP_RX.test(r)) return false;
+      if (existingReadings.has(r.toLowerCase().trim())) return false;
+      return true;
+    });
+    if (missing.length > 0) {
+      toPlace.push({ moduleIdx: i, mod, readings: missing });
+    }
+  }
+
+  if (toPlace.length === 0) {
+    console.log(`[pipeline] ${courseName}: backfill — all module readings already incorporated`);
+    return enrichedTopics;
+  }
+
+  // 3. Clone so we don't mutate the input
+  const result = enrichedTopics.map(w => ({
+    ...w,
+    readings: [...(w.readings ?? [])],
+  }));
+
+  // 4. Build lookup structures
+  const weekNumToIndex = new Map<number, number>();
+  for (let i = 0; i < result.length; i++) {
+    weekNumToIndex.set(result[i].weekNumber, i);
+  }
+
+  const weekKeywords = result.map(w => {
+    const allText = [w.weekLabel, ...(w.topics ?? [])].join(" ");
+    return tokenize(allText);
+  });
+
+  let placedCount = 0;
+
+  // 5. Match each module to a week and add readings
+  for (const { moduleIdx, mod, readings } of toPlace) {
+    let targetIndex: number | null = null;
+
+    // Strategy A: unit/week/module number match
+    const unitMatch = mod.weekLabel.match(/\b(?:unit|module|week)\s*(\d+)/i);
+    if (unitMatch) {
+      const unitNum = parseInt(unitMatch[1], 10);
+      const idx = weekNumToIndex.get(unitNum);
+      if (idx !== undefined) targetIndex = idx;
+    }
+
+    // Strategy B: keyword overlap
+    if (targetIndex === null) {
+      const modKeywords = tokenize(mod.weekLabel + " " + mod.topics.join(" "));
+      if (modKeywords.size > 0) {
+        let bestOverlap = 0;
+        let bestIdx = -1;
+        for (let wi = 0; wi < result.length; wi++) {
+          let overlap = 0;
+          for (const kw of modKeywords) {
+            if (weekKeywords[wi].has(kw)) overlap++;
+          }
+          if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestIdx = wi;
+          }
+        }
+        if (bestOverlap >= 1) targetIndex = bestIdx;
+      }
+    }
+
+    // Strategy C: proportional positional fallback
+    if (targetIndex === null) {
+      const N = contentModules.length;
+      const W = result.length;
+      targetIndex = N === 1 ? 0 : Math.round(moduleIdx * (W - 1) / (N - 1));
+    }
+
+    for (const r of readings) {
+      result[targetIndex].readings.push(r);
+    }
+    placedCount += readings.length;
+  }
+
+  console.log(
+    `[pipeline] ${courseName}: backfill placed ${placedCount} readings ` +
+    `from ${toPlace.length} modules into ${result.length} weeks`
+  );
+
+  return result;
 }
 
 // ─── Stage 5: VALIDATE ──────────────────────────────────────────────────────
@@ -793,10 +929,10 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       courseName: input.courseName,
     });
 
-    finalTopics = enriched;
+    finalTopics = backfillModuleReadings(enriched, contentModules, input.courseName);
     moduleIdsToDelete = input.modules.map((m) => m.id);
-    debug.stage4OutputWeeks = enriched.length;
-    console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${enriched.length} enriched weeks`);
+    debug.stage4OutputWeeks = finalTopics.length;
+    console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${finalTopics.length} enriched weeks`);
   }
 
   // ── STAGE 5: VALIDATE ──
