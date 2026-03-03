@@ -676,7 +676,7 @@ export function extractScheduleFromCalendarEvents(
 export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
 
-  const model = "gpt-4o-2024-08-06";
+  const model = "gpt-4.1-2025-04-14";
 
   const response = await openai.chat.completions.create({
     model,
