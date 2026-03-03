@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { GreetingBanner } from "@/components/dashboard/greeting-banner";
-import { QuickStats } from "@/components/dashboard/quick-stats";
 import { CourseGrid } from "@/components/dashboard/course-grid";
 import { UpcomingDeadlines } from "@/components/dashboard/upcoming-deadlines";
 import { TodayTasks } from "@/components/dashboard/today-tasks";
@@ -82,47 +81,57 @@ export default async function DashboardPage() {
     course: t.course,
   }));
 
-  // Compute pre-class prompts for courses with class today
-  const preClassPrompts = courses
-    .map((course) => {
-      const ctx = computeCourseContext(
-        {
-          id: course.id,
-          name: course.name,
-          shortName: course.shortName,
-          color: course.color,
-          currentGrade: course.currentGrade,
-          currentScore: course.currentScore,
-          classSchedule: course.classSchedule as ExtractedClassSchedule | null,
-          topics: course.topics,
-          assignments: course.assignments.map((a) => ({
-            title: a.title,
-            type: a.type,
-            dueDate: a.dueDate,
-            status: a.status,
-            pointsPossible: a.pointsPossible,
-            omitFromFinalGrade: a.omitFromFinalGrade,
-          })),
-        }
-      );
+  // Compute course contexts for each course
+  const courseContexts = courses.map((course) => {
+    const ctx = computeCourseContext({
+      id: course.id,
+      name: course.name,
+      shortName: course.shortName,
+      color: course.color,
+      currentGrade: course.currentGrade,
+      currentScore: course.currentScore,
+      classSchedule: course.classSchedule as ExtractedClassSchedule | null,
+      topics: course.topics,
+      assignments: course.assignments.map((a) => ({
+        title: a.title,
+        type: a.type,
+        dueDate: a.dueDate,
+        status: a.status,
+        pointsPossible: a.pointsPossible,
+        omitFromFinalGrade: a.omitFromFinalGrade,
+      })),
+    });
 
-      if (!ctx.nextClassMeeting) return null;
+    return {
+      course: {
+        id: course.id,
+        name: course.name,
+        color: course.color,
+        currentGrade: course.currentGrade,
+        currentScore: course.currentScore,
+      },
+      context: ctx,
+    };
+  });
 
-      // Filter out generic module labels like "Lecture 5", "Module 3"
-      const isSemanticTopic = (name: string) =>
-        !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
+  // Pre-class prompts from course contexts
+  const isSemanticTopic = (name: string) =>
+    !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
 
-      const semanticCurrent = (ctx.currentWeek?.topics ?? []).filter(isSemanticTopic);
-      const semanticNext = (ctx.nextWeek?.topics ?? []).filter(isSemanticTopic);
+  const preClassPrompts = courseContexts
+    .map(({ course, context }) => {
+      if (!context.nextClassMeeting) return null;
+
+      const semanticCurrent = (context.currentWeek?.topics ?? []).filter(isSemanticTopic);
+      const semanticNext = (context.nextWeek?.topics ?? []).filter(isSemanticTopic);
       const topicName = semanticCurrent[0] ?? semanticNext[0] ?? null;
 
-      // Show card even without a topic — generic "how prepared?" prompt
       return {
         courseId: course.id,
-        courseName: course.shortName ?? course.name,
+        courseName: course.name,
         courseColor: course.color,
         topicName,
-        classTime: ctx.nextClassMeeting,
+        classTime: context.nextClassMeeting,
       };
     })
     .filter((p): p is NonNullable<typeof p> => p !== null);
@@ -135,21 +144,30 @@ export default async function DashboardPage() {
     <div className="space-y-7">
       <GreetingBanner name={session?.user?.name ?? "there"} />
       <SyncStatusBanner initialProcessing={isSyncProcessing} />
-      <QuickStats courses={courses} assignments={assignments} />
-      {learningSignals && <LearningPulse signals={learningSignals} />}
-      {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} hasCourses={courses.length > 0} />}
-      <div className="grid grid-cols-5 gap-7">
-        <div className="col-span-3">
-          <CourseGrid courses={courses} />
-        </div>
-        <div className="col-span-2 space-y-7">
+
+      {/* Pre-class prompts — most time-sensitive, shown first */}
+      {preClassPrompts.length > 0 && (
+        <div className={preClassPrompts.length > 1 ? "grid grid-cols-2 gap-3" : ""}>
           {preClassPrompts.map((prompt) => (
             <PreClassCard key={prompt.courseId} {...prompt} />
           ))}
-          <TodayTasks initialTasks={dashboardTasks} />
-          <UpcomingDeadlines assignments={assignments} />
         </div>
-      </div>
+      )}
+
+      {/* Tasks due soon */}
+      <TodayTasks initialTasks={dashboardTasks} />
+
+      {/* Course grid with context-rich cards */}
+      <CourseGrid courses={courseContexts} />
+
+      {/* Conditional learning nudge */}
+      {learningSignals && <LearningPulse signals={learningSignals} />}
+
+      {/* What's working */}
+      {interventionOutcomes && <WhatsWorking outcomes={interventionOutcomes} hasCourses={courses.length > 0} />}
+
+      {/* Upcoming deadlines */}
+      <UpcomingDeadlines assignments={assignments} />
     </div>
   );
 }

@@ -129,7 +129,7 @@ export function Sidebar() {
                       )}
                     />
                     <span className="truncate">
-                      {course.shortName ?? course.name}
+                      {course.name}
                     </span>
                   </Link>
                 );

@@ -1,16 +1,19 @@
 import Link from "next/link";
 import { CourseCard } from "./course-card";
+import type { CourseContextSnapshot } from "@/lib/course-context";
 
-interface Course {
-  id: string;
-  name: string;
-  shortName: string | null;
-  instructor: string | null;
-  color: string;
-  assignments: { id: string; status: string }[];
+interface CourseWithContext {
+  course: {
+    id: string;
+    name: string;
+    color: string;
+    currentGrade: string | null;
+    currentScore: number | null;
+  };
+  context: CourseContextSnapshot;
 }
 
-export function CourseGrid({ courses }: { courses: Course[] }) {
+export function CourseGrid({ courses }: { courses: CourseWithContext[] }) {
   if (courses.length === 0) {
     return (
       <div>
@@ -31,9 +34,9 @@ export function CourseGrid({ courses }: { courses: Course[] }) {
   return (
     <div>
       <h2 className="mb-4 text-[14px] font-semibold">Courses</h2>
-      <div className="grid grid-cols-2 gap-3">
-        {courses.map((course) => (
-          <CourseCard key={course.id} course={course} />
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        {courses.map(({ course, context }) => (
+          <CourseCard key={course.id} course={course} context={context} />
         ))}
       </div>
     </div>
