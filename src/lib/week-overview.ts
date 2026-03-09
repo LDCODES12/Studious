@@ -45,6 +45,18 @@ export interface WeekDeadlineDay {
   deadlines: { title: string; type: string; courseName: string; courseColor: string; status: string }[];
 }
 
+type CourseContextBundle = {
+  course: {
+    id: string;
+    name: string;
+    color: string;
+    term?: string | null;
+    currentGrade: string | null;
+    currentScore: number | null;
+  };
+  context: CourseContextSnapshot;
+};
+
 // ── Week key ─────────────────────────────────────────────────────────────────
 
 export function getCurrentWeekKey(now: Date = new Date()): string {
@@ -55,8 +67,97 @@ export function getCurrentWeekKey(now: Date = new Date()): string {
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+const BREAK_RX = /\bspring break\b|\bno class\b/i;
+
+function isBreakWeek(week: CourseContextSnapshot["currentWeek"]): boolean {
+  if (!week) return false;
+  if (BREAK_RX.test(week.weekLabel)) return true;
+  if (week.notes && BREAK_RX.test(week.notes)) return true;
+  return false;
+}
+
+function hasDeadlineThisWeek(
+  context: CourseContextSnapshot,
+  weekStart: Date,
+  weekEnd: Date,
+): boolean {
+  return [...context.urgentAssignments, ...context.upcomingAssignments].some((assignment) => {
+    const due = parseISO(assignment.dueDate);
+    return isValid(due) && due >= weekStart && due <= weekEnd;
+  });
+}
+
+export function applyDetectedTermBreaks(
+  courseContexts: CourseContextBundle[],
+  now: Date = new Date(),
+): CourseContextBundle[] {
+  if (courseContexts.length === 0) return courseContexts;
+
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const weekEnd = addDays(weekStart, 6);
+  const weekStartStr = format(weekStart, "yyyy-MM-dd");
+
+  const breakStartByTerm = new Map<string, string>();
+  for (const { course, context } of courseContexts) {
+    if (!isBreakWeek(context.currentWeek)) continue;
+    if (context.currentWeek?.startDate !== weekStartStr) continue;
+    breakStartByTerm.set(course.term ?? "__all__", weekStartStr);
+  }
+
+  if (breakStartByTerm.size === 0) return courseContexts;
+
+  return courseContexts.map((bundle) => {
+    const breakStart = breakStartByTerm.get(bundle.course.term ?? "__all__");
+    if (!breakStart) return bundle;
+
+    const { context } = bundle;
+    const currentWeek = context.currentWeek;
+    const nextWeek = context.nextWeek;
+
+    if (!currentWeek || isBreakWeek(currentWeek)) {
+      return bundle;
+    }
+
+    const weekHasDeadline = hasDeadlineThisWeek(context, weekStart, weekEnd);
+    const currentStart = currentWeek.startDate;
+    const nextStart = nextWeek?.startDate ?? null;
+    const spansBreakGap =
+      Boolean(currentStart && currentStart < breakStart) &&
+      Boolean(nextStart && nextStart > breakStart);
+    const startsOnBreak = currentStart === breakStart;
+    const breakMentioned = Boolean(currentWeek.notes && BREAK_RX.test(currentWeek.notes));
+
+    if (!startsOnBreak && !spansBreakGap) {
+      return bundle;
+    }
+
+    if (!breakMentioned && weekHasDeadline) {
+      return bundle;
+    }
+
+    const syntheticBreakWeek = {
+      weekNumber: currentWeek.weekNumber,
+      weekLabel: "Spring Break — No Class",
+      topics: [] as string[],
+      readings: [] as string[],
+      notes: "No class — Spring Break",
+      completedTopics: [] as string[],
+      startDate: breakStart,
+    };
+
+    return {
+      ...bundle,
+      context: {
+        ...context,
+        currentWeek: syntheticBreakWeek,
+        nextWeek: startsOnBreak ? currentWeek : nextWeek,
+      },
+    };
+  });
+}
+
 export function buildWeekCourses(
-  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
+  courseContexts: CourseContextBundle[],
   now: Date = new Date(),
 ): WeekCourseData[] {
   const weekStart = startOfWeek(now, { weekStartsOn: 1 });
@@ -101,7 +202,7 @@ export function buildWeekCourses(
 }
 
 export function buildDeadlineDays(
-  courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot }[],
+  courseContexts: CourseContextBundle[],
   now: Date = new Date(),
 ): WeekDeadlineDay[] {
   const weekStart = startOfWeek(now, { weekStartsOn: 1 });
@@ -156,7 +257,7 @@ const weekOverviewSchema = z.object({
 // ── AI generation ────────────────────────────────────────────────────────────
 
 async function generateOverview(
-  courseContexts: { course: { name: string; color: string }; context: CourseContextSnapshot }[],
+  courseContexts: CourseContextBundle[],
   signals: LearningSignals | null,
   now: Date,
 ): Promise<{ summary: string; courseNotes: { courseName: string; note: string }[] }> {
@@ -226,7 +327,7 @@ Write a learning-focused week overview with a summary and a note for each course
 }
 
 function buildWeekOverviewFingerprint(
-  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
+  courseContexts: CourseContextBundle[],
   signals: LearningSignals | null,
 ): string {
   const payload = {
@@ -269,7 +370,7 @@ function buildWeekOverviewFingerprint(
 
 export async function getOrCreateWeekOverview(
   userId: string,
-  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
+  courseContexts: CourseContextBundle[],
   signals: LearningSignals | null,
 ): Promise<WeekOverviewData | null> {
   if (courseContexts.length === 0) return null;

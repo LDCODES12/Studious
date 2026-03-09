@@ -12,7 +12,7 @@ import { computeLearningSignals } from "@/lib/learning-signals";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import { SyncStatusBanner } from "@/components/dashboard/sync-status-banner";
 import { WeekOverview } from "@/components/dashboard/week-overview";
-import { getOrCreateWeekOverview, buildWeekCourses, buildDeadlineDays } from "@/lib/week-overview";
+import { getOrCreateWeekOverview, buildWeekCourses, buildDeadlineDays, applyDetectedTermBreaks } from "@/lib/week-overview";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 export default async function DashboardPage() {
@@ -122,6 +122,7 @@ export default async function DashboardPage() {
       course: {
         id: course.id,
         name: course.name,
+        term: course.term,
         color: course.color,
         currentGrade: course.currentGrade,
         currentScore: course.currentScore,
@@ -131,12 +132,14 @@ export default async function DashboardPage() {
     };
   });
 
+  const normalizedCourseContexts = applyDetectedTermBreaks(courseContexts);
+
   // Week overview — AI-generated, cached per week
-  const weekOverview = userId && courseContexts.length > 0
-    ? await getOrCreateWeekOverview(userId, courseContexts, learningSignals)
+  const weekOverview = userId && normalizedCourseContexts.length > 0
+    ? await getOrCreateWeekOverview(userId, normalizedCourseContexts, learningSignals)
     : null;
-  const weekCourses = courseContexts.length > 0 ? buildWeekCourses(courseContexts) : [];
-  const deadlineDays = courseContexts.length > 0 ? buildDeadlineDays(courseContexts) : [];
+  const weekCourses = normalizedCourseContexts.length > 0 ? buildWeekCourses(normalizedCourseContexts) : [];
+  const deadlineDays = normalizedCourseContexts.length > 0 ? buildDeadlineDays(normalizedCourseContexts) : [];
 
   // Pre-class prompts from course contexts
   const isSemanticTopic = (name: string) =>
@@ -146,7 +149,7 @@ export default async function DashboardPage() {
     todayPreClassReflections.map((r) => r.courseId).filter(Boolean)
   );
 
-  const preClassPrompts = courseContexts
+  const preClassPrompts = normalizedCourseContexts
     .map(({ course, context }) => {
       if (!context.nextClassMeeting) return null;
       if (answeredCourseIds.has(course.id)) return null;
@@ -192,7 +195,7 @@ export default async function DashboardPage() {
       <TodayTasks initialTasks={dashboardTasks} />
 
       {/* Course grid with context-rich cards */}
-      <CourseGrid courses={courseContexts} />
+      <CourseGrid courses={normalizedCourseContexts} />
 
       {/* Conditional learning nudge */}
       {learningSignals && <LearningPulse signals={learningSignals} />}
