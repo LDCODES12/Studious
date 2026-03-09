@@ -15,6 +15,7 @@ import {
 } from "@/lib/parse-syllabus";
 import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
+import { addDays, subDays } from "date-fns";
 import { generateTasksForUser } from "@/lib/tasks";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
 import { generateEmbedding } from "@/lib/embeddings";
@@ -224,6 +225,15 @@ function classScheduleProbe(text: string) {
       /\d{1,2}(?::\d{2})?\s*[AP]M\s+to\s+\d{1,2}(?::\d{2})?\s*[AP]M/i.test(text),
     snippet: compact.slice(0, 500),
   };
+}
+
+function hasOverlappingDateRanges(
+  aStart: string,
+  aEnd: string,
+  bStart: string,
+  bEnd: string,
+): boolean {
+  return aStart <= bEnd && bStart <= aEnd;
 }
 
 // ─── Auth helper ─────────────────────────────────────────────────────────────
@@ -612,8 +622,41 @@ export async function POST(request: NextRequest) {
       const existingAiTopics = await db.courseTopic.count({
         where: { courseId: scCourseId, canvasModuleId: null },
       });
-      // If we already parsed this course's syllabus, don't overwrite
-      const shouldRunAI = existingAiTopics === 0;
+      const existingAiTopicRange = existingAiTopics > 0
+        ? await db.courseTopic.aggregate({
+            where: {
+              courseId: scCourseId,
+              canvasModuleId: null,
+              startDate: { not: null },
+            },
+            _min: { startDate: true },
+            _max: { startDate: true },
+          })
+        : null;
+
+      let staleAiTimeline = false;
+      if (
+        existingAiTopicRange?._min.startDate &&
+        existingAiTopicRange?._max.startDate &&
+        c.termStartAt
+      ) {
+        const termStart = c.termStartAt.split("T")[0];
+        const termEnd = c.termEndAt
+          ? c.termEndAt.split("T")[0]
+          : addDays(new Date(`${termStart}T12:00:00Z`), 140).toISOString().slice(0, 10);
+        const paddedStart = subDays(new Date(`${termStart}T12:00:00Z`), 42).toISOString().slice(0, 10);
+        const paddedEnd = addDays(new Date(`${termEnd}T12:00:00Z`), 42).toISOString().slice(0, 10);
+        staleAiTimeline = !hasOverlappingDateRanges(
+          existingAiTopicRange._min.startDate,
+          existingAiTopicRange._max.startDate,
+          paddedStart,
+          paddedEnd,
+        );
+      }
+
+      // If we already parsed this course's syllabus, don't overwrite unless the
+      // stored AI timeline is clearly from a different term and therefore stale.
+      const shouldRunAI = existingAiTopics === 0 || staleAiTimeline;
 
       const dbg: CourseDebug = {
         name: c.name,
@@ -629,7 +672,7 @@ export async function POST(request: NextRequest) {
         auditDelta: "",
         weeksWritten: 0,
         classScheduleSource: "",
-        status: "pending",
+        status: staleAiTimeline ? "pending:stale-ai-timeline" : "pending",
       };
 
       // ── b+c) Pick best source by schedule-content density ─────────────────

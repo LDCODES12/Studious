@@ -11,6 +11,8 @@ import {
   parseISO,
   isValid,
   differenceInCalendarDays,
+  min as dateMin,
+  max as dateMax,
   addDays,
   subDays,
   isBefore,
@@ -112,10 +114,13 @@ export function computeCourseContext(
   now: Date = new Date()
 ): CourseContextSnapshot {
   const topics = [...input.topics].sort((a, b) => a.weekNumber - b.weekNumber);
+  const assignmentRange = getAssignmentDateRange(input.assignments);
+  const normalizedSchedule = normalizeScheduleBounds(input.classSchedule, assignmentRange, now);
+  const trustedDatedTopics = getTrustedDatedTopics(topics, assignmentRange, normalizedSchedule, now);
 
   // ── Week position ──
   const { previousWeek, currentWeek, nextWeek, confidence, semesterProgress } =
-    resolveWeekPosition(topics, input.classSchedule, now);
+    resolveWeekPosition(topics, trustedDatedTopics, normalizedSchedule, assignmentRange, now);
 
   // ── Current week progress ──
   let currentWeekProgress: string | null = null;
@@ -169,7 +174,7 @@ export function computeCourseContext(
   upcoming.sort((a, b) => a.planningDaysLeft - b.planningDaysLeft);
 
   // ── Next class meeting ──
-  const nextClassMeeting = findNextClassMeeting(input.classSchedule, now);
+  const nextClassMeeting = findNextClassMeeting(normalizedSchedule, now);
 
   return {
     courseId: input.id,
@@ -193,7 +198,9 @@ export function computeCourseContext(
 
 function resolveWeekPosition(
   topics: CourseContextInput["topics"],
+  datedTopics: CourseContextInput["topics"],
   schedule: ExtractedClassSchedule | null,
+  assignmentRange: { start: Date; end: Date } | null,
   now: Date
 ): {
   previousWeek: WeekPosition | null;
@@ -207,11 +214,10 @@ function resolveWeekPosition(
   }
 
   // Strategy 1: Exact — topics have startDate fields
-  const datedTopics = topics.filter((t) => t.startDate && isValid(parseISO(t.startDate)));
   if (datedTopics.length >= 2) {
     const result = resolveByExactDates(topics, datedTopics, now);
     if (result) {
-      const semProg = computeSemesterProgress(schedule, topics, now);
+      const semProg = computeSemesterProgress(schedule, datedTopics, assignmentRange, now);
       return { ...result, confidence: "exact", semesterProgress: semProg };
     }
   }
@@ -220,7 +226,7 @@ function resolveWeekPosition(
   if (datedTopics.length >= 1 && schedule?.semesterEnd) {
     const result = resolveByInterpolation(topics, datedTopics[0], schedule.semesterEnd, now);
     if (result) {
-      const semProg = computeSemesterProgress(schedule, topics, now);
+      const semProg = computeSemesterProgress(schedule, datedTopics, assignmentRange, now);
       return { ...result, confidence: "interpolated", semesterProgress: semProg };
     }
   }
@@ -229,13 +235,114 @@ function resolveWeekPosition(
   if (schedule?.semesterStart && schedule?.semesterEnd) {
     const result = resolveBySemesterFraction(topics, schedule.semesterStart, schedule.semesterEnd, now);
     if (result) {
-      const semProg = computeSemesterProgress(schedule, topics, now);
+      const semProg = computeSemesterProgress(schedule, datedTopics, assignmentRange, now);
+      return { ...result, confidence: "semester-fraction", semesterProgress: semProg };
+    }
+  }
+
+  if (assignmentRange) {
+    const result = resolveBySemesterFraction(
+      topics,
+      format(assignmentRange.start, "yyyy-MM-dd"),
+      format(assignmentRange.end, "yyyy-MM-dd"),
+      now
+    );
+    if (result) {
+      const semProg = computeProgressFromRange(assignmentRange.start, assignmentRange.end, now);
       return { ...result, confidence: "semester-fraction", semesterProgress: semProg };
     }
   }
 
   // Strategy 4: Unknown — just return the first, middle, and last weeks as rough reference
   return { previousWeek: null, currentWeek: null, nextWeek: null, confidence: "unknown", semesterProgress: null };
+}
+
+function getAssignmentDateRange(
+  assignments: CourseContextInput["assignments"]
+): { start: Date; end: Date } | null {
+  const dates = assignments
+    .map((a) => a.dueDate)
+    .filter((dueDate): dueDate is string => typeof dueDate === "string")
+    .map((dueDate) => parseISO(dueDate))
+    .filter((dueDate) => isValid(dueDate));
+
+  if (dates.length === 0) return null;
+
+  return {
+    start: dateMin(dates),
+    end: dateMax(dates),
+  };
+}
+
+function rangeOverlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
+  return aStart <= bEnd && bStart <= aEnd;
+}
+
+function getPlausibilityWindow(
+  assignmentRange: { start: Date; end: Date } | null,
+  schedule: ExtractedClassSchedule | null,
+  now: Date
+): { start: Date; end: Date } {
+  if (assignmentRange) {
+    return {
+      start: subDays(assignmentRange.start, 42),
+      end: addDays(assignmentRange.end, 42),
+    };
+  }
+
+  if (schedule?.semesterStart && schedule?.semesterEnd) {
+    const start = parseISO(schedule.semesterStart);
+    const end = parseISO(schedule.semesterEnd);
+    if (isValid(start) && isValid(end)) {
+      return {
+        start: subDays(start, 21),
+        end: addDays(end, 21),
+      };
+    }
+  }
+
+  return {
+    start: subDays(now, 120),
+    end: addDays(now, 120),
+  };
+}
+
+function normalizeScheduleBounds(
+  schedule: ExtractedClassSchedule | null,
+  assignmentRange: { start: Date; end: Date } | null,
+  now: Date
+): ExtractedClassSchedule | null {
+  if (!schedule?.semesterStart || !schedule.semesterEnd) return schedule;
+
+  const start = parseISO(schedule.semesterStart);
+  const end = parseISO(schedule.semesterEnd);
+  if (!isValid(start) || !isValid(end)) return schedule;
+
+  const window = getPlausibilityWindow(assignmentRange, schedule, now);
+  if (rangeOverlaps(start, end, window.start, window.end)) return schedule;
+
+  return {
+    ...schedule,
+    semesterStart: null,
+    semesterEnd: null,
+  };
+}
+
+function getTrustedDatedTopics(
+  topics: CourseContextInput["topics"],
+  assignmentRange: { start: Date; end: Date } | null,
+  schedule: ExtractedClassSchedule | null,
+  now: Date
+): CourseContextInput["topics"] {
+  const datedTopics = topics.filter((t) => t.startDate && isValid(parseISO(t.startDate)));
+  if (datedTopics.length === 0) return [];
+
+  const first = parseISO(datedTopics[0].startDate!);
+  const last = parseISO(datedTopics[datedTopics.length - 1].startDate!);
+  if (!isValid(first) || !isValid(last)) return [];
+
+  const window = getPlausibilityWindow(assignmentRange, schedule, now);
+  return rangeOverlaps(first, last, window.start, window.end) ? datedTopics : [];
 }
 
 function toWeekPosition(topic: CourseContextInput["topics"][number]): WeekPosition {
@@ -342,30 +449,29 @@ function resolveBySemesterFraction(
 
 function computeSemesterProgress(
   schedule: ExtractedClassSchedule | null,
-  topics: CourseContextInput["topics"],
+  datedTopics: CourseContextInput["topics"],
+  assignmentRange: { start: Date; end: Date } | null,
   now: Date
 ): number | null {
   if (schedule?.semesterStart && schedule?.semesterEnd) {
     const start = parseISO(schedule.semesterStart);
     const end = parseISO(schedule.semesterEnd);
-    if (isValid(start) && isValid(end)) {
-      const total = differenceInCalendarDays(end, start);
-      if (total > 0) {
-        return Math.max(0, Math.min(1, differenceInCalendarDays(now, start) / total));
-      }
-    }
+    if (isValid(start) && isValid(end)) return computeProgressFromRange(start, end, now);
   }
-  // Fallback: use first and last dated topics
-  const dated = topics.filter((t) => t.startDate && isValid(parseISO(t.startDate!)));
-  if (dated.length >= 2) {
-    const first = parseISO(dated[0].startDate!);
-    const last = parseISO(dated[dated.length - 1].startDate!);
-    const total = differenceInCalendarDays(last, first);
-    if (total > 0) {
-      return Math.max(0, Math.min(1, differenceInCalendarDays(now, first) / total));
-    }
+  if (datedTopics.length >= 2) {
+    const first = parseISO(datedTopics[0].startDate!);
+    const last = parseISO(datedTopics[datedTopics.length - 1].startDate!);
+    return computeProgressFromRange(first, last, now);
   }
+  if (assignmentRange) return computeProgressFromRange(assignmentRange.start, assignmentRange.end, now);
   return null;
+}
+
+function computeProgressFromRange(start: Date, end: Date, now: Date): number | null {
+  if (!isValid(start) || !isValid(end)) return null;
+  const total = differenceInCalendarDays(end, start);
+  if (total <= 0) return null;
+  return Math.max(0, Math.min(1, differenceInCalendarDays(now, start) / total));
 }
 
 // ── Next class meeting ───────────────────────────────────────────────────────

@@ -9,6 +9,7 @@
 import { generateObject } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { z } from "zod";
+import crypto from "crypto";
 import { db } from "@/lib/db";
 import { getISOWeek, getISOWeekYear, startOfWeek, addDays, format, parseISO, isValid, getDay } from "date-fns";
 import type { CourseContextSnapshot } from "@/lib/course-context";
@@ -21,6 +22,7 @@ export interface WeekOverviewData {
   summary: string;
   courseNotes: { courseName: string; note: string }[];
   generatedAt: string;
+  sourceFingerprint?: string;
 }
 
 export interface WeekCourseData {
@@ -218,6 +220,45 @@ Write a learning-focused week overview with a summary and a note for each course
   return object;
 }
 
+function buildWeekOverviewFingerprint(
+  courseContexts: { course: { id: string; name: string; color: string }; context: CourseContextSnapshot }[],
+  signals: LearningSignals | null,
+): string {
+  const payload = {
+    courses: courseContexts.map(({ course, context }) => ({
+      id: course.id,
+      name: course.name,
+      weekLabel: context.currentWeek?.weekLabel ?? null,
+      weekNumber: context.currentWeek?.weekNumber ?? null,
+      topics: context.currentWeek?.topics ?? [],
+      readings: context.currentWeek?.readings ?? [],
+      urgentAssignments: context.urgentAssignments.map((a) => ({
+        title: a.title,
+        dueDate: a.dueDate,
+        status: a.status,
+      })),
+      upcomingAssignments: context.upcomingAssignments.map((a) => ({
+        title: a.title,
+        dueDate: a.dueDate,
+        status: a.status,
+      })),
+    })),
+    signals: signals
+      ? {
+          confidenceTrend: signals.confidenceTrend.direction,
+          studyStreak: signals.studyStreak,
+          blockers: signals.topBlockers.map((b) => b.blocker),
+        }
+      : null,
+  };
+
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(payload))
+    .digest("hex")
+    .slice(0, 16);
+}
+
 // ── Cache logic ──────────────────────────────────────────────────────────────
 
 export async function getOrCreateWeekOverview(
@@ -229,6 +270,7 @@ export async function getOrCreateWeekOverview(
 
   const now = new Date();
   const weekKey = getCurrentWeekKey(now);
+  const sourceFingerprint = buildWeekOverviewFingerprint(courseContexts, signals);
 
   // Check cache
   const cached = await db.learningEvent.findFirst({
@@ -241,7 +283,11 @@ export async function getOrCreateWeekOverview(
 
   if (cached) {
     const meta = cached.metadata as Record<string, unknown>;
-    if (meta.weekKey === weekKey && Array.isArray(meta.courseNotes)) {
+    if (
+      meta.weekKey === weekKey &&
+      meta.sourceFingerprint === sourceFingerprint &&
+      Array.isArray(meta.courseNotes)
+    ) {
       return meta as unknown as WeekOverviewData;
     }
   }
@@ -255,6 +301,7 @@ export async function getOrCreateWeekOverview(
       summary: result.summary,
       courseNotes: result.courseNotes,
       generatedAt: now.toISOString(),
+      sourceFingerprint,
     };
 
     await db.learningEvent.create({
