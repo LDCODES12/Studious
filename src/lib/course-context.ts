@@ -19,6 +19,7 @@ import {
   isAfter,
   format,
   getDay,
+  startOfWeek,
   setHours,
   setMinutes,
 } from "date-fns";
@@ -364,13 +365,17 @@ function resolveByExactDates(
   datedTopics: CourseContextInput["topics"],
   now: Date
 ) {
+  const sparseSchedule = isSparseDatedSchedule(datedTopics);
+
   // Find the current week: startDate ≤ now < next startDate
   let currentIdx = -1;
   for (let i = 0; i < datedTopics.length; i++) {
     const start = parseISO(datedTopics[i].startDate!);
     const nextStart = i + 1 < datedTopics.length ? parseISO(datedTopics[i + 1].startDate!) : null;
+    const topicWeekStart = sparseSchedule ? startOfWeek(start, { weekStartsOn: 1 }) : start;
+    const topicWeekEnd = sparseSchedule ? addDays(topicWeekStart, 7) : nextStart;
 
-    if (!isBefore(now, start) && (!nextStart || isBefore(now, nextStart))) {
+    if (!isBefore(now, topicWeekStart) && (!topicWeekEnd || isBefore(now, topicWeekEnd))) {
       currentIdx = i;
       break;
     }
@@ -378,6 +383,21 @@ function resolveByExactDates(
 
   // If before all topics, current = first; if after all, current = last
   if (currentIdx === -1) {
+    if (sparseSchedule) {
+      const previousIdx = datedTopics.findLastIndex((topic) => !isBefore(now, parseISO(topic.startDate!)));
+      const nextIdx = datedTopics.findIndex((topic) => isBefore(now, parseISO(topic.startDate!)));
+      const previousWeekNum = previousIdx >= 0 ? datedTopics[previousIdx].weekNumber : null;
+      const nextWeekNum = nextIdx >= 0 ? datedTopics[nextIdx].weekNumber : null;
+      const previousAllIdx = previousWeekNum != null ? allTopics.findIndex((t) => t.weekNumber === previousWeekNum) : -1;
+      const nextAllIdx = nextWeekNum != null ? allTopics.findIndex((t) => t.weekNumber === nextWeekNum) : -1;
+
+      return {
+        previousWeek: previousAllIdx >= 0 ? toWeekPosition(allTopics[previousAllIdx]) : null,
+        currentWeek: null,
+        nextWeek: nextAllIdx >= 0 ? toWeekPosition(allTopics[nextAllIdx]) : null,
+      };
+    }
+
     if (isBefore(now, parseISO(datedTopics[0].startDate!))) {
       currentIdx = 0;
     } else {
@@ -394,6 +414,24 @@ function resolveByExactDates(
     currentWeek: toWeekPosition(allTopics[allIdx]),
     nextWeek: allIdx < allTopics.length - 1 ? toWeekPosition(allTopics[allIdx + 1]) : null,
   };
+}
+
+function isSparseDatedSchedule(
+  datedTopics: CourseContextInput["topics"],
+): boolean {
+  if (datedTopics.length < 2 || datedTopics.length > 8) return false;
+
+  const gaps: number[] = [];
+  for (let i = 1; i < datedTopics.length; i++) {
+    const previous = parseISO(datedTopics[i - 1].startDate!);
+    const current = parseISO(datedTopics[i].startDate!);
+    if (!isValid(previous) || !isValid(current)) continue;
+    gaps.push(differenceInCalendarDays(current, previous));
+  }
+
+  if (gaps.length === 0) return false;
+  const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+  return averageGap > 10;
 }
 
 function resolveByInterpolation(
