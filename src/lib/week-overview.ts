@@ -57,6 +57,8 @@ type CourseContextBundle = {
   context: CourseContextSnapshot;
 };
 
+const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-03-09-break-v2";
+
 // ── Week key ─────────────────────────────────────────────────────────────────
 
 export function getCurrentWeekKey(now: Date = new Date()): string {
@@ -337,6 +339,7 @@ function buildWeekOverviewFingerprint(
   signals: LearningSignals | null,
 ): string {
   const payload = {
+    version: WEEK_OVERVIEW_FINGERPRINT_VERSION,
     courses: courseContexts.map(({ course, context }) => ({
       id: course.id,
       name: course.name,
