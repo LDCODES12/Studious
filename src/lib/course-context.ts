@@ -35,6 +35,7 @@ export interface WeekPosition {
   weekLabel: string;
   topics: string[];
   readings: string[];
+  notes: string | null;
   completedTopics: string[];
   startDate: string | null;
 }
@@ -84,6 +85,7 @@ export interface CourseContextInput {
     startDate: string | null;
     topics: string[];
     readings: string[];
+    notes: string | null;
     completedTopics: string[];
   }[];
   assignments: {
@@ -351,6 +353,7 @@ function toWeekPosition(topic: CourseContextInput["topics"][number]): WeekPositi
     weekLabel: topic.weekLabel,
     topics: topic.topics,
     readings: topic.readings,
+    notes: topic.notes ?? null,
     completedTopics: topic.completedTopics,
     startDate: topic.startDate,
   };
@@ -552,6 +555,7 @@ export async function buildStudyContext(
           startDate: true,
           topics: true,
           readings: true,
+          notes: true,
           completedTopics: true,
         },
       },

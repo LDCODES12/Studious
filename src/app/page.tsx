@@ -41,6 +41,7 @@ export default async function DashboardPage() {
                 startDate: true,
                 topics: true,
                 readings: true,
+                notes: true,
                 completedTopics: true,
               },
             },

@@ -32,6 +32,7 @@ export interface WeekCourseData {
   weekLabel: string | null;
   topics: string[];
   readings: string[];
+  notes: string | null;
   deadlines: { title: string; type: string; dueDay: string; pointsPossible: number | null; status: string }[];
   aiNote: string | null;
 }
@@ -91,11 +92,12 @@ export function buildWeekCourses(
         weekLabel: currentWeek?.weekLabel ?? null,
         topics: currentWeek?.topics ?? [],
         readings: currentWeek?.readings ?? [],
+        notes: currentWeek?.notes ?? null,
         deadlines,
         aiNote: null,
       };
     })
-    .filter((c) => c.topics.length > 0 || c.readings.length > 0 || c.deadlines.length > 0);
+    .filter((c) => Boolean(c.weekLabel) || c.topics.length > 0 || c.readings.length > 0 || Boolean(c.notes) || c.deadlines.length > 0);
 }
 
 export function buildDeadlineDays(
@@ -168,6 +170,9 @@ async function generateOverview(
       if (context.currentWeek.readings.length > 0) {
         parts.push(`Readings: ${context.currentWeek.readings.join(", ")}`);
       }
+      if (context.currentWeek.notes) {
+        parts.push(`Notes: ${context.currentWeek.notes}`);
+      }
     }
     parts.push(`Grade: ${context.gradeInfo}`);
 
@@ -232,6 +237,7 @@ function buildWeekOverviewFingerprint(
       weekNumber: context.currentWeek?.weekNumber ?? null,
       topics: context.currentWeek?.topics ?? [],
       readings: context.currentWeek?.readings ?? [],
+      notes: context.currentWeek?.notes ?? null,
       urgentAssignments: context.urgentAssignments.map((a) => ({
         title: a.title,
         dueDate: a.dueDate,

@@ -55,6 +55,13 @@ export function WeekOverview({ overview, courses, deadlineDays }: WeekOverviewPr
                 </p>
               )}
 
+              {/* Notes */}
+              {course.notes && (
+                <p className="text-[11px] text-muted-foreground/80 ml-4">
+                  {course.notes}
+                </p>
+              )}
+
               {/* Deadlines for this course */}
               {course.deadlines.length > 0 && (
                 <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 ml-4">

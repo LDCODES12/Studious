@@ -29,6 +29,7 @@ export default async function StudyToolsPage() {
               startDate: true,
               topics: true,
               readings: true,
+              notes: true,
               completedTopics: true,
             },
           },
