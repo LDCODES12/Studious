@@ -261,6 +261,9 @@ async function generateOverview(
   signals: LearningSignals | null,
   now: Date,
 ): Promise<{ summary: string; courseNotes: { courseName: string; note: string }[] }> {
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const weekEnd = addDays(weekStart, 6);
+
   const courseLines = courseContexts.map(({ course, context }) => {
     const parts = [`${course.name}:`];
     if (context.currentWeek) {
@@ -277,7 +280,10 @@ async function generateOverview(
     }
     parts.push(`Grade: ${context.gradeInfo}`);
 
-    const deadlines = [...context.urgentAssignments, ...context.upcomingAssignments];
+    const deadlines = [...context.urgentAssignments, ...context.upcomingAssignments].filter((assignment) => {
+      const due = parseISO(assignment.dueDate);
+      return isValid(due) && due >= weekStart && due <= weekEnd;
+    });
     if (deadlines.length > 0) {
       const dlStr = deadlines.slice(0, 5).map((a) => {
         const due = parseISO(a.dueDate);
