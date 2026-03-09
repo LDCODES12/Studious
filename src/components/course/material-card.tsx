@@ -8,6 +8,7 @@ interface CourseMaterial {
   id: string;
   fileName: string;
   detectedType: string;
+  sourceRole: string;
   summary: string;
   relatedTopics: string[];
   storedForAI?: boolean;
@@ -29,6 +30,13 @@ const typeBadgeColor: Record<string, string> = {
   lecture_slides: "bg-purple-100 text-purple-700",
   syllabus: "bg-green-100 text-green-700",
   other: "bg-gray-100 text-gray-600",
+};
+
+const sourceRoleLabel: Record<string, string> = {
+  timeline: "Timeline",
+  content: "Content",
+  mixed: "Mixed",
+  unknown: "Unscored",
 };
 
 export function MaterialCard({
@@ -69,6 +77,9 @@ export function MaterialCard({
             )}
           >
             {typeLabels[material.detectedType] ?? "Other"}
+          </span>
+          <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+            {sourceRoleLabel[material.sourceRole] ?? "Unscored"}
           </span>
           <button
             onClick={handleToggle}

@@ -77,6 +77,7 @@ export default async function CoursePage({ params }: CoursePageProps) {
     courseId: m.courseId,
     fileName: m.fileName,
     detectedType: m.detectedType,
+    sourceRole: m.sourceRole,
     summary: m.summary,
     relatedTopics: m.relatedTopics,
     storedForAI: m.storedForAI,

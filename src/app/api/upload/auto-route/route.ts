@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { autoRouteMaterial } from "@/lib/analyze-material";
+import { autoRouteMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -65,6 +65,7 @@ export async function POST(request: NextRequest) {
           courseId: analysis.courseId,
           fileName: file.name,
           detectedType: analysis.detectedType,
+          sourceRole: inferMaterialSourceRole(analysis.detectedType),
           summary: analysis.summary,
           relatedTopics: analysis.relatedTopics,
           rawText: file.text.slice(0, 25000),

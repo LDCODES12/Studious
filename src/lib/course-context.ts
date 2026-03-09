@@ -37,6 +37,10 @@ export interface WeekPosition {
   topics: string[];
   readings: string[];
   notes: string | null;
+  dateConfidence: string | null;
+  contentConfidence: string | null;
+  scheduleMode: string | null;
+  provenance: unknown;
   completedTopics: string[];
   startDate: string | null;
 }
@@ -87,6 +91,10 @@ export interface CourseContextInput {
     topics: string[];
     readings: string[];
     notes: string | null;
+    dateConfidence?: string | null;
+    contentConfidence?: string | null;
+    scheduleMode?: string | null;
+    provenance?: unknown;
     completedTopics: string[];
   }[];
   assignments: {
@@ -340,12 +348,15 @@ function getTrustedDatedTopics(
   const datedTopics = topics.filter((t) => t.startDate && isValid(parseISO(t.startDate)));
   if (datedTopics.length === 0) return [];
 
-  const first = parseISO(datedTopics[0].startDate!);
-  const last = parseISO(datedTopics[datedTopics.length - 1].startDate!);
+  const trustedByConfidence = datedTopics.filter((topic) => (topic.dateConfidence ?? "unknown") !== "low");
+  const candidates = trustedByConfidence.length >= 2 ? trustedByConfidence : datedTopics;
+
+  const first = parseISO(candidates[0].startDate!);
+  const last = parseISO(candidates[candidates.length - 1].startDate!);
   if (!isValid(first) || !isValid(last)) return [];
 
   const window = getPlausibilityWindow(assignmentRange, schedule, now);
-  return rangeOverlaps(first, last, window.start, window.end) ? datedTopics : [];
+  return rangeOverlaps(first, last, window.start, window.end) ? candidates : [];
 }
 
 function toWeekPosition(topic: CourseContextInput["topics"][number]): WeekPosition {
@@ -355,6 +366,10 @@ function toWeekPosition(topic: CourseContextInput["topics"][number]): WeekPositi
     topics: topic.topics,
     readings: topic.readings,
     notes: topic.notes ?? null,
+    dateConfidence: topic.dateConfidence ?? null,
+    contentConfidence: topic.contentConfidence ?? null,
+    scheduleMode: topic.scheduleMode ?? null,
+    provenance: topic.provenance ?? null,
     completedTopics: topic.completedTopics,
     startDate: topic.startDate,
   };
@@ -419,6 +434,7 @@ function resolveByExactDates(
 function isSparseDatedSchedule(
   datedTopics: CourseContextInput["topics"],
 ): boolean {
+  if (datedTopics.some((topic) => topic.scheduleMode === "sparse")) return true;
   if (datedTopics.length < 2 || datedTopics.length > 8) return false;
 
   const gaps: number[] = [];
@@ -594,6 +610,10 @@ export async function buildStudyContext(
           topics: true,
           readings: true,
           notes: true,
+          dateConfidence: true,
+          contentConfidence: true,
+          scheduleMode: true,
+          provenance: true,
           completedTopics: true,
         },
       },
@@ -681,6 +701,11 @@ function formatOneCourse(s: CourseContextSnapshot): string {
       `=== ${s.courseName} ===`,
       `Week ${s.currentWeek.weekNumber}: "${s.currentWeek.weekLabel}" (${s.positionConfidence}${progress})`
     );
+    if (s.currentWeek.scheduleMode || s.currentWeek.dateConfidence || s.currentWeek.contentConfidence) {
+      lines.push(
+        `Timeline metadata: mode=${s.currentWeek.scheduleMode ?? "unknown"}, dateConfidence=${s.currentWeek.dateConfidence ?? "unknown"}, contentConfidence=${s.currentWeek.contentConfidence ?? "unknown"}`,
+      );
+    }
   } else {
     lines.push(`=== ${s.courseName} ===`, `Timeline not available${progress}`);
   }

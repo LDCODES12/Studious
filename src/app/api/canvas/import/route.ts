@@ -18,7 +18,7 @@ import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
 import { addDays, addYears, parseISO, subDays } from "date-fns";
 import { generateTasksForUser } from "@/lib/tasks";
-import { analyzeCourseMaterial } from "@/lib/analyze-material";
+import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
 import { generateEmbedding } from "@/lib/embeddings";
 
 export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
@@ -787,6 +787,7 @@ export async function POST(request: NextRequest) {
                 courseId: scCourseId,
                 fileName: st.fileName,
                 detectedType: "syllabus",
+                sourceRole: "mixed",
                 summary: "Syllabus automatically imported from Canvas.",
                 relatedTopics: [],
                 rawText: storedText,
@@ -857,6 +858,7 @@ export async function POST(request: NextRequest) {
                   courseId: scCourseId,
                   fileName: mt.fileName,
                   detectedType: analysis.detectedType,
+                  sourceRole: inferMaterialSourceRole(analysis.detectedType),
                   summary: analysis.summary,
                   relatedTopics: analysis.relatedTopics,
                   rawText: pdfText.slice(0, 25_000),
@@ -1189,6 +1191,20 @@ export async function POST(request: NextRequest) {
 
         const pipelineResult = await runTopicPipeline(pipelineInput);
         const topics = pipelineResult.topics;
+        const anchors = pipelineResult.anchors;
+
+        if (pipelineResult.materialSourceRoles.length > 0) {
+          await Promise.all(
+            pipelineResult.materialSourceRoles.map(async ({ label, role }) => {
+              const fileName = label.replace(/^stored:/, "");
+              if (fileName === "html-body") return;
+              await db.courseMaterial.updateMany({
+                where: { courseId: scCourseId, fileName },
+                data: { sourceRole: role },
+              });
+            }),
+          );
+        }
 
         // Delete identified module topics
         if (pipelineResult.moduleIdsToDelete.length > 0) {
@@ -1201,8 +1217,34 @@ export async function POST(request: NextRequest) {
         await db.courseTopic.deleteMany({
           where: { courseId: scCourseId, canvasModuleId: null },
         });
+        await db.courseTimelineAnchor.deleteMany({
+          where: { courseId: scCourseId },
+        });
 
         // Write new unified timeline
+        await db.course.update({
+          where: { id: scCourseId },
+          data: {
+            timelineMode: pipelineResult.timelineMode,
+            timelineDiagnostics: pipelineResult.timelineDiagnostics as object,
+          },
+        });
+
+        if (anchors.length > 0) {
+          await db.courseTimelineAnchor.createMany({
+            data: anchors.map((anchor) => ({
+              courseId: scCourseId,
+              sequenceNumber: anchor.sequenceNumber,
+              anchorDate: anchor.anchorDate,
+              anchorType: anchor.anchorType,
+              isInstructional: anchor.isInstructional,
+              calendarConfidence: anchor.calendarConfidence,
+              sourceRefs: anchor.sourceRefs as object[],
+              notes: anchor.notes ?? null,
+            })),
+          });
+        }
+
         if (topics.length > 0) {
           await db.courseTopic.createMany({
             data: topics.map((t, i) => ({
@@ -1213,6 +1255,10 @@ export async function POST(request: NextRequest) {
               topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
               readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
               notes: typeof t.notes === "string" ? t.notes : null,
+              dateConfidence: t.dateConfidence,
+              contentConfidence: t.contentConfidence,
+              scheduleMode: t.scheduleMode,
+              provenance: t.provenance as object,
               canvasModuleId: null,
             })),
           });

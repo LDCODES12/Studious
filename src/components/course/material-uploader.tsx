@@ -8,6 +8,7 @@ export interface UploadedMaterial {
   courseId: string;
   fileName: string;
   detectedType: string;
+  sourceRole: string;
   summary: string;
   relatedTopics: string[];
   storedForAI: boolean;

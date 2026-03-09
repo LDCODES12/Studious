@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { analyzeCourseMaterial } from "@/lib/analyze-material";
+import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -45,6 +45,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       courseId,
       fileName,
       detectedType: analysis.detectedType,
+      sourceRole: inferMaterialSourceRole(analysis.detectedType),
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
       rawText: text.slice(0, 25000),
@@ -60,6 +61,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       detectedType: material.detectedType,
       summary: material.summary,
       relatedTopics: material.relatedTopics,
+      sourceRole: material.sourceRole,
       storedForAI: material.storedForAI,
       uploadedAt: material.uploadedAt.toISOString(),
     },
@@ -128,6 +130,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       detectedType: true,
       summary: true,
       relatedTopics: true,
+      sourceRole: true,
       storedForAI: true,
       uploadedAt: true,
     },

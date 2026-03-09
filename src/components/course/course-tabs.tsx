@@ -38,6 +38,10 @@ interface CourseTopic {
   topics: string[];
   readings: string[];
   notes: string | null;
+  dateConfidence?: string;
+  contentConfidence?: string;
+  scheduleMode?: string;
+  provenance?: unknown;
   completedTopics: string[];
 }
 
@@ -45,6 +49,7 @@ interface CourseMaterial {
   id: string;
   fileName: string;
   detectedType: string;
+  sourceRole: string;
   summary: string;
   relatedTopics: string[];
   storedForAI: boolean;
@@ -216,6 +221,7 @@ function WeekTopicSection({
         {topic.startDate && (
           <span className="ml-auto text-[12px] text-muted-foreground">
             {format(parseISO(topic.startDate), "MMM d")}
+            {topic.dateConfidence && topic.dateConfidence !== "unknown" ? ` · ${topic.dateConfidence} date` : ""}
           </span>
         )}
       </button>

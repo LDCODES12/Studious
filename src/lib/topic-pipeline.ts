@@ -79,8 +79,39 @@ export interface PipelineInput {
   syllabusEvents?: SyllabusEventInfo[];
 }
 
+export type ConfidenceLevel = "high" | "medium" | "low" | "unknown";
+export type ScheduleMode = "weekly" | "sparse" | "inferred" | "unknown";
+export type TimelineAnchorType =
+  | "explicit_date"
+  | "inferred_week"
+  | "sparse_meeting"
+  | "break"
+  | "module_scaffold"
+  | "lecture_group";
+
+export interface TimelineAnchorRecord {
+  sequenceNumber: number;
+  anchorDate: string | null;
+  anchorType: TimelineAnchorType;
+  isInstructional: boolean;
+  calendarConfidence: ConfidenceLevel;
+  sourceRefs: { label: string; role: CandidateRole }[];
+  notes?: string | null;
+}
+
+export interface SynthesizedTopic extends ParsedTopic {
+  dateConfidence: ConfidenceLevel;
+  contentConfidence: ConfidenceLevel;
+  scheduleMode: ScheduleMode;
+  provenance: Record<string, unknown>;
+}
+
 export interface PipelineResult {
-  topics: ParsedTopic[];
+  topics: SynthesizedTopic[];
+  anchors: TimelineAnchorRecord[];
+  timelineMode: ScheduleMode;
+  materialSourceRoles: { label: string; role: CandidateRole }[];
+  timelineDiagnostics: Record<string, unknown>;
   moduleIdsToDelete: string[];
   debug: PipelineDebug;
 }
@@ -537,6 +568,115 @@ function isSparseTimeline(topics: ParsedTopic[]): boolean {
   if (gaps.length === 0) return false;
   const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
   return averageGap > 10;
+}
+
+interface TimelineSpine {
+  topics: ParsedTopic[];
+  anchors: TimelineAnchorRecord[];
+  scheduleMode: ScheduleMode;
+}
+
+function buildTimelineSpine(args: {
+  topics: ParsedTopic[];
+  hasTimelineAuthority: boolean;
+  usedModuleScaffold: boolean;
+  lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
+  sourceRefs: { label: string; role: CandidateRole }[];
+}): TimelineSpine {
+  const scheduleMode: ScheduleMode = isSparseTimeline(args.topics)
+    ? "sparse"
+    : args.topics.some((topic) => Boolean(topic.startDate))
+      ? "weekly"
+      : args.usedModuleScaffold || !args.hasTimelineAuthority
+        ? "inferred"
+        : "unknown";
+
+  const anchors: TimelineAnchorRecord[] = args.topics.map((topic, index) => {
+    let anchorType: TimelineAnchorType = "inferred_week";
+    let calendarConfidence: ConfidenceLevel = "low";
+
+    if (isBreakTopic(topic)) {
+      anchorType = "break";
+      calendarConfidence = topic.startDate ? "medium" : "low";
+    } else if (scheduleMode === "sparse" && topic.startDate) {
+      anchorType = "sparse_meeting";
+      calendarConfidence = args.hasTimelineAuthority ? "high" : "medium";
+    } else if (args.hasTimelineAuthority && topic.startDate) {
+      anchorType = "explicit_date";
+      calendarConfidence = "high";
+    } else if (args.usedModuleScaffold) {
+      anchorType = "module_scaffold";
+      calendarConfidence = topic.startDate ? "medium" : "low";
+    } else if (topic.startDate && args.lectureCalendarSource === "lecture-anchors") {
+      anchorType = "lecture_group";
+      calendarConfidence = "medium";
+    } else if (topic.startDate) {
+      anchorType = "inferred_week";
+      calendarConfidence = "medium";
+    }
+
+    return {
+      sequenceNumber: index + 1,
+      anchorDate: topic.startDate ?? null,
+      anchorType,
+      isInstructional: !isBreakTopic(topic) && ((topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0),
+      calendarConfidence,
+      sourceRefs: args.sourceRefs,
+      notes: topic.notes ?? null,
+    };
+  });
+
+  return { topics: args.topics, anchors, scheduleMode };
+}
+
+function mergeContentOntoSpine(args: {
+  spine: TimelineSpine;
+  topics: ParsedTopic[];
+  timelineSource: string;
+  contentSource: string;
+  lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
+  sourceRefs: { label: string; role: CandidateRole }[];
+  usedModuleScaffold: boolean;
+  validationWarnings: string[];
+}): SynthesizedTopic[] {
+  return args.topics.map((topic, index) => {
+    const anchor = args.spine.anchors[index] ?? {
+      sequenceNumber: index + 1,
+      anchorDate: topic.startDate ?? null,
+      anchorType: "inferred_week" as const,
+      isInstructional: true,
+      calendarConfidence: "unknown" as const,
+      sourceRefs: args.sourceRefs,
+      notes: topic.notes ?? null,
+    };
+
+    const hasContent = (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
+    const contentConfidence: ConfidenceLevel =
+      !hasContent
+        ? "low"
+        : args.contentSource !== "none"
+          ? "high"
+          : args.usedModuleScaffold
+            ? "medium"
+            : "low";
+
+    return {
+      ...topic,
+      dateConfidence: anchor.calendarConfidence,
+      contentConfidence,
+      scheduleMode: args.spine.scheduleMode,
+      provenance: {
+        anchorSequenceNumber: anchor.sequenceNumber,
+        anchorType: anchor.anchorType,
+        timelineSource: args.timelineSource,
+        contentSource: args.contentSource,
+        lectureCalendarSource: args.lectureCalendarSource ?? "none",
+        sourceRefs: anchor.sourceRefs,
+        usedModuleScaffold: args.usedModuleScaffold,
+        validationWarnings: args.validationWarnings,
+      },
+    };
+  });
 }
 
 // ─── Stage 3b: LECTURE CALENDAR (algorithmic) ────────────────────────────────
@@ -1470,6 +1610,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     !hasTimelineAuthority &&
     contentModules.length >= Math.max(8, aiTopics.length + 3) &&
     contentModules.length >= Math.ceil(aiTopics.length * 1.5);
+  let usedModuleScaffold = false;
 
   if (shouldUseModuleScaffold) {
     const scaffold = organizeModulesAsTimeline(
@@ -1480,6 +1621,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     if (scaffold.length > 0) {
       aiTopics = mergeContentOntoTimeline(scaffold, aiTopics, input.courseName);
       debug.fallbackUsed = true;
+      usedModuleScaffold = true;
       console.log(
         `[pipeline] ${input.courseName}: Stage 3d replaced weak content-only timeline with ${scaffold.length}-entry module scaffold`,
       );
@@ -1548,8 +1690,38 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     console.warn(`[pipeline] ${input.courseName}: validation warnings:`, validated.warnings);
   }
 
-  return {
+  const spine = buildTimelineSpine({
     topics: validated.topics,
+    hasTimelineAuthority,
+    usedModuleScaffold,
+    lectureCalendarSource: debug.lectureCalendarSource,
+    sourceRefs: debug.sourceRoles ?? [],
+  });
+
+  const synthesizedTopics = mergeContentOntoSpine({
+    spine,
+    topics: validated.topics,
+    timelineSource: debug.timelineSource ?? "none",
+    contentSource: debug.contentSource ?? "none",
+    lectureCalendarSource: debug.lectureCalendarSource,
+    sourceRefs: debug.sourceRoles ?? [],
+    usedModuleScaffold,
+    validationWarnings: debug.stage5Warnings,
+  });
+
+  return {
+    topics: synthesizedTopics,
+    anchors: spine.anchors,
+    timelineMode: spine.scheduleMode,
+    materialSourceRoles: debug.sourceRoles ?? [],
+    timelineDiagnostics: {
+      timelineSource: debug.timelineSource ?? "none",
+      contentSource: debug.contentSource ?? "none",
+      lectureCalendarSource: debug.lectureCalendarSource ?? "none",
+      usedModuleScaffold,
+      stage5Warnings: debug.stage5Warnings,
+      stage2Classifications: debug.stage2Classifications,
+    },
     moduleIdsToDelete,
     debug,
   };

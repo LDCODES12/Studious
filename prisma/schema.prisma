@@ -79,11 +79,14 @@ model Course {
   applyGroupWeights Boolean       @default(false) // from Canvas apply_assignment_group_weights
   classSchedule  Json?            // AI-extracted meeting schedule: { meetings, semesterStart, semesterEnd }
   syllabusEvents Json?            // AI-extracted dated events: [{ title, dueDate, type }] for cross-source reconciliation
+  timelineMode   String?          @default("unknown") // weekly | sparse | inferred | unknown
+  timelineDiagnostics Json?       // pipeline diagnostics + source selections for timeline synthesis
   createdAt      DateTime         @default(now())
   user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments    Assignment[]
   assignmentGroups AssignmentGroup[]
   topics         CourseTopic[]
+  timelineAnchors CourseTimelineAnchor[]
   materials      CourseMaterial[]
   materialCandidates CanvasMaterialCandidate[]
   quizzes        Quiz[]
@@ -101,10 +104,30 @@ model CourseTopic {
   topics          String[]
   readings        String[]
   notes           String?
+  dateConfidence  String   @default("unknown") // high | medium | low | unknown
+  contentConfidence String @default("unknown") // high | medium | low | unknown
+  scheduleMode    String   @default("unknown") // weekly | sparse | inferred | unknown
+  provenance      Json?
   completedTopics String[] @default([])
   canvasModuleId  String?  // Canvas module ID for upsert sync
   createdAt       DateTime @default(now())
   course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+}
+
+model CourseTimelineAnchor {
+  id                 String   @id @default(cuid())
+  courseId           String
+  sequenceNumber     Int
+  anchorDate         String?
+  anchorType         String   // explicit_date | inferred_week | sparse_meeting | break | module_scaffold | lecture_group
+  isInstructional    Boolean  @default(true)
+  calendarConfidence String   @default("unknown") // high | medium | low | unknown
+  sourceRefs         Json?
+  notes              String?
+  createdAt          DateTime @default(now())
+  course             Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, sequenceNumber])
 }
 
 model CourseMaterial {
@@ -112,6 +135,7 @@ model CourseMaterial {
   courseId      String
   fileName      String
   detectedType  String
+  sourceRole    String   @default("unknown") // timeline | content | mixed | unknown
   summary       String
   relatedTopics String[]
   rawText       String

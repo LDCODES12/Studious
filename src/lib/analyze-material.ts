@@ -8,6 +8,8 @@ export interface MaterialAnalysis {
   relatedTopics: string[];
 }
 
+export type MaterialSourceRole = "timeline" | "content" | "mixed" | "unknown";
+
 export interface AutoRouteResult {
   courseId: string | null;
   detectedType: MaterialAnalysis["detectedType"];
@@ -105,4 +107,13 @@ Only use labels from the provided list in relatedTopics. If the list is empty, r
   } catch {
     return { detectedType: "other", summary: "Unable to analyze document.", relatedTopics: [] };
   }
+}
+
+export function inferMaterialSourceRole(detectedType: MaterialAnalysis["detectedType"]): MaterialSourceRole {
+  if (detectedType === "syllabus") return "mixed";
+  if (detectedType === "lecture_notes" || detectedType === "lecture_slides" || detectedType === "textbook") {
+    return "content";
+  }
+  if (detectedType === "problem_set") return "content";
+  return "unknown";
 }

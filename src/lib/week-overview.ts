@@ -33,6 +33,9 @@ export interface WeekCourseData {
   topics: string[];
   readings: string[];
   notes: string | null;
+  dateConfidence: string | null;
+  contentConfidence: string | null;
+  scheduleMode: string | null;
   deadlines: { title: string; type: string; dueDay: string; pointsPossible: number | null; status: string }[];
   aiNote: string | null;
 }
@@ -57,7 +60,7 @@ type CourseContextBundle = {
   context: CourseContextSnapshot;
 };
 
-const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-03-09-break-v2";
+const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-03-09-provenance-v3";
 
 // ── Week key ─────────────────────────────────────────────────────────────────
 
@@ -149,6 +152,10 @@ export function applyDetectedTermBreaks(
       topics: [] as string[],
       readings: [] as string[],
       notes: "No class — Spring Break",
+      dateConfidence: currentWeek.dateConfidence ?? "medium",
+      contentConfidence: currentWeek.contentConfidence ?? "low",
+      scheduleMode: currentWeek.scheduleMode ?? "weekly",
+      provenance: currentWeek.provenance ?? null,
       completedTopics: [] as string[],
       startDate: breakStart,
     };
@@ -202,6 +209,9 @@ export function buildWeekCourses(
         topics: currentWeek?.topics ?? [],
         readings: currentWeek?.readings ?? [],
         notes: currentWeek?.notes ?? null,
+        dateConfidence: currentWeek?.dateConfidence ?? null,
+        contentConfidence: currentWeek?.contentConfidence ?? null,
+        scheduleMode: currentWeek?.scheduleMode ?? null,
         deadlines,
         aiNote: null,
       };
@@ -285,6 +295,11 @@ async function generateOverview(
       if (context.currentWeek.notes) {
         parts.push(`Notes: ${context.currentWeek.notes}`);
       }
+      if (context.currentWeek.scheduleMode || context.currentWeek.dateConfidence || context.currentWeek.contentConfidence) {
+        parts.push(
+          `Timeline metadata: mode=${context.currentWeek.scheduleMode ?? "unknown"}, dateConfidence=${context.currentWeek.dateConfidence ?? "unknown"}, contentConfidence=${context.currentWeek.contentConfidence ?? "unknown"}`,
+        );
+      }
     }
     parts.push(`Grade: ${context.gradeInfo}`);
 
@@ -354,6 +369,9 @@ function buildWeekOverviewFingerprint(
       topics: context.currentWeek?.topics ?? [],
       readings: context.currentWeek?.readings ?? [],
       notes: context.currentWeek?.notes ?? null,
+      dateConfidence: context.currentWeek?.dateConfidence ?? null,
+      contentConfidence: context.currentWeek?.contentConfidence ?? null,
+      scheduleMode: context.currentWeek?.scheduleMode ?? null,
       urgentAssignments: context.urgentAssignments.map((a) => ({
         title: a.title,
         dueDate: a.dueDate,
