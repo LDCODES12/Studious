@@ -71,11 +71,17 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const BREAK_RX = /\bspring break\b|\bno class\b/i;
 
-function isBreakWeek(week: CourseContextSnapshot["currentWeek"]): boolean {
+function hasBreakSignal(week: CourseContextSnapshot["currentWeek"]): boolean {
   if (!week) return false;
   if (BREAK_RX.test(week.weekLabel)) return true;
   if (week.notes && BREAK_RX.test(week.notes)) return true;
   return false;
+}
+
+function isExplicitBreakWeek(week: CourseContextSnapshot["currentWeek"]): boolean {
+  if (!week) return false;
+  if (!hasBreakSignal(week)) return false;
+  return week.topics.length === 0 && week.readings.length === 0;
 }
 
 function hasDeadlineThisWeek(
@@ -101,7 +107,7 @@ export function applyDetectedTermBreaks(
 
   const breakStartByTerm = new Map<string, string>();
   for (const { course, context } of courseContexts) {
-    if (!isBreakWeek(context.currentWeek)) continue;
+    if (!isExplicitBreakWeek(context.currentWeek)) continue;
     if (context.currentWeek?.startDate !== weekStartStr) continue;
     breakStartByTerm.set(course.term ?? "__all__", weekStartStr);
   }
@@ -116,7 +122,7 @@ export function applyDetectedTermBreaks(
     const currentWeek = context.currentWeek;
     const nextWeek = context.nextWeek;
 
-    if (!currentWeek || isBreakWeek(currentWeek)) {
+    if (!currentWeek || isExplicitBreakWeek(currentWeek)) {
       return bundle;
     }
 
@@ -127,7 +133,7 @@ export function applyDetectedTermBreaks(
       Boolean(currentStart && currentStart < breakStart) &&
       Boolean(nextStart && nextStart > breakStart);
     const startsOnBreak = currentStart === breakStart;
-    const breakMentioned = Boolean(currentWeek.notes && BREAK_RX.test(currentWeek.notes));
+    const breakMentioned = hasBreakSignal(currentWeek);
 
     if (!startsOnBreak && !spansBreakGap) {
       return bundle;
