@@ -15,7 +15,7 @@
  */
 
 import OpenAI from "openai";
-import { addDays, addYears, parseISO, subDays } from "date-fns";
+import { addDays, addYears, differenceInCalendarDays, parseISO, subDays } from "date-fns";
 import {
   parseSyllabusTopics,
   sanitizeSchedule,
@@ -36,7 +36,10 @@ export interface ScoredSource {
   text: string;
   score: number;
   label: string;
+  role?: CandidateRole;
 }
+
+type CandidateRole = "timeline" | "content" | "mixed";
 
 export interface CanvasModuleInfo {
   id: string;
@@ -58,6 +61,12 @@ export interface AssignmentDateInfo {
   dueDate: string | null;
 }
 
+export interface SyllabusEventInfo {
+  title: string;
+  dueDate: string | null;
+  type: string;
+}
+
 export interface PipelineInput {
   courseId: string;
   courseName: string;
@@ -67,6 +76,7 @@ export interface PipelineInput {
   termStartDate: string | null;
   termEndDate: string | null;
   assignments: AssignmentDateInfo[];
+  syllabusEvents?: SyllabusEventInfo[];
 }
 
 export interface PipelineResult {
@@ -83,6 +93,10 @@ export interface PipelineDebug {
   stage4OutputWeeks: number;
   stage5Warnings: string[];
   fallbackUsed: boolean;
+  sourceRoles?: { label: string; role: CandidateRole }[];
+  timelineSource?: string;
+  contentSource?: string;
+  lectureCalendarSource?: string;
 }
 
 function shiftIsoDateYears(dateStr: string, years: number): string | null {
@@ -247,6 +261,67 @@ Return JSON: { "classifications": [{ "name": "<exact module name>", "category": 
   }
 }
 
+const TIMELINE_LABEL_RX = /\b(syllab|schedul|course[\s._-]?(guide|outline|info|overview)|calendar)\b/i;
+const CONTENT_LABEL_RX = /\b(lecture|delivered|study\s+outline|review\s+questions|quiz\s+topics?|exam\s+\d|midterm|slides?)\b/i;
+const DATE_TOKEN_RX = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z.]*\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/gi;
+const EXPLICIT_SCHEDULE_RX = /\b(schedule|weekly\s+schedule|course\s+schedule|we(?:'?| )ll\s+meet|meeting\s+dates?)\b/i;
+const BREAK_RX = /\bspring break|no class|holiday\b/i;
+const SLIDE_DECK_RX = /\b(on the agenda|learning objectives|discussion questions|delivered|slide|today we(?:'| )ll|what is|who is this)\b/i;
+
+function countMatches(text: string, rx: RegExp): number {
+  return text.match(rx)?.length ?? 0;
+}
+
+function classifyCandidateRole(src: ScoredSource): CandidateRole {
+  if (src.role) return src.role;
+
+  const label = src.label.toLowerCase();
+  const text = src.text.toLowerCase();
+  const format = detectSourceFormat(src.text);
+
+  const labelTimeline = TIMELINE_LABEL_RX.test(label) ? 3 : 0;
+  const labelContent = CONTENT_LABEL_RX.test(label) ? 3 : 0;
+  const explicitSchedule = EXPLICIT_SCHEDULE_RX.test(text) ? 4 : 0;
+  const breakMentions = BREAK_RX.test(text) ? 2 : 0;
+  const dateMentions = Math.min(5, countMatches(src.text, DATE_TOKEN_RX));
+  const weekMentions = Math.min(5, countMatches(text, /\bweek\s+\d+\b/g));
+  const lectureMentions = Math.min(5, countMatches(text, /\blecture\s+\d+\b/g));
+  const slideSignals = SLIDE_DECK_RX.test(text) ? 3 : 0;
+  const calendarFormat = format.includes("calendar") ? 3 : 0;
+  const structuredSchedule = format.includes("structured schedule") || format.includes("tab-separated") ? 2 : 0;
+
+  const timelineScore =
+    labelTimeline +
+    explicitSchedule +
+    breakMentions +
+    dateMentions +
+    Math.min(3, weekMentions) +
+    calendarFormat +
+    structuredSchedule;
+  const contentScore =
+    labelContent +
+    slideSignals +
+    lectureMentions +
+    (src.score > 1.5 ? 1 : 0);
+
+  if (timelineScore >= 6 && contentScore >= 4) return "mixed";
+  if (timelineScore >= contentScore + 2 && timelineScore >= 5) return "timeline";
+  if (contentScore >= timelineScore + 2 && contentScore >= 4) return "content";
+  if (timelineScore >= 4 && contentScore >= 3) return "mixed";
+  return timelineScore >= contentScore ? "timeline" : "content";
+}
+
+function splitCandidatesByAuthority(candidates: ScoredSource[]) {
+  const classified = candidates.map((src) => ({ ...src, role: classifyCandidateRole(src) }));
+  const timelineCandidates = classified.filter((src) => src.role === "timeline" || src.role === "mixed");
+  const contentCandidates = classified.filter((src) => src.role === "content" || src.role === "mixed");
+  return {
+    classified,
+    timelineCandidates: timelineCandidates.length > 0 ? timelineCandidates : classified,
+    contentCandidates: contentCandidates.length > 0 ? contentCandidates : classified,
+  };
+}
+
 // ─── Stage 3: EXTRACT ───────────────────────────────────────────────────────
 
 interface ExtractionResult {
@@ -280,9 +355,17 @@ async function extractTopicsExpanded(
     const richWeeks = result.filter(
       (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
     ).length;
-    const isGoodResult = result.length > 0 && (result.length < 4 || richWeeks / result.length >= 0.4);
+    const datedWeeks = result.filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)).length;
+    const noteWeeks = result.filter((t) => typeof t.notes === "string" && t.notes.trim().length > 0).length;
+    const dateDenseSchedule =
+      result.length > 0 &&
+      result.length <= 8 &&
+      (datedWeeks / result.length >= 0.8 || (datedWeeks + noteWeeks) / result.length >= 0.8);
+    const isGoodResult =
+      result.length > 0 &&
+      (result.length < 4 || richWeeks / result.length >= 0.4 || dateDenseSchedule);
 
-    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich, ${datedWeeks} dated → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
     if (isGoodResult) {
       allGoodResults.push({ result, label: src.label, fmt, win });
@@ -339,6 +422,123 @@ async function extractTopicsExpanded(
   return { topics, usedLabel, usedWindow };
 }
 
+function isBreakTopic(topic: ParsedTopic): boolean {
+  return BREAK_RX.test(topic.weekLabel ?? "") || BREAK_RX.test(topic.notes ?? "");
+}
+
+function tokenizeWeekText(topic: ParsedTopic): Set<string> {
+  return tokenize([topic.weekLabel, ...(topic.topics ?? []), ...(topic.readings ?? [])].join(" "));
+}
+
+function mergeContentOntoTimeline(
+  timelineTopics: ParsedTopic[],
+  contentTopics: ParsedTopic[],
+  courseName: string,
+): ParsedTopic[] {
+  if (timelineTopics.length === 0) return contentTopics;
+  if (contentTopics.length === 0) return timelineTopics;
+
+  const merged = timelineTopics.map((topic) => ({
+    ...topic,
+    topics: [...(topic.topics ?? [])],
+    readings: [...(topic.readings ?? [])],
+  }));
+
+  const contentByWeek = new Map<number, ParsedTopic>();
+  for (const topic of contentTopics) {
+    if (!contentByWeek.has(topic.weekNumber)) {
+      contentByWeek.set(topic.weekNumber, topic);
+    }
+  }
+
+  const timelineKeywords = merged.map((topic) => tokenizeWeekText(topic));
+
+  for (let i = 0; i < merged.length; i++) {
+    const spine = merged[i];
+    if (isBreakTopic(spine)) continue;
+
+    let content = contentByWeek.get(spine.weekNumber) ?? null;
+    if (!content) {
+      const spineKeywords = timelineKeywords[i];
+      let bestMatch: ParsedTopic | null = null;
+      let bestOverlap = 0;
+      for (const candidate of contentTopics) {
+        const candidateKeywords = tokenizeWeekText(candidate);
+        let overlap = 0;
+        for (const token of spineKeywords) {
+          if (candidateKeywords.has(token)) overlap++;
+        }
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestMatch = candidate;
+        }
+      }
+      if (bestOverlap >= 2) {
+        content = bestMatch;
+      } else if (contentTopics.length === timelineTopics.length) {
+        content = contentTopics[i] ?? null;
+      } else {
+        const mappedIndex = timelineTopics.length === 1
+          ? 0
+          : Math.round(i * (contentTopics.length - 1) / Math.max(1, timelineTopics.length - 1));
+        content = contentTopics[mappedIndex] ?? null;
+      }
+    }
+
+    if (!content) continue;
+
+    const mergedTopics = new Set<string>(spine.topics ?? []);
+    for (const topic of content.topics ?? []) {
+      if (!mergedTopics.has(topic)) {
+        mergedTopics.add(topic);
+      }
+    }
+
+    const mergedReadings = new Set<string>(spine.readings ?? []);
+    for (const reading of content.readings ?? []) {
+      if (!mergedReadings.has(reading)) {
+        mergedReadings.add(reading);
+      }
+    }
+
+    merged[i] = {
+      ...spine,
+      weekLabel:
+        /^week\s+\d+$/i.test(spine.weekLabel) && content.weekLabel
+          ? content.weekLabel
+          : spine.weekLabel,
+      topics: [...mergedTopics],
+      readings: [...mergedReadings],
+      notes: spine.notes ?? content.notes,
+      courseName: content.courseName ?? spine.courseName,
+    };
+  }
+
+  console.log(
+    `[pipeline] ${courseName}: merged ${contentTopics.length} content week(s) onto ${timelineTopics.length} timeline week(s)`,
+  );
+
+  return merged;
+}
+
+function isSparseTimeline(topics: ParsedTopic[]): boolean {
+  if (topics.length < 2 || topics.length > 8) return false;
+  const dated = topics.filter((topic) => topic.startDate && /^\d{4}-\d{2}-\d{2}$/.test(topic.startDate));
+  if (dated.length < 2) return false;
+
+  const gaps: number[] = [];
+  for (let i = 1; i < dated.length; i++) {
+    const previous = parseISO(`${dated[i - 1].startDate}T12:00:00Z`);
+    const current = parseISO(`${dated[i].startDate}T12:00:00Z`);
+    if (Number.isNaN(previous.getTime()) || Number.isNaN(current.getTime())) continue;
+    gaps.push((current.getTime() - previous.getTime()) / 86400_000);
+  }
+
+  if (gaps.length === 0) return false;
+  const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+  return averageGap > 10;
+}
+
 // ─── Stage 3b: LECTURE CALENDAR (algorithmic) ────────────────────────────────
 
 interface LectureDate {
@@ -353,6 +553,18 @@ interface WeekDateRange {
   lectures: LectureDate[];
 }
 
+interface LectureAnchor {
+  lectureNumber: number;
+  dueDate: string;
+  title: string;
+  source: "assignment" | "syllabus-event";
+}
+
+interface LectureCalendarBuild {
+  weeks: WeekDateRange[];
+  source: "none" | "term-start" | "lecture-anchors";
+}
+
 const DAY_CODES: Record<string, number> = {
   SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
 };
@@ -361,14 +573,20 @@ function buildLectureCalendar(
   classSchedule: ClassScheduleInfo | null,
   termStartDate: string | null,
   termEndDate: string | null,
-): WeekDateRange[] {
-  if (!classSchedule || !termStartDate) return [];
+  assignments: AssignmentDateInfo[],
+  syllabusEvents: SyllabusEventInfo[],
+): LectureCalendarBuild {
+  if (!classSchedule || !termStartDate) {
+    return { weeks: [], source: "none" };
+  }
 
   // Find lecture meetings (not labs, discussions, etc.)
   const lectureMeetings = classSchedule.meetings.filter(
     (m) => m.label.toLowerCase() === "lecture",
   );
-  if (lectureMeetings.length === 0) return [];
+  if (lectureMeetings.length === 0) {
+    return { weeks: [], source: "none" };
+  }
 
   // Get unique lecture days (e.g., [1, 3, 5] for MWF)
   const lectureDayCodes = new Set<number>();
@@ -379,33 +597,28 @@ function buildLectureCalendar(
     }
   }
   const sortedDays = [...lectureDayCodes].sort((a, b) => a - b);
-  if (sortedDays.length === 0) return [];
+  if (sortedDays.length === 0) {
+    return { weeks: [], source: "none" };
+  }
 
   const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-  const start = new Date(termStartDate + "T12:00:00");
-  const end = termEndDate ? new Date(termEndDate + "T12:00:00") : new Date(start);
-  if (!termEndDate) {
-    end.setDate(end.getDate() + 16 * 7); // default 16 weeks
+  const parsedTermStart = new Date(termStartDate + "T12:00:00");
+  const end = termEndDate ? new Date(termEndDate + "T12:00:00") : new Date(parsedTermStart);
+  if (!termEndDate) end.setDate(end.getDate() + 16 * 7); // default 16 weeks
+
+  const lectureAnchors = extractLectureAnchors(assignments, syllabusEvents);
+  const requiredCount = Math.max(
+    24,
+    lectureAnchors.reduce((max, anchor) => Math.max(max, anchor.lectureNumber + 6), 0),
+  );
+  const allLectures =
+    lectureAnchors.length > 0
+      ? buildBestAnchoredLectureSeries(lectureAnchors, sortedDays, parsedTermStart, end, requiredCount, DAY_NAMES)
+      : generateLectureSeries(firstLectureOnOrAfter(parsedTermStart, sortedDays), sortedDays, end, requiredCount, DAY_NAMES);
+
+  if (allLectures.length === 0) {
+    return { weeks: [], source: "none" };
   }
-
-  // Generate all lecture dates
-  const allLectures: LectureDate[] = [];
-  let lectureNum = 1;
-  const cursor = new Date(start);
-
-  while (cursor <= end) {
-    const dow = cursor.getDay();
-    if (lectureDayCodes.has(dow)) {
-      allLectures.push({
-        lectureNumber: lectureNum++,
-        date: cursor.toISOString().slice(0, 10),
-        dayOfWeek: DAY_NAMES[dow],
-      });
-    }
-    cursor.setDate(cursor.getDate() + 1);
-  }
-
-  if (allLectures.length === 0) return [];
 
   // Group lectures into calendar weeks (Mon-Sun)
   const weekMap = new Map<string, LectureDate[]>();
@@ -431,7 +644,207 @@ function buildLectureCalendar(
     });
   }
 
-  return weeks;
+  return {
+    weeks,
+    source: lectureAnchors.length > 0 ? "lecture-anchors" : "term-start",
+  };
+}
+
+function extractLectureAnchors(
+  assignments: AssignmentDateInfo[],
+  syllabusEvents: SyllabusEventInfo[],
+): LectureAnchor[] {
+  const anchors = new Map<number, LectureAnchor>();
+  const sources = [
+    ...assignments.map((item) => ({ ...item, source: "assignment" as const })),
+    ...syllabusEvents.map((item) => ({ ...item, source: "syllabus-event" as const })),
+  ];
+
+  for (const source of sources) {
+    if (!source.dueDate) continue;
+    const dueDate = parseISO(`${source.dueDate.slice(0, 10)}T12:00:00Z`);
+    if (Number.isNaN(dueDate.getTime())) continue;
+
+    const singleMatch = source.title.match(/\blecture\s*#?\s*(\d+)\b/i);
+    const rangeMatch = source.title.match(/\blectures?\s*(\d+)\s*[-–]\s*(\d+)\b/i);
+    const lectureNumber = singleMatch
+      ? Number.parseInt(singleMatch[1], 10)
+      : rangeMatch
+        ? Number.parseInt(rangeMatch[2], 10)
+        : null;
+
+    if (!lectureNumber || lectureNumber < 1) continue;
+    if (!anchors.has(lectureNumber)) {
+      anchors.set(lectureNumber, {
+        lectureNumber,
+        dueDate: source.dueDate.slice(0, 10),
+        title: source.title,
+        source: source.source,
+      });
+    }
+  }
+
+  return [...anchors.values()].sort((a, b) => a.lectureNumber - b.lectureNumber);
+}
+
+function firstLectureOnOrAfter(date: Date, sortedDays: number[]): Date {
+  const cursor = new Date(date);
+  for (let i = 0; i < 7; i++) {
+    if (sortedDays.includes(cursor.getDay())) return cursor;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return new Date(date);
+}
+
+function lastLectureOnOrBefore(date: Date, sortedDays: number[]): Date {
+  const cursor = new Date(date);
+  for (let i = 0; i < 7; i++) {
+    if (sortedDays.includes(cursor.getDay())) return cursor;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return new Date(date);
+}
+
+function nextLectureDate(current: Date, sortedDays: number[]): Date {
+  const cursor = new Date(current);
+  for (let i = 1; i <= 7; i++) {
+    cursor.setDate(cursor.getDate() + 1);
+    if (sortedDays.includes(cursor.getDay())) return cursor;
+  }
+  return cursor;
+}
+
+function previousLectureDate(current: Date, sortedDays: number[]): Date {
+  const cursor = new Date(current);
+  for (let i = 1; i <= 7; i++) {
+    cursor.setDate(cursor.getDate() - 1);
+    if (sortedDays.includes(cursor.getDay())) return cursor;
+  }
+  return cursor;
+}
+
+function inferLectureSeriesStart(
+  anchors: LectureAnchor[],
+  sortedDays: number[],
+  termStart: Date,
+): Date | null {
+  if (anchors.length === 0) return null;
+
+  const earliest = anchors[0];
+  let cursor = lastLectureOnOrBefore(parseISO(`${earliest.dueDate}T12:00:00Z`), sortedDays);
+  for (let i = 1; i < earliest.lectureNumber; i++) {
+    cursor = previousLectureDate(cursor, sortedDays);
+  }
+
+  return cursor < termStart ? firstLectureOnOrAfter(termStart, sortedDays) : cursor;
+}
+
+function generateLectureSeries(
+  firstLectureDate: Date,
+  sortedDays: number[],
+  endDate: Date,
+  requiredCount: number,
+  dayNames: string[],
+): LectureDate[] {
+  const allLectures: LectureDate[] = [];
+  let cursor = new Date(firstLectureDate);
+  let lectureNumber = 1;
+  const hardEnd = new Date(endDate);
+  hardEnd.setDate(hardEnd.getDate() + 28);
+
+  while (cursor <= hardEnd || lectureNumber <= requiredCount) {
+    allLectures.push({
+      lectureNumber,
+      date: cursor.toISOString().slice(0, 10),
+      dayOfWeek: dayNames[cursor.getDay()],
+    });
+    lectureNumber++;
+    cursor = nextLectureDate(cursor, sortedDays);
+    if (lectureNumber > requiredCount && cursor > hardEnd) break;
+  }
+
+  return allLectures;
+}
+
+function buildBestAnchoredLectureSeries(
+  anchors: LectureAnchor[],
+  sortedDays: number[],
+  termStart: Date,
+  endDate: Date,
+  requiredCount: number,
+  dayNames: string[],
+): LectureDate[] {
+  const baseStart = inferLectureSeriesStart(anchors, sortedDays, termStart);
+  if (!baseStart) return [];
+
+  const candidateStarts: Date[] = [baseStart];
+  let cursor = new Date(baseStart);
+  for (let i = 1; i < sortedDays.length; i++) {
+    cursor = previousLectureDate(cursor, sortedDays);
+    candidateStarts.push(new Date(cursor));
+  }
+
+  let bestSeries: LectureDate[] = [];
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const candidateStart of candidateStarts) {
+    const candidateSeries = generateLectureSeries(candidateStart, sortedDays, endDate, requiredCount, dayNames);
+    reconcileLectureSeriesToAnchors(candidateSeries, anchors);
+    const score = scoreLectureSeries(candidateSeries, anchors);
+    if (score < bestScore) {
+      bestScore = score;
+      bestSeries = candidateSeries;
+    }
+  }
+
+  return bestSeries;
+}
+
+function reconcileLectureSeriesToAnchors(
+  allLectures: LectureDate[],
+  anchors: LectureAnchor[],
+): void {
+  for (const anchor of anchors) {
+    const idx = anchor.lectureNumber - 1;
+    if (idx < 0 || idx >= allLectures.length) continue;
+    const anchorDate = parseISO(`${anchor.dueDate}T12:00:00Z`);
+    if (Number.isNaN(anchorDate.getTime())) continue;
+
+    let lectureDate = parseISO(`${allLectures[idx].date}T12:00:00Z`);
+    while (differenceInCalendarDays(anchorDate, lectureDate) > 5) {
+      for (let i = idx; i < allLectures.length; i++) {
+        const shifted = addDays(parseISO(`${allLectures[i].date}T12:00:00Z`), 7);
+        allLectures[i].date = shifted.toISOString().slice(0, 10);
+        allLectures[i].dayOfWeek = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"][shifted.getDay()];
+      }
+      lectureDate = parseISO(`${allLectures[idx].date}T12:00:00Z`);
+    }
+  }
+}
+
+function scoreLectureSeries(allLectures: LectureDate[], anchors: LectureAnchor[]): number {
+  let total = 0;
+  for (const anchor of anchors) {
+    const idx = anchor.lectureNumber - 1;
+    if (idx < 0 || idx >= allLectures.length) {
+      total += 100;
+      continue;
+    }
+
+    const lectureDate = parseISO(`${allLectures[idx].date}T12:00:00Z`);
+    const anchorDate = parseISO(`${anchor.dueDate}T12:00:00Z`);
+    if (Number.isNaN(lectureDate.getTime()) || Number.isNaN(anchorDate.getTime())) {
+      total += 50;
+      continue;
+    }
+
+    const diff = differenceInCalendarDays(anchorDate, lectureDate);
+    total += Math.abs(diff);
+    if (diff < -1) total += 25;
+    if (diff > 5) total += diff * 2;
+  }
+
+  return total;
 }
 
 // ─── Stage 3c: GROUP lectures into weeks (algorithmic) ──────────────────────
@@ -517,7 +930,7 @@ function groupLecturesIntoWeeks(
     const weekLabel = firstTopic.weekLabel;
 
     grouped.push({
-      weekNumber: wn,
+      weekNumber: grouped.length + 1,
       weekLabel,
       startDate: week.startDate,
       topics: allTopics,
@@ -539,8 +952,31 @@ function groupLecturesIntoWeeks(
     console.log(`[pipeline] ${courseName}: Stage 3c appended ${unmatchedTopics.length} unmatched lectures to last week`);
   }
 
-  console.log(`[pipeline] ${courseName}: Stage 3c produced ${grouped.length} grouped weeks from ${matchedCount} matched lectures`);
-  return grouped;
+  const withBreaks: ParsedTopic[] = [];
+  for (let i = 0; i < grouped.length; i++) {
+    const current = grouped[i];
+    withBreaks.push({ ...current, weekNumber: withBreaks.length + 1 });
+
+    const next = grouped[i + 1];
+    if (!current.startDate || !next?.startDate) continue;
+    let cursor = addDays(parseISO(`${current.startDate}T12:00:00Z`), 7);
+    const nextStart = parseISO(`${next.startDate}T12:00:00Z`);
+    while (differenceInCalendarDays(nextStart, cursor) >= 7) {
+      withBreaks.push({
+        weekNumber: withBreaks.length + 1,
+        weekLabel: "No Class / Academic Break",
+        startDate: cursor.toISOString().slice(0, 10),
+        topics: [],
+        readings: [],
+        notes: "Inferred no-class week from lecture schedule gap",
+        courseName,
+      });
+      cursor = addDays(cursor, 7);
+    }
+  }
+
+  console.log(`[pipeline] ${courseName}: Stage 3c produced ${withBreaks.length} grouped weeks from ${matchedCount} matched lectures`);
+  return withBreaks;
 }
 
 // ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
@@ -582,7 +1018,7 @@ YOUR JOB — ENRICH, never delete:
 - KEEP all existing readings exactly as they are — do not add, remove, or rename them
 - KEEP all existing dates, weekNumbers, and weekLabels unchanged
 
-OUTPUT: { "weeks": [...] }
+OUTPUT: valid JSON only, in the form { "weeks": [...] }
 Same structure as input: { weekNumber, weekLabel, startDate, topics, readings, notes, courseName }
 
 If you cannot match a module to any week, skip it — do not force it.`,
@@ -790,16 +1226,18 @@ function validateTimeline(
     }
   }
 
-  // 3. Check for large gaps (> 21 days)
-  for (let i = 1; i < dated.length; i++) {
-    if (dated[i].startDate && dated[i - 1].startDate) {
-      const gap =
-        (new Date(dated[i].startDate!).getTime() - new Date(dated[i - 1].startDate!).getTime()) /
-        86400_000;
-      if (gap > 21) {
-        warnings.push(
-          `Large gap: ${Math.round(gap)} days between weeks ${dated[i - 1].weekNumber} and ${dated[i].weekNumber}`,
-        );
+  // 3. Check for large gaps (> 21 days) unless this is a sparse schedule.
+  if (!isSparseTimeline(topics)) {
+    for (let i = 1; i < dated.length; i++) {
+      if (dated[i].startDate && dated[i - 1].startDate) {
+        const gap =
+          (new Date(dated[i].startDate!).getTime() - new Date(dated[i - 1].startDate!).getTime()) /
+          86400_000;
+        if (gap > 21) {
+          warnings.push(
+            `Large gap: ${Math.round(gap)} days between weeks ${dated[i - 1].weekNumber} and ${dated[i].weekNumber}`,
+          );
+        }
       }
     }
   }
@@ -974,26 +1412,78 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     `${contentModules.length} content, ${nonContentModuleIds.length} non-content`,
   );
 
-  // ── STAGE 3: EXTRACT from syllabus ──
-  const extraction = await extractTopicsExpanded(input.candidates, input.courseName);
-  let aiTopics = extraction.topics;
+  const authoritySplit = splitCandidatesByAuthority(input.candidates);
+  debug.sourceRoles = authoritySplit.classified.map((src) => ({
+    label: src.label,
+    role: src.role ?? "timeline",
+  }));
+
+  // ── STAGE 3: EXTRACT with source authority split ──
+  const [timelineExtraction, contentExtraction] = await Promise.all([
+    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName),
+    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName),
+  ]);
+
+  debug.timelineSource = timelineExtraction.usedLabel;
+  debug.contentSource = contentExtraction.usedLabel;
+
+  const timelineTopics = timelineExtraction.topics.filter(
+    (topic) => topic.startDate || isBreakTopic(topic),
+  );
+
+  const hasTimelineAuthority = timelineTopics.length > 0;
+  let aiTopics =
+    timelineTopics.length > 0
+      ? mergeContentOntoTimeline(timelineTopics, contentExtraction.topics, input.courseName)
+      : contentExtraction.topics.length > 0
+        ? contentExtraction.topics
+        : timelineExtraction.topics;
+
   debug.stage3Weeks = aiTopics.length;
 
-  console.log(`[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries from ${input.candidates.length} source(s)`);
+  console.log(
+    `[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries ` +
+    `| timeline=${timelineExtraction.usedLabel}:${timelineExtraction.topics.length}` +
+    ` | content=${contentExtraction.usedLabel}:${contentExtraction.topics.length}`,
+  );
 
   // ── STAGE 3b: BUILD LECTURE CALENDAR ──
-  const lectureCalendar = buildLectureCalendar(
+  const lectureCalendarBuild = buildLectureCalendar(
     input.classSchedule,
     input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
     input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
+    input.assignments,
+    input.syllabusEvents ?? [],
   );
+  const lectureCalendar = lectureCalendarBuild.weeks;
+  debug.lectureCalendarSource = lectureCalendarBuild.source;
   debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
 
   if (lectureCalendar.length > 0) {
     console.log(
       `[pipeline] ${input.courseName}: Stage 3b built lecture calendar — ` +
-      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks`,
+      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks (${lectureCalendarBuild.source})`,
     );
+  }
+
+  const shouldUseModuleScaffold =
+    !hasTimelineAuthority &&
+    contentModules.length >= Math.max(8, aiTopics.length + 3) &&
+    contentModules.length >= Math.ceil(aiTopics.length * 1.5);
+
+  if (shouldUseModuleScaffold) {
+    const scaffold = organizeModulesAsTimeline(
+      contentModules,
+      lectureCalendarBuild.source === "lecture-anchors" ? lectureCalendar : [],
+      input.courseName,
+    );
+    if (scaffold.length > 0) {
+      aiTopics = mergeContentOntoTimeline(scaffold, aiTopics, input.courseName);
+      debug.fallbackUsed = true;
+      console.log(
+        `[pipeline] ${input.courseName}: Stage 3d replaced weak content-only timeline with ${scaffold.length}-entry module scaffold`,
+      );
+    }
   }
 
   // ── STAGE 3c: GROUP lectures into weeks (algorithmic) ──

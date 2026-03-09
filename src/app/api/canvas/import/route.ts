@@ -1139,7 +1139,7 @@ export async function POST(request: NextRequest) {
         // Fetch class schedule (already stored earlier in this after() block)
         const courseRecord = await db.course.findUnique({
           where: { id: scCourseId },
-          select: { classSchedule: true },
+          select: { classSchedule: true, syllabusEvents: true },
         });
 
         // Fetch assignment due dates for date anchoring
@@ -1171,6 +1171,20 @@ export async function POST(request: NextRequest) {
             title: a.title,
             dueDate: a.dueDate,
           })),
+          syllabusEvents: Array.isArray(courseRecord?.syllabusEvents)
+            ? (courseRecord.syllabusEvents as { title?: string; dueDate?: string; type?: string }[])
+                .filter(
+                  (event): event is { title: string; dueDate: string; type: string } =>
+                    typeof event?.title === "string" &&
+                    typeof event?.dueDate === "string" &&
+                    typeof event?.type === "string",
+                )
+                .map((event) => ({
+                  title: event.title,
+                  dueDate: event.dueDate,
+                  type: event.type,
+                }))
+            : [],
         };
 
         const pipelineResult = await runTopicPipeline(pipelineInput);
