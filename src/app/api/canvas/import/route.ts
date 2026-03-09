@@ -12,10 +12,11 @@ import {
   bestWindow,
   detectSourceFormat,
   type ParsedTopic,
+  type ExtractedClassSchedule,
 } from "@/lib/parse-syllabus";
 import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
-import { addDays, subDays } from "date-fns";
+import { addDays, addYears, parseISO, subDays } from "date-fns";
 import { generateTasksForUser } from "@/lib/tasks";
 import { analyzeCourseMaterial } from "@/lib/analyze-material";
 import { generateEmbedding } from "@/lib/embeddings";
@@ -234,6 +235,72 @@ function hasOverlappingDateRanges(
   bEnd: string,
 ): boolean {
   return aStart <= bEnd && bStart <= aEnd;
+}
+
+function isoDateOnly(value: string | null | undefined): string | null {
+  return value ? value.slice(0, 10) : null;
+}
+
+function shiftDateIntoTerm(dateStr: string | null, termStart: string | null, termEnd: string | null): string | null {
+  if (!dateStr) return null;
+  const parsed = parseISO(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return dateStr;
+
+  const termStartDate = termStart ? parseISO(`${termStart}T12:00:00Z`) : null;
+  const termEndDate = termEnd ? parseISO(`${termEnd}T12:00:00Z`) : termStartDate;
+  if (!termStartDate || Number.isNaN(termStartDate.getTime()) || !termEndDate || Number.isNaN(termEndDate.getTime())) {
+    return dateStr;
+  }
+
+  const paddedStart = subDays(termStartDate, 21);
+  const paddedEnd = addDays(termEndDate, 21);
+  if (parsed >= paddedStart && parsed <= paddedEnd) {
+    return dateStr;
+  }
+
+  let best = dateStr;
+  let bestInRange = false;
+
+  for (let shift = -3; shift <= 3; shift++) {
+    const shifted = addYears(parsed, shift);
+    const shiftedStr = shifted.toISOString().slice(0, 10);
+    const inRange = shifted >= paddedStart && shifted <= paddedEnd;
+    if (inRange) {
+      best = shiftedStr;
+      bestInRange = true;
+      break;
+    }
+  }
+
+  return bestInRange ? best : dateStr;
+}
+
+function hasUsefulMeetingTimes(schedule: ExtractedClassSchedule | null): boolean {
+  if (!schedule) return false;
+  return schedule.meetings.some(
+    (meeting) =>
+      Boolean(meeting.startTime) &&
+      Boolean(meeting.endTime) &&
+      !(meeting.startTime === "00:00" && meeting.endTime === "00:00"),
+  );
+}
+
+function normalizeScheduleForTerm(
+  schedule: ExtractedClassSchedule | null,
+  termStartAt?: string | null,
+  termEndAt?: string | null,
+): ExtractedClassSchedule | null {
+  if (!schedule) return null;
+
+  const termStart = isoDateOnly(termStartAt);
+  const termEnd = isoDateOnly(termEndAt);
+
+  return {
+    ...schedule,
+    semesterStart: termStart ?? shiftDateIntoTerm(schedule.semesterStart, termStart, termEnd),
+    semesterEnd: termEnd ?? shiftDateIntoTerm(schedule.semesterEnd, termStart, termEnd),
+    finalExamDate: shiftDateIntoTerm(schedule.finalExamDate, termStart, termEnd),
+  };
 }
 
 // ─── Auth helper ─────────────────────────────────────────────────────────────
@@ -932,6 +999,8 @@ export async function POST(request: NextRequest) {
       try {
         let classSchedule = null;
         let classScheduleSource = "none";
+        let syllabusClassSchedule: ExtractedClassSchedule | null = null;
+        let calendarClassSchedule: ExtractedClassSchedule | null = null;
         const debugClassScheduleCourse = /anthropology/i.test(c.name);
 
         // Source 1: best-scoring syllabus text (from topic extraction pipeline)
@@ -939,33 +1008,59 @@ export async function POST(request: NextRequest) {
           if (debugClassScheduleCourse) {
             console.log(`[sync-debug] ${c.name}: classSchedule source1 probe`, classScheduleProbe(syllabusText));
           }
-          classSchedule = await extractClassSchedule(syllabusText);
-          if (classSchedule) classScheduleSource = "syllabus-ai";
+          syllabusClassSchedule = await extractClassSchedule(syllabusText);
+          if (syllabusClassSchedule) classScheduleSource = "syllabus-ai";
         }
 
         // Source 1b: raw syllabusBody HTML — handles courses where the meeting
         // times are in a short Canvas Page/syllabus tab that doesn't score well
         // in the topic pipeline (e.g. just "Meeting Times: MWF 1-1:50PM")
-        if (!classSchedule && c.syllabusBody) {
+        if (!syllabusClassSchedule && c.syllabusBody) {
           const rawBodyText = htmlToText(c.syllabusBody);
           if (debugClassScheduleCourse) {
             console.log(`[sync-debug] ${c.name}: classSchedule source1b probe`, classScheduleProbe(rawBodyText));
           }
           if (rawBodyText.length >= 50 && rawBodyText !== syllabusText) {
             console.log(`[sync] ${c.name}: trying Source 1b (syllabusBody raw, ${rawBodyText.length}c)`);
-            classSchedule = await extractClassSchedule(rawBodyText);
-            if (classSchedule) classScheduleSource = "syllabus-body-raw";
+            syllabusClassSchedule = await extractClassSchedule(rawBodyText);
+            if (syllabusClassSchedule) classScheduleSource = "syllabus-body-raw";
           }
         }
 
         // Source 2: Canvas calendar events (deterministic fallback)
-        if (!classSchedule && c.calendarEvents && c.calendarEvents.length > 0) {
-          classSchedule = extractScheduleFromCalendarEvents(
+        if (c.calendarEvents && c.calendarEvents.length > 0) {
+          calendarClassSchedule = extractScheduleFromCalendarEvents(
             c.calendarEvents,
             c.termStartAt,
             c.termEndAt,
           );
-          if (classSchedule) classScheduleSource = `calEvents(${c.calendarEvents.length})`;
+          if (!syllabusClassSchedule && calendarClassSchedule) {
+            classScheduleSource = `calEvents(${c.calendarEvents.length})`;
+          }
+        }
+
+        const normalizedSyllabusSchedule = normalizeScheduleForTerm(
+          syllabusClassSchedule,
+          c.termStartAt,
+          c.termEndAt,
+        );
+        const normalizedCalendarSchedule = normalizeScheduleForTerm(
+          calendarClassSchedule,
+          c.termStartAt,
+          c.termEndAt,
+        );
+
+        if (normalizedSyllabusSchedule && hasUsefulMeetingTimes(normalizedSyllabusSchedule)) {
+          classSchedule = normalizedSyllabusSchedule;
+        } else if (normalizedCalendarSchedule) {
+          classSchedule = normalizedCalendarSchedule;
+          classScheduleSource = `calEvents(${c.calendarEvents?.length ?? 0})`;
+          if (normalizedSyllabusSchedule?.finalExamDate && !classSchedule.finalExamDate) {
+            classSchedule.finalExamDate = normalizedSyllabusSchedule.finalExamDate;
+            classScheduleSource += "+syllabus-final";
+          }
+        } else if (normalizedSyllabusSchedule) {
+          classSchedule = normalizedSyllabusSchedule;
         }
 
         dbg.classScheduleSource = classScheduleSource + (classSchedule ? `(${classSchedule.meetings.length} meetings)` : "");

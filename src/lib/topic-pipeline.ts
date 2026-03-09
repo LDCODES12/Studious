@@ -15,6 +15,7 @@
  */
 
 import OpenAI from "openai";
+import { addDays, addYears, parseISO, subDays } from "date-fns";
 import {
   parseSyllabusTopics,
   sanitizeSchedule,
@@ -82,6 +83,116 @@ export interface PipelineDebug {
   stage4OutputWeeks: number;
   stage5Warnings: string[];
   fallbackUsed: boolean;
+}
+
+function shiftIsoDateYears(dateStr: string, years: number): string | null {
+  const parsed = parseISO(`${dateStr}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return addYears(parsed, years).toISOString().slice(0, 10);
+}
+
+function realignTopicDatesToTerm(
+  topics: ParsedTopic[],
+  termStart: string | null,
+  termEnd: string | null,
+): { topics: ParsedTopic[]; shiftYears: number } {
+  if (!termStart || topics.length === 0) {
+    return { topics, shiftYears: 0 };
+  }
+
+  const termStartDate = parseISO(`${termStart}T12:00:00Z`);
+  const termEndDate = parseISO(`${(termEnd ?? termStart)}T12:00:00Z`);
+  if (Number.isNaN(termStartDate.getTime()) || Number.isNaN(termEndDate.getTime())) {
+    return { topics, shiftYears: 0 };
+  }
+
+  const datedIndexes = topics
+    .map((topic, index) => ({ index, startDate: topic.startDate }))
+    .filter(
+      (topic): topic is { index: number; startDate: string } =>
+        typeof topic.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(topic.startDate),
+    );
+
+  if (datedIndexes.length < 2) {
+    return { topics, shiftYears: 0 };
+  }
+
+  const paddedStart = subDays(termStartDate, 21);
+  const paddedEnd = addDays(termEndDate, 21);
+  const termYears = new Set([termStartDate.getUTCFullYear(), termEndDate.getUTCFullYear()]);
+
+  const scoreShift = (shiftYears: number) => {
+    let inRange = 0;
+    let monotonic = true;
+    let previous: string | null = null;
+
+    for (const { startDate } of datedIndexes) {
+      const shifted = shiftYears === 0 ? startDate : shiftIsoDateYears(startDate, shiftYears);
+      if (!shifted) return null;
+      const shiftedDate = parseISO(`${shifted}T12:00:00Z`);
+      if (Number.isNaN(shiftedDate.getTime())) return null;
+      if (shiftedDate >= paddedStart && shiftedDate <= paddedEnd) {
+        inRange++;
+      }
+      if (previous && shifted < previous) {
+        monotonic = false;
+      }
+      previous = shifted;
+    }
+
+    return { inRange, monotonic };
+  };
+
+  const baseScore = scoreShift(0);
+  if (!baseScore) {
+    return { topics, shiftYears: 0 };
+  }
+
+  const candidateShifts = new Set<number>();
+  for (const { startDate } of datedIndexes) {
+    const year = Number.parseInt(startDate.slice(0, 4), 10);
+    for (const termYear of termYears) {
+      candidateShifts.add(termYear - year);
+    }
+  }
+  for (let shift = -3; shift <= 3; shift++) {
+    candidateShifts.add(shift);
+  }
+  candidateShifts.delete(0);
+
+  let bestShift = 0;
+  let bestScore = baseScore;
+
+  for (const shift of candidateShifts) {
+    const score = scoreShift(shift);
+    if (!score || !score.monotonic) continue;
+    if (
+      score.inRange > bestScore.inRange ||
+      (score.inRange === bestScore.inRange && !bestScore.monotonic && score.monotonic)
+    ) {
+      bestShift = shift;
+      bestScore = score;
+    }
+  }
+
+  const minimumReliableMatches = Math.max(2, Math.ceil(datedIndexes.length * 0.6));
+  if (
+    bestShift === 0 ||
+    bestScore.inRange < minimumReliableMatches ||
+    bestScore.inRange <= baseScore.inRange
+  ) {
+    return { topics, shiftYears: 0 };
+  }
+
+  const shiftedTopics = topics.map((topic) => {
+    if (!topic.startDate || !/^\d{4}-\d{2}-\d{2}$/.test(topic.startDate)) {
+      return topic;
+    }
+    const shifted = shiftIsoDateYears(topic.startDate, bestShift);
+    return shifted ? { ...topic, startDate: shifted } : topic;
+  });
+
+  return { topics: shiftedTopics, shiftYears: bestShift };
 }
 
 // ─── Stage 2: CLASSIFY ──────────────────────────────────────────────────────
@@ -655,6 +766,12 @@ function validateTimeline(
   if (topics.length === 0) {
     warnings.push("Pipeline produced 0 topics");
     return { topics, warnings };
+  }
+
+  const realigned = realignTopicDatesToTerm(topics, termStart, termEnd);
+  topics = realigned.topics;
+  if (realigned.shiftYears !== 0) {
+    warnings.push(`Shifted topic dates by ${realigned.shiftYears} year(s) to align with term ${termStart}..${termEnd ?? "unknown"}`);
   }
 
   // 1. Ensure weekNumbers are sequential starting at 1
