@@ -1,0 +1,46 @@
+{
+  "kind": "lecture-calendar",
+  "name": "gen-chem-2-anchor-clamp",
+  "input": {
+    "classSchedule": {
+      "meetings": [
+        {
+          "days": ["MO", "WE", "FR"],
+          "label": "Lecture",
+          "startTime": "09:00",
+          "endTime": "09:50",
+          "location": "Louderman 458"
+        }
+      ]
+    },
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-05-15",
+    "assignments": [
+      {
+        "title": "Lecture Review Questions - Lecture #2",
+        "dueDate": "2026-01-17T05:59:59Z",
+        "type": "quiz"
+      },
+      {
+        "title": "Lecture Review Questions - Lecture #3",
+        "dueDate": "2026-01-22T05:59:59Z",
+        "type": "quiz"
+      },
+      {
+        "title": "Lecture Review Questions - Lecture #22",
+        "dueDate": "2026-03-07T05:59:59Z",
+        "type": "quiz"
+      },
+      {
+        "title": "Lecture Review Questions - Lecture #23",
+        "dueDate": "2026-03-17T04:59:59Z",
+        "type": "quiz"
+      }
+    ],
+    "syllabusEvents": []
+  },
+  "expect": {
+    "source": "lecture-anchors",
+    "firstWeekStart": "2026-01-12"
+  }
+}

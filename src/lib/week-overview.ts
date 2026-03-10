@@ -72,12 +72,19 @@ export function getCurrentWeekKey(now: Date = new Date()): string {
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-const BREAK_RX = /\bspring break\b|\bno class\b/i;
+const FULL_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes\b/i;
+const PARTIAL_NO_CLASS_RX = /\bno class(?:es)?\s+(?:on|for)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|\d{1,2}\/\d{1,2})/i;
 
 function hasBreakSignal(week: CourseContextSnapshot["currentWeek"]): boolean {
   if (!week) return false;
-  if (BREAK_RX.test(week.weekLabel)) return true;
-  if (week.notes && BREAK_RX.test(week.notes)) return true;
+  if (FULL_BREAK_RX.test(week.weekLabel)) return true;
+  if (week.notes && FULL_BREAK_RX.test(week.notes)) return true;
+  if (week.notes && /\bno class\b/i.test(week.notes)) {
+    if (PARTIAL_NO_CLASS_RX.test(week.notes) && (week.topics.length > 0 || week.readings.length > 0)) {
+      return false;
+    }
+    return week.topics.length === 0 && week.readings.length === 0;
+  }
   return false;
 }
 

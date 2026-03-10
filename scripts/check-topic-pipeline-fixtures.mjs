@@ -106,6 +106,29 @@ function runScaffoldFixture(fixture) {
   }
 }
 
+function runLectureCalendarFixture(fixture) {
+  const result = timelinePipelineInternals.buildLectureCalendar(
+    fixture.input.classSchedule,
+    fixture.input.termStartDate,
+    fixture.input.termEndDate,
+    fixture.input.assignments,
+    fixture.input.syllabusEvents ?? [],
+  );
+
+  if (fixture.expect.source) {
+    assert(result.source === fixture.expect.source, `${fixture.name}: expected source ${fixture.expect.source}, got ${result.source}`);
+  }
+  if (fixture.expect.firstWeekStart) {
+    assert(result.weeks[0]?.startDate === fixture.expect.firstWeekStart, `${fixture.name}: expected first week ${fixture.expect.firstWeekStart}, got ${result.weeks[0]?.startDate}`);
+  }
+  if (fixture.expect.weeksInclude) {
+    const starts = result.weeks.map((week) => week.startDate);
+    for (const date of fixture.expect.weeksInclude) {
+      assert(starts.includes(date), `${fixture.name}: missing lecture-calendar week ${date}`);
+    }
+  }
+}
+
 async function main() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const fixturesDir = path.join(__dirname, "fixtures", "timeline");
@@ -118,6 +141,8 @@ async function main() {
       runFinalizeFixture(fixture);
     } else if (fixture.kind === "scaffold") {
       runScaffoldFixture(fixture);
+    } else if (fixture.kind === "lecture-calendar") {
+      runLectureCalendarFixture(fixture);
     } else {
       throw new Error(`Unknown fixture kind in ${file}`);
     }

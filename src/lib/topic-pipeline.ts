@@ -771,14 +771,20 @@ function inferBreakStartDate(
     ...segments.filter((segment) => !/\bspring break\b|\bread(?:ing)? days?\b|\bbye week\b|\bacademic break\b/i.test(segment)),
   ];
 
+  let sawExplicitBreakDate = false;
   for (const segment of prioritized) {
     const inferred = inferIsoDateFromText(segment, termStartDate, termEndDate);
     if (!inferred) continue;
+    sawExplicitBreakDate = true;
     const explicit = parseISO(`${inferred}T12:00:00Z`);
     if (Number.isNaN(explicit.getTime())) continue;
     const monday = startOfWeek(explicit, { weekStartsOn: 1 });
     const mondayStr = monday.toISOString().slice(0, 10);
     if (mondayStr > topic.startDate) return mondayStr;
+  }
+
+  if (sawExplicitBreakDate) {
+    return undefined;
   }
 
   if (prioritized.some((segment) => FULL_BREAK_RX.test(segment))) {
@@ -844,6 +850,52 @@ function splitMixedBreakWeeks(
   }
 
   return result;
+}
+
+function stripCarriedBreakNotes(
+  topics: ParsedTopic[],
+  termStartDate: string | null,
+  termEndDate: string | null,
+  courseName: string,
+): ParsedTopic[] {
+  if (topics.length === 0) return topics;
+
+  const breakStarts = new Set(
+    topics
+      .filter((topic) => topic.startDate && isBreakTopic(topic))
+      .map((topic) => topic.startDate as string),
+  );
+
+  let cleanedCount = 0;
+  const cleaned = topics.map((topic) => {
+    if (!topic.notes || isBreakTopic(topic)) return topic;
+
+    const stripped = stripBreakSegments(topic.notes);
+    if (stripped === topic.notes) return topic;
+
+    const previousBreakStart =
+      topic.startDate
+        ? addDays(parseISO(`${topic.startDate}T12:00:00Z`), -7).toISOString().slice(0, 10)
+        : null;
+    const inferredBreakStart = inferBreakStartDate(topic, termStartDate, termEndDate);
+    const hasNearbyBreak =
+      (previousBreakStart ? breakStarts.has(previousBreakStart) : false) ||
+      Boolean(inferredBreakStart && breakStarts.has(inferredBreakStart));
+
+    if (!hasNearbyBreak) return topic;
+
+    cleanedCount += 1;
+    return {
+      ...topic,
+      notes: stripped,
+    };
+  });
+
+  if (cleanedCount > 0) {
+    console.log(`[pipeline] ${courseName}: stripped carried break notes from ${cleanedCount} instructional week(s)`);
+  }
+
+  return cleaned;
 }
 
 interface TimelineSpine {
@@ -1159,6 +1211,45 @@ function inferLectureSeriesStart(
   return cursor < termStart ? firstLectureOnOrAfter(termStart, sortedDays) : cursor;
 }
 
+function inferEarliestPlausibleLectureWeekStart(
+  anchors: LectureAnchor[],
+  sortedDays: number[],
+  termStart: Date,
+): Date | null {
+  if (anchors.length === 0 || sortedDays.length === 0) return null;
+
+  const earliest = anchors[0];
+  const dueDate = parseISO(`${earliest.dueDate}T12:00:00Z`);
+  if (Number.isNaN(dueDate.getTime())) return null;
+
+  const lecturesPerWeek = Math.max(1, sortedDays.length);
+  const weekIndex = Math.floor(Math.max(0, earliest.lectureNumber - 1) / lecturesPerWeek);
+  const anchorWeekStart = startOfWeek(dueDate, { weekStartsOn: 1 });
+  const earliestPlausible = addDays(anchorWeekStart, -7 * weekIndex);
+  const firstInstructionalWeek = startOfWeek(firstLectureOnOrAfter(termStart, sortedDays), { weekStartsOn: 1 });
+
+  return earliestPlausible < firstInstructionalWeek ? firstInstructionalWeek : earliestPlausible;
+}
+
+function clampLectureSeriesToPlausibleWeekStart(
+  allLectures: LectureDate[],
+  minimumWeekStart: Date | null,
+): void {
+  if (allLectures.length === 0 || !minimumWeekStart || Number.isNaN(minimumWeekStart.getTime())) return;
+
+  let currentWeekStart = startOfWeek(parseISO(`${allLectures[0].date}T12:00:00Z`), { weekStartsOn: 1 });
+  if (Number.isNaN(currentWeekStart.getTime())) return;
+
+  while (currentWeekStart < minimumWeekStart) {
+    for (const lecture of allLectures) {
+      const shifted = addDays(parseISO(`${lecture.date}T12:00:00Z`), 7);
+      lecture.date = shifted.toISOString().slice(0, 10);
+      lecture.dayOfWeek = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"][shifted.getDay()];
+    }
+    currentWeekStart = startOfWeek(parseISO(`${allLectures[0].date}T12:00:00Z`), { weekStartsOn: 1 });
+  }
+}
+
 function generateLectureSeries(
   firstLectureDate: Date,
   sortedDays: number[],
@@ -1196,6 +1287,7 @@ function buildBestAnchoredLectureSeries(
 ): LectureDate[] {
   const baseStart = inferLectureSeriesStart(anchors, sortedDays, termStart);
   if (!baseStart) return [];
+  const minimumWeekStart = inferEarliestPlausibleLectureWeekStart(anchors, sortedDays, termStart);
 
   const candidateStarts: Date[] = [baseStart];
   let cursor = new Date(baseStart);
@@ -1210,6 +1302,7 @@ function buildBestAnchoredLectureSeries(
   for (const candidateStart of candidateStarts) {
     const candidateSeries = generateLectureSeries(candidateStart, sortedDays, endDate, requiredCount, dayNames);
     reconcileLectureSeriesToAnchors(candidateSeries, anchors);
+    clampLectureSeriesToPlausibleWeekStart(candidateSeries, minimumWeekStart);
     const score = scoreLectureSeries(candidateSeries, anchors);
     if (score < bestScore) {
       bestScore = score;
@@ -1812,6 +1905,17 @@ export function finalizeTimelineForPersistence(args: {
 
   let finalizedTopics = args.topics;
 
+  const preStrippedBreakNotesTopics = stripCarriedBreakNotes(
+    finalizedTopics,
+    args.termStartDate,
+    args.termEndDate,
+    args.courseName,
+  );
+  if (preStrippedBreakNotesTopics.some((topic, index) => topic.notes !== finalizedTopics[index]?.notes)) {
+    repairActionsApplied.push("stripped_carried_break_notes");
+  }
+  finalizedTopics = preStrippedBreakNotesTopics;
+
   const splitBreakTopics = splitMixedBreakWeeks(finalizedTopics, args.termStartDate, args.termEndDate);
   if (splitBreakTopics.length > finalizedTopics.length) {
     repairActionsApplied.push(`split_mixed_break_weeks:${splitBreakTopics.length - finalizedTopics.length}`);
@@ -1823,6 +1927,20 @@ export function finalizeTimelineForPersistence(args: {
     repairActionsApplied.push(`collapsed_duplicate_same_date_weeks:${finalizedTopics.length - collapsedTopics.length}`);
   }
   finalizedTopics = collapsedTopics;
+
+  const strippedBreakNotesTopics = stripCarriedBreakNotes(
+    finalizedTopics,
+    args.termStartDate,
+    args.termEndDate,
+    args.courseName,
+  );
+  if (
+    !repairActionsApplied.includes("stripped_carried_break_notes") &&
+    strippedBreakNotesTopics.some((topic, index) => topic.notes !== finalizedTopics[index]?.notes)
+  ) {
+    repairActionsApplied.push("stripped_carried_break_notes");
+  }
+  finalizedTopics = strippedBreakNotesTopics;
 
   const validated = validateTimeline(finalizedTopics, args.termStartDate, args.termEndDate);
   finalizedTopics = validated.topics;
@@ -1853,6 +1971,7 @@ export function finalizeTimelineForPersistence(args: {
 
 export const timelinePipelineInternals = {
   inferIsoDateFromText,
+  buildLectureCalendar,
   organizeModulesAsTimeline,
   finalizeTimelineForPersistence,
 };
