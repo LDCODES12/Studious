@@ -7,7 +7,8 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
-    "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/"
+    "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/",
+    "check:timelines": "node scripts/check-timeline-regressions.js"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.30",

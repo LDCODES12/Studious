@@ -15,7 +15,7 @@
  */
 
 import OpenAI from "openai";
-import { addDays, addYears, differenceInCalendarDays, parseISO, subDays } from "date-fns";
+import { addDays, addYears, differenceInCalendarDays, parseISO, startOfWeek, subDays } from "date-fns";
 import {
   parseSyllabusTopics,
   sanitizeSchedule,
@@ -301,6 +301,8 @@ const FULL_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\
 const PARTIAL_NO_CLASS_RX = /\bno class(?:es)?\s+(?:on|for)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|\d{1,2}\/\d{1,2})/i;
 const SLIDE_DECK_RX = /\b(on the agenda|learning objectives|discussion questions|delivered|slide|today we(?:'| )ll|what is|who is this)\b/i;
 const GENERIC_WEEK_LABEL_RX = /^(lectures?|course resources|report discussions|midterm exam prep materials|review materials|assignment descriptions)$/i;
+const ADMIN_ENTRY_RX = /^(syllabus|course schedule|office hours?|course information|course resources|exam resources)$/i;
+const BREAK_SEGMENT_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes?\b|\bno lecture\b|\bno lab\b/i;
 const MONTH_TO_INDEX: Record<string, number> = {
   jan: 0, january: 0,
   feb: 1, february: 1,
@@ -499,6 +501,15 @@ function tokenizeWeekText(topic: ParsedTopic): Set<string> {
   return tokenize([topic.weekLabel, ...(topic.topics ?? []), ...(topic.readings ?? [])].join(" "));
 }
 
+function isAdministrativeEntry(entry: string): boolean {
+  return ADMIN_ENTRY_RX.test(entry.trim());
+}
+
+function isAdministrativeOnlyTopic(topic: ParsedTopic): boolean {
+  const entries = [...(topic.topics ?? []), ...(topic.readings ?? [])].map((entry) => entry.trim()).filter(Boolean);
+  return entries.length > 0 && entries.every(isAdministrativeEntry);
+}
+
 function mergeContentOntoTimeline(
   timelineTopics: ParsedTopic[],
   contentTopics: ParsedTopic[],
@@ -683,6 +694,127 @@ function inferIsoDateFromText(
   }
 
   return [...candidates].sort()[0];
+}
+
+function stripBreakSegments(notes?: string | null): string | undefined {
+  if (!notes) return undefined;
+  const cleaned = notes
+    .split(/[;\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && !BREAK_SEGMENT_RX.test(segment));
+  return cleaned.length > 0 ? cleaned.join("; ") : undefined;
+}
+
+function cleanBreakLabel(label: string): string {
+  return label
+    .replace(/\s*(?:and|\/)\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
+    .replace(/\s*[—-]\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
+    .trim();
+}
+
+function summarizeBreakSegments(notes?: string | null): string | undefined {
+  if (!notes) return undefined;
+  const segments = notes
+    .split(/[;\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
+  return segments.length > 0 ? segments.join("; ") : undefined;
+}
+
+function inferBreakStartDate(
+  topic: ParsedTopic,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): string | undefined {
+  if (!topic.startDate) return undefined;
+  const currentStart = parseISO(`${topic.startDate}T12:00:00Z`);
+  if (Number.isNaN(currentStart.getTime())) return undefined;
+
+  const segments = `${topic.weekLabel ?? ""}; ${topic.notes ?? ""}`
+    .split(/[;\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
+  if (segments.length === 0) return undefined;
+
+  const prioritized = [
+    ...segments.filter((segment) => /\bspring break\b/i.test(segment)),
+    ...segments.filter((segment) => /\bread(?:ing)? days?\b|\bbye week\b|\bacademic break\b/i.test(segment) && !/\bspring break\b/i.test(segment)),
+    ...segments.filter((segment) => !/\bspring break\b|\bread(?:ing)? days?\b|\bbye week\b|\bacademic break\b/i.test(segment)),
+  ];
+
+  for (const segment of prioritized) {
+    const inferred = inferIsoDateFromText(segment, termStartDate, termEndDate);
+    if (!inferred) continue;
+    const explicit = parseISO(`${inferred}T12:00:00Z`);
+    if (Number.isNaN(explicit.getTime())) continue;
+    const monday = startOfWeek(explicit, { weekStartsOn: 1 });
+    const mondayStr = monday.toISOString().slice(0, 10);
+    if (mondayStr > topic.startDate) return mondayStr;
+  }
+
+  if (prioritized.some((segment) => FULL_BREAK_RX.test(segment))) {
+    return addDays(currentStart, 7).toISOString().slice(0, 10);
+  }
+
+  return undefined;
+}
+
+function inferBreakLabel(topic: ParsedTopic): string {
+  const text = `${topic.weekLabel ?? ""} ${topic.notes ?? ""}`;
+  if (/\bspring break\b/i.test(text)) return "Spring Break — No Class";
+  if (/\bread(?:ing)? days?\b/i.test(text)) return "Reading Days";
+  if (/\bbye week\b/i.test(text)) return "Bye Week — No Class";
+  if (/\bholiday\b/i.test(text)) return "Holiday — No Class";
+  return "No Class / Academic Break";
+}
+
+function splitMixedBreakWeeks(
+  topics: ParsedTopic[],
+  termStartDate: string | null,
+  termEndDate: string | null,
+): ParsedTopic[] {
+  if (topics.length === 0) return topics;
+
+  const existingBreakStarts = new Set(
+    topics
+      .filter((topic) => topic.startDate && isBreakTopic(topic))
+      .map((topic) => topic.startDate as string),
+  );
+
+  const result: ParsedTopic[] = [];
+  for (const topic of topics) {
+    const breakStart = inferBreakStartDate(topic, termStartDate, termEndDate);
+    const hasMixedBreakSignals =
+      hasInstructionalContent(topic) &&
+      BREAK_SEGMENT_RX.test(`${topic.weekLabel ?? ""} ${topic.notes ?? ""}`) &&
+      Boolean(breakStart);
+
+    if (!hasMixedBreakSignals || !breakStart) {
+      result.push(topic);
+      continue;
+    }
+
+    result.push({
+      ...topic,
+      weekLabel: cleanBreakLabel(topic.weekLabel ?? "") || topic.weekLabel,
+      notes: stripBreakSegments(topic.notes),
+    });
+
+    if (!existingBreakStarts.has(breakStart)) {
+      existingBreakStarts.add(breakStart);
+      result.push({
+        weekNumber: topic.weekNumber + 0.5,
+        weekLabel: inferBreakLabel(topic),
+        startDate: breakStart,
+        topics: [],
+        readings: [],
+        notes: summarizeBreakSegments(topic.notes) ?? `No class — ${inferBreakLabel(topic)}`,
+        courseName: topic.courseName,
+      });
+    }
+  }
+
+  return result;
 }
 
 interface TimelineSpine {
@@ -1665,17 +1797,38 @@ function mergeNotes(a?: string | null, b?: string | null): string | undefined {
 function collapseSameStartDateTopics(topics: ParsedTopic[], courseName: string): ParsedTopic[] {
   if (topics.length < 2) return topics;
 
+  const ordered = [...topics].sort((a, b) => {
+    if (a.startDate && b.startDate && a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
+    if (a.startDate && !b.startDate) return -1;
+    if (!a.startDate && b.startDate) return 1;
+    return a.weekNumber - b.weekNumber;
+  });
   const collapsed: ParsedTopic[] = [];
-  for (const topic of topics) {
+  for (const topic of ordered) {
     const previous = collapsed[collapsed.length - 1];
     if (previous && previous.startDate && topic.startDate && previous.startDate === topic.startDate) {
+      const previousAdminOnly = isAdministrativeOnlyTopic(previous);
+      const topicAdminOnly = isAdministrativeOnlyTopic(topic);
+      const mergedTopics =
+        previousAdminOnly && !topicAdminOnly
+          ? [...(topic.topics ?? [])]
+          : topicAdminOnly && !previousAdminOnly
+            ? [...(previous.topics ?? [])]
+            : mergeTopicLists(previous.topics, topic.topics);
+      const mergedReadings =
+        previousAdminOnly && !topicAdminOnly
+          ? [...(topic.readings ?? [])]
+          : topicAdminOnly && !previousAdminOnly
+            ? [...(previous.readings ?? [])]
+            : mergeTopicLists(previous.readings, topic.readings);
       const merged: ParsedTopic = {
-        ...previous,
+        ...(previousAdminOnly && !topicAdminOnly ? topic : previous),
         weekLabel: pickPreferredWeekLabel(previous, topic),
-        topics: mergeTopicLists(previous.topics, topic.topics),
-        readings: mergeTopicLists(previous.readings, topic.readings),
+        topics: mergedTopics,
+        readings: mergedReadings,
         notes: mergeNotes(previous.notes, topic.notes),
         courseName: topic.courseName ?? previous.courseName,
+        startDate: previous.startDate,
       };
       collapsed[collapsed.length - 1] = merged;
       continue;
@@ -1871,7 +2024,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   }
 
   // ── STAGE 5: VALIDATE ──
-  const collapsedTopics = collapseSameStartDateTopics(finalTopics, input.courseName);
+  const splitBreakTopics = splitMixedBreakWeeks(finalTopics, input.termStartDate, input.termEndDate);
+  const collapsedTopics = collapseSameStartDateTopics(splitBreakTopics, input.courseName);
   const validated = validateTimeline(collapsedTopics, input.termStartDate, input.termEndDate);
   debug.stage5Warnings = validated.warnings;
 
