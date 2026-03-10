@@ -26,7 +26,7 @@ import {
   detectSourceFormat,
   isContentfulTopic,
   type ParsedTopic,
-} from "@/lib/parse-syllabus";
+} from "./parse-syllabus.ts";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -81,6 +81,7 @@ export interface PipelineInput {
 
 export type ConfidenceLevel = "high" | "medium" | "low" | "unknown";
 export type ScheduleMode = "weekly" | "sparse" | "inferred" | "unknown";
+export type TimelineQuality = "strong" | "usable" | "weak";
 export type TimelineAnchorType =
   | "explicit_date"
   | "inferred_week"
@@ -128,6 +129,13 @@ export interface PipelineDebug {
   timelineSource?: string;
   contentSource?: string;
   lectureCalendarSource?: string;
+}
+
+export interface FinalizeTimelineResult {
+  topics: ParsedTopic[];
+  warnings: string[];
+  repairActionsApplied: string[];
+  timelineQuality: TimelineQuality;
 }
 
 function shiftIsoDateYears(dateStr: string, years: number): string | null {
@@ -376,6 +384,27 @@ function splitCandidatesByAuthority(candidates: ScoredSource[]) {
     classified,
     timelineCandidates: timelineCandidates.length > 0 ? timelineCandidates : classified,
     contentCandidates: contentCandidates.length > 0 ? contentCandidates : classified,
+  };
+}
+
+function summarizeAuthorityCandidates(
+  candidates: Array<ScoredSource & { role?: CandidateRole }>,
+  usedLabel: string,
+) {
+  const ranked = [...candidates]
+    .sort((a, b) => b.score !== a.score ? b.score - a.score : b.text.length - a.text.length)
+    .slice(0, 3)
+    .map((candidate) => ({
+      label: candidate.label,
+      role: candidate.role ?? classifyCandidateRole(candidate),
+      score: Number(candidate.score.toFixed(3)),
+      chars: candidate.text.length,
+    }));
+
+  return {
+    winner: usedLabel,
+    runnerUp: ranked.find((candidate) => candidate.label !== usedLabel)?.label ?? null,
+    ranked,
   };
 }
 
@@ -1451,14 +1480,7 @@ If you cannot match a module to any week, skip it — do not force it.`,
   }
 }
 
-// ─── Stage 4b: BACKFILL MODULE READINGS ─────────────────────────────────────
-// Deterministic (no-AI) safety net: ensures module readings survive even when
-// enrichTimeline fails to incorporate them. Matches modules to AI weeks
-// algorithmically and adds any readings that are missing from the output.
-
-const BACKFILL_SKIP_RX = /\b(quiz|exam|test)\s+(blank|key|answer)\b|regrade\s+request|setup\s+instructions|gradescope|\bgetting\s+started\b|\bcourse\s+info(rmation)?\b/i;
-
-const BACKFILL_STOPWORDS = new Set([
+const TOKEN_STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "of", "for", "in", "to", "on", "with",
   "unit", "module", "week", "lecture", "lectures", "chapter", "introduction",
 ]);
@@ -1468,117 +1490,8 @@ function tokenize(text: string): Set<string> {
     text.toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
-      .filter(w => w.length > 2 && !BACKFILL_STOPWORDS.has(w))
+      .filter(w => w.length > 2 && !TOKEN_STOPWORDS.has(w))
   );
-}
-
-function backfillModuleReadings(
-  enrichedTopics: ParsedTopic[],
-  contentModules: CanvasModuleInfo[],
-  courseName: string,
-): ParsedTopic[] {
-  if (enrichedTopics.length === 0 || contentModules.length === 0) {
-    return enrichedTopics;
-  }
-
-  // 1. Collect all readings already present (lowercase for dedup)
-  const existingReadings = new Set<string>();
-  for (const week of enrichedTopics) {
-    for (const r of week.readings ?? []) {
-      existingReadings.add(r.toLowerCase().trim());
-    }
-  }
-
-  // 2. For each module, find readings not yet present and not junk
-  const toPlace: { moduleIdx: number; mod: CanvasModuleInfo; readings: string[] }[] = [];
-
-  for (let i = 0; i < contentModules.length; i++) {
-    const mod = contentModules[i];
-    const missing = mod.readings.filter(r => {
-      if (BACKFILL_SKIP_RX.test(r)) return false;
-      if (existingReadings.has(r.toLowerCase().trim())) return false;
-      return true;
-    });
-    if (missing.length > 0) {
-      toPlace.push({ moduleIdx: i, mod, readings: missing });
-    }
-  }
-
-  if (toPlace.length === 0) {
-    console.log(`[pipeline] ${courseName}: backfill — all module readings already incorporated`);
-    return enrichedTopics;
-  }
-
-  // 3. Clone so we don't mutate the input
-  const result = enrichedTopics.map(w => ({
-    ...w,
-    readings: [...(w.readings ?? [])],
-  }));
-
-  // 4. Build lookup structures
-  const weekNumToIndex = new Map<number, number>();
-  for (let i = 0; i < result.length; i++) {
-    weekNumToIndex.set(result[i].weekNumber, i);
-  }
-
-  const weekKeywords = result.map(w => {
-    const allText = [w.weekLabel, ...(w.topics ?? [])].join(" ");
-    return tokenize(allText);
-  });
-
-  let placedCount = 0;
-
-  // 5. Match each module to a week and add readings
-  for (const { moduleIdx, mod, readings } of toPlace) {
-    let targetIndex: number | null = null;
-
-    // Strategy A: unit/week/module number match
-    const unitMatch = mod.weekLabel.match(/\b(?:unit|module|week)\s*(\d+)/i);
-    if (unitMatch) {
-      const unitNum = parseInt(unitMatch[1], 10);
-      const idx = weekNumToIndex.get(unitNum);
-      if (idx !== undefined) targetIndex = idx;
-    }
-
-    // Strategy B: keyword overlap
-    if (targetIndex === null) {
-      const modKeywords = tokenize(mod.weekLabel + " " + mod.topics.join(" "));
-      if (modKeywords.size > 0) {
-        let bestOverlap = 0;
-        let bestIdx = -1;
-        for (let wi = 0; wi < result.length; wi++) {
-          let overlap = 0;
-          for (const kw of modKeywords) {
-            if (weekKeywords[wi].has(kw)) overlap++;
-          }
-          if (overlap > bestOverlap) {
-            bestOverlap = overlap;
-            bestIdx = wi;
-          }
-        }
-        if (bestOverlap >= 1) targetIndex = bestIdx;
-      }
-    }
-
-    // Strategy C: proportional positional fallback
-    if (targetIndex === null) {
-      const N = contentModules.length;
-      const W = result.length;
-      targetIndex = N === 1 ? 0 : Math.round(moduleIdx * (W - 1) / (N - 1));
-    }
-
-    for (const r of readings) {
-      result[targetIndex].readings.push(r);
-    }
-    placedCount += readings.length;
-  }
-
-  console.log(
-    `[pipeline] ${courseName}: backfill placed ${placedCount} readings ` +
-    `from ${toPlace.length} modules into ${result.length} weeks`
-  );
-
-  return result;
 }
 
 // ─── Stage 5: VALIDATE ──────────────────────────────────────────────────────
@@ -1847,6 +1760,103 @@ function collapseSameStartDateTopics(topics: ParsedTopic[], courseName: string):
   return normalized;
 }
 
+function computeTimelineQuality(args: {
+  topics: ParsedTopic[];
+  warnings: string[];
+  repairActionsApplied: string[];
+  timelineSource: string;
+  lectureCalendarSource: string;
+  usedModuleScaffold: boolean;
+  hasTimelineAuthority: boolean;
+}): TimelineQuality {
+  const datedTopics = args.topics.filter((topic) => Boolean(topic.startDate));
+  const datedRatio = args.topics.length > 0 ? datedTopics.length / args.topics.length : 0;
+  const breakCount = args.topics.filter((topic) => isBreakTopic(topic)).length;
+  const hasOnlyHtmlBodyAuthority = args.timelineSource === "html-body";
+  const warningPenalty = args.warnings.length;
+  const repairPenalty = args.repairActionsApplied.filter((action) => action !== "used_module_scaffold").length;
+
+  if (
+    args.hasTimelineAuthority &&
+    datedRatio >= 0.8 &&
+    warningPenalty === 0 &&
+    repairPenalty === 0 &&
+    !args.usedModuleScaffold &&
+    !hasOnlyHtmlBodyAuthority
+  ) {
+    return "strong";
+  }
+
+  if (
+    datedRatio >= 0.5 &&
+    warningPenalty <= 2 &&
+    (args.hasTimelineAuthority || args.lectureCalendarSource === "lecture-anchors" || breakCount > 0)
+  ) {
+    return "usable";
+  }
+
+  return "weak";
+}
+
+export function finalizeTimelineForPersistence(args: {
+  topics: ParsedTopic[];
+  termStartDate: string | null;
+  termEndDate: string | null;
+  courseName: string;
+  timelineSource: string;
+  lectureCalendarSource: string;
+  usedModuleScaffold: boolean;
+  hasTimelineAuthority: boolean;
+}): FinalizeTimelineResult {
+  const repairActionsApplied: string[] = [];
+
+  let finalizedTopics = args.topics;
+
+  const splitBreakTopics = splitMixedBreakWeeks(finalizedTopics, args.termStartDate, args.termEndDate);
+  if (splitBreakTopics.length > finalizedTopics.length) {
+    repairActionsApplied.push(`split_mixed_break_weeks:${splitBreakTopics.length - finalizedTopics.length}`);
+  }
+  finalizedTopics = splitBreakTopics;
+
+  const collapsedTopics = collapseSameStartDateTopics(finalizedTopics, args.courseName);
+  if (collapsedTopics.length < finalizedTopics.length) {
+    repairActionsApplied.push(`collapsed_duplicate_same_date_weeks:${finalizedTopics.length - collapsedTopics.length}`);
+  }
+  finalizedTopics = collapsedTopics;
+
+  const validated = validateTimeline(finalizedTopics, args.termStartDate, args.termEndDate);
+  finalizedTopics = validated.topics;
+  if (validated.warnings.some((warning) => warning.startsWith("Shifted topic dates by "))) {
+    repairActionsApplied.push("realigned_term_dates");
+  }
+  if (args.usedModuleScaffold) {
+    repairActionsApplied.push("used_module_scaffold");
+  }
+
+  const timelineQuality = computeTimelineQuality({
+    topics: finalizedTopics,
+    warnings: validated.warnings,
+    repairActionsApplied,
+    timelineSource: args.timelineSource,
+    lectureCalendarSource: args.lectureCalendarSource,
+    usedModuleScaffold: args.usedModuleScaffold,
+    hasTimelineAuthority: args.hasTimelineAuthority,
+  });
+
+  return {
+    topics: finalizedTopics,
+    warnings: validated.warnings,
+    repairActionsApplied,
+    timelineQuality,
+  };
+}
+
+export const timelinePipelineInternals = {
+  inferIsoDateFromText,
+  organizeModulesAsTimeline,
+  finalizeTimelineForPersistence,
+};
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 export async function runTopicPipeline(input: PipelineInput): Promise<PipelineResult> {
@@ -1899,6 +1909,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   debug.timelineSource = timelineExtraction.usedLabel;
   debug.contentSource = contentExtraction.usedLabel;
+  const resolvedTimelineAuthority = summarizeAuthorityCandidates(authoritySplit.timelineCandidates, timelineExtraction.usedLabel);
+  const resolvedContentAuthority = summarizeAuthorityCandidates(authoritySplit.contentCandidates, contentExtraction.usedLabel);
 
   const timelineTopics = timelineExtraction.topics.filter(
     (topic) => topic.startDate || isBreakTopic(topic),
@@ -2023,18 +2035,25 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${finalTopics.length} enriched weeks`);
   }
 
-  // ── STAGE 5: VALIDATE ──
-  const splitBreakTopics = splitMixedBreakWeeks(finalTopics, input.termStartDate, input.termEndDate);
-  const collapsedTopics = collapseSameStartDateTopics(splitBreakTopics, input.courseName);
-  const validated = validateTimeline(collapsedTopics, input.termStartDate, input.termEndDate);
-  debug.stage5Warnings = validated.warnings;
+  // ── STAGE 5: FINALIZE + VALIDATE ──
+  const finalized = finalizeTimelineForPersistence({
+    topics: finalTopics,
+    termStartDate: input.termStartDate,
+    termEndDate: input.termEndDate,
+    courseName: input.courseName,
+    timelineSource: debug.timelineSource ?? "none",
+    lectureCalendarSource: debug.lectureCalendarSource ?? "none",
+    usedModuleScaffold,
+    hasTimelineAuthority,
+  });
+  debug.stage5Warnings = finalized.warnings;
 
-  if (validated.warnings.length > 0) {
-    console.warn(`[pipeline] ${input.courseName}: validation warnings:`, validated.warnings);
+  if (finalized.warnings.length > 0) {
+    console.warn(`[pipeline] ${input.courseName}: validation warnings:`, finalized.warnings);
   }
 
   const spine = buildTimelineSpine({
-    topics: validated.topics,
+    topics: finalized.topics,
     hasTimelineAuthority,
     usedModuleScaffold,
     lectureCalendarSource: debug.lectureCalendarSource,
@@ -2043,7 +2062,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   const synthesizedTopics = mergeContentOntoSpine({
     spine,
-    topics: validated.topics,
+    topics: finalized.topics,
     timelineSource: debug.timelineSource ?? "none",
     contentSource: debug.contentSource ?? "none",
     lectureCalendarSource: debug.lectureCalendarSource,
@@ -2060,9 +2079,17 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     timelineDiagnostics: {
       timelineSource: debug.timelineSource ?? "none",
       contentSource: debug.contentSource ?? "none",
+      timelineAuthority: resolvedTimelineAuthority,
+      contentAuthority: resolvedContentAuthority,
+      timelineAuthorityWinner: resolvedTimelineAuthority.winner,
+      timelineAuthorityRunnerUp: resolvedTimelineAuthority.runnerUp,
+      contentAuthorityWinner: resolvedContentAuthority.winner,
+      contentAuthorityRunnerUp: resolvedContentAuthority.runnerUp,
       lectureCalendarSource: debug.lectureCalendarSource ?? "none",
       usedModuleScaffold,
       stage5Warnings: debug.stage5Warnings,
+      repairActionsApplied: finalized.repairActionsApplied,
+      timelineQuality: finalized.timelineQuality,
       stage2Classifications: debug.stage2Classifications,
     },
     moduleIdsToDelete,

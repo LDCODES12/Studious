@@ -1,0 +1,48 @@
+{
+  "kind": "finalize",
+  "name": "anthropology-duplicate-week",
+  "input": {
+    "topics": [
+      {
+        "weekNumber": 1,
+        "weekLabel": "Course Introduction and Evolutionism",
+        "startDate": "2026-01-12",
+        "topics": [
+          "Course Introduction",
+          "Evolutionism and after"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Anthropology"
+      },
+      {
+        "weekNumber": 2,
+        "weekLabel": "Course Introduction and Evolutionism",
+        "startDate": "2026-01-12",
+        "topics": [
+          "Syllabus",
+          "Course Schedule",
+          "Office Hours"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Anthropology"
+      }
+    ],
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-05-15",
+    "courseName": "Anthropology",
+    "timelineSource": "html-body",
+    "lectureCalendarSource": "term-start",
+    "usedModuleScaffold": false,
+    "hasTimelineAuthority": true
+  },
+  "expect": {
+    "topicCount": 1,
+    "noDuplicateDates": true,
+    "repairActionsInclude": [
+      "collapsed_duplicate_same_date_weeks"
+    ],
+    "timelineQuality": "usable"
+  }
+}

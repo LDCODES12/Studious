@@ -1,0 +1,60 @@
+{
+  "kind": "scaffold",
+  "name": "pcs-module-scaffold",
+  "input": {
+    "courseName": "Physiological Control Systems",
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-05-15",
+    "contentModules": [
+      {
+        "id": "m1",
+        "canvasModuleId": "m1",
+        "weekNumber": 1,
+        "weekLabel": "Unit 1: Big Themes in Physiology",
+        "topics": [
+          "Lecture 1: January 12",
+          "Lecture 2: January 14",
+          "Lecture 3: January 16"
+        ],
+        "readings": []
+      },
+      {
+        "id": "m2",
+        "canvasModuleId": "m2",
+        "weekNumber": 2,
+        "weekLabel": "Unit 2: Endocrine System",
+        "topics": [
+          "Lecture 4: January 23",
+          "Lecture 5: January 26",
+          "Lecture 6: January 30"
+        ],
+        "readings": []
+      },
+      {
+        "id": "m3",
+        "canvasModuleId": "m3",
+        "weekNumber": 3,
+        "weekLabel": "Unit 3: Nervous System",
+        "topics": [
+          "Lecture 7: February 2",
+          "Lecture 8: February 6",
+          "Lecture 9: February 9"
+        ],
+        "readings": []
+      }
+    ]
+  },
+  "expect": {
+    "topicCount": 3,
+    "startDates": [
+      "2026-01-12",
+      "2026-01-23",
+      "2026-02-02"
+    ],
+    "labelsPresent": [
+      "Unit 1: Big Themes in Physiology",
+      "Unit 2: Endocrine System",
+      "Unit 3: Nervous System"
+    ]
+  }
+}

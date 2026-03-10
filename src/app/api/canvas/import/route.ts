@@ -656,7 +656,6 @@ export async function POST(request: NextRequest) {
   // end so a timeout can't silently kill the log), and returned in the
   // response body so the extension can persist it to chrome.storage.local.
   type CandidateDebug = { label: string; chars: number; windowChars: number; score: number };
-  type AttemptDebug   = { source: string; format: string; weeksTotal: number; weeksRich: number; accepted: boolean };
   type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
   type CourseDebug = {
     name: string;
@@ -667,14 +666,10 @@ export async function POST(request: NextRequest) {
     candidates: CandidateDebug[];
     selectedSource: string;
     materials: MaterialDebug[];
-    aiAttempts: AttemptDebug[];
-    auditFired: boolean;
-    auditDelta: string;
     weeksWritten: number;
     classScheduleSource: string;
     status: string;
     error?: string;
-    coverageWarning?: string;
   };
   const allCourseDebug: CourseDebug[] = [];
   const scheduleRows: string[] = [];
@@ -734,9 +729,6 @@ export async function POST(request: NextRequest) {
         candidates: [],
         selectedSource: "none",
         materials: [],
-        aiAttempts: [],
-        auditFired: false,
-        auditDelta: "",
         weeksWritten: 0,
         classScheduleSource: "",
         status: staleAiTimeline ? "pending:stale-ai-timeline" : "pending",
@@ -1226,7 +1218,13 @@ export async function POST(request: NextRequest) {
           where: { id: scCourseId },
           data: {
             timelineMode: pipelineResult.timelineMode,
-            timelineDiagnostics: pipelineResult.timelineDiagnostics as object,
+            timelineDiagnostics: {
+              ...(pipelineResult.timelineDiagnostics as Record<string, unknown>),
+              selectedSource: dbg.selectedSource,
+              candidateSources: dbg.candidates,
+              classScheduleSource: dbg.classScheduleSource,
+              importedMaterials: dbg.materials,
+            },
           },
         });
 
