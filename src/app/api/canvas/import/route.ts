@@ -858,7 +858,7 @@ export async function POST(request: NextRequest) {
                   courseId: scCourseId,
                   fileName: mt.fileName,
                   detectedType: analysis.detectedType,
-                  sourceRole: inferMaterialSourceRole(analysis.detectedType),
+                  sourceRole: inferMaterialSourceRole(analysis.detectedType, mt.fileName),
                   summary: analysis.summary,
                   relatedTopics: analysis.relatedTopics,
                   rawText: pdfText.slice(0, 25_000),

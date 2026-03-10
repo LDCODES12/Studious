@@ -45,7 +45,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       courseId,
       fileName,
       detectedType: analysis.detectedType,
-      sourceRole: inferMaterialSourceRole(analysis.detectedType),
+      sourceRole: inferMaterialSourceRole(analysis.detectedType, fileName),
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
       rawText: text.slice(0, 25000),

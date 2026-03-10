@@ -19,10 +19,21 @@ export default async function DashboardPage() {
   const session = await auth();
   const userId = session?.user?.id;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const threeDaysFromNow = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const easternDateFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const formatEasternDate = (date: Date) => {
+    const parts = easternDateFormatter.formatToParts(date);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${byType.year}-${byType.month}-${byType.day}`;
+  };
+
+  const today = formatEasternDate(new Date());
+  const threeDaysFromNow = formatEasternDate(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+  const dashboardCalendarNow = new Date(`${today}T12:00:00Z`);
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -136,14 +147,14 @@ export default async function DashboardPage() {
     };
   });
 
-  const normalizedCourseContexts = applyDetectedTermBreaks(courseContexts);
+  const normalizedCourseContexts = applyDetectedTermBreaks(courseContexts, dashboardCalendarNow);
 
   // Week overview — AI-generated, cached per week
   const weekOverview = userId && normalizedCourseContexts.length > 0
-    ? await getOrCreateWeekOverview(userId, normalizedCourseContexts, learningSignals)
+    ? await getOrCreateWeekOverview(userId, normalizedCourseContexts, learningSignals, dashboardCalendarNow)
     : null;
-  const weekCourses = normalizedCourseContexts.length > 0 ? buildWeekCourses(normalizedCourseContexts) : [];
-  const deadlineDays = normalizedCourseContexts.length > 0 ? buildDeadlineDays(normalizedCourseContexts) : [];
+  const weekCourses = normalizedCourseContexts.length > 0 ? buildWeekCourses(normalizedCourseContexts, dashboardCalendarNow) : [];
+  const deadlineDays = normalizedCourseContexts.length > 0 ? buildDeadlineDays(normalizedCourseContexts, dashboardCalendarNow) : [];
 
   // Pre-class prompts from course contexts
   const isSemanticTopic = (name: string) =>

@@ -109,7 +109,15 @@ Only use labels from the provided list in relatedTopics. If the list is empty, r
   }
 }
 
-export function inferMaterialSourceRole(detectedType: MaterialAnalysis["detectedType"]): MaterialSourceRole {
+export function inferMaterialSourceRole(
+  detectedType: MaterialAnalysis["detectedType"],
+  label?: string | null,
+): MaterialSourceRole {
+  const normalizedLabel = label?.toLowerCase() ?? "";
+  if (/\bstudy\s+outline\b|\breview\s+questions?\b|\bexam\s+\d+\b|\bmidterm\b/.test(normalizedLabel)) {
+    return "content";
+  }
+  if (detectedType === "syllabus" && /\bsyllab|schedule|calendar\b/.test(normalizedLabel)) return "timeline";
   if (detectedType === "syllabus") return "mixed";
   if (detectedType === "lecture_notes" || detectedType === "lecture_slides" || detectedType === "textbook") {
     return "content";

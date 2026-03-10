@@ -137,8 +137,11 @@ export function applyDetectedTermBreaks(
       Boolean(nextStart && nextStart > breakStart);
     const startsOnBreak = currentStart === breakStart;
     const breakMentioned = hasBreakSignal(currentWeek);
+    const lowConfidenceInferredWeek =
+      (currentWeek.dateConfidence === "low" || currentWeek.scheduleMode === "inferred") &&
+      !currentWeek.startDate;
 
-    if (!startsOnBreak && !spansBreakGap) {
+    if (!startsOnBreak && !spansBreakGap && !lowConfidenceInferredWeek) {
       return bundle;
     }
 
@@ -405,10 +408,10 @@ export async function getOrCreateWeekOverview(
   userId: string,
   courseContexts: CourseContextBundle[],
   signals: LearningSignals | null,
+  now: Date = new Date(),
 ): Promise<WeekOverviewData | null> {
   if (courseContexts.length === 0) return null;
 
-  const now = new Date();
   const weekKey = getCurrentWeekKey(now);
   const sourceFingerprint = buildWeekOverviewFingerprint(courseContexts, signals);
 

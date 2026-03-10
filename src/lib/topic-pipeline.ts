@@ -297,7 +297,24 @@ const CONTENT_LABEL_RX = /\b(lecture|delivered|study\s+outline|review\s+question
 const DATE_TOKEN_RX = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z.]*\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/gi;
 const EXPLICIT_SCHEDULE_RX = /\b(schedule|weekly\s+schedule|course\s+schedule|we(?:'?| )ll\s+meet|meeting\s+dates?)\b/i;
 const BREAK_RX = /\bspring break|no class|holiday\b/i;
+const FULL_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes\b/i;
+const PARTIAL_NO_CLASS_RX = /\bno class(?:es)?\s+(?:on|for)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|\d{1,2}\/\d{1,2})/i;
 const SLIDE_DECK_RX = /\b(on the agenda|learning objectives|discussion questions|delivered|slide|today we(?:'| )ll|what is|who is this)\b/i;
+const GENERIC_WEEK_LABEL_RX = /^(lectures?|course resources|report discussions|midterm exam prep materials|review materials|assignment descriptions)$/i;
+const MONTH_TO_INDEX: Record<string, number> = {
+  jan: 0, january: 0,
+  feb: 1, february: 1,
+  mar: 2, march: 2,
+  apr: 3, april: 3,
+  may: 4,
+  jun: 5, june: 5,
+  jul: 6, july: 6,
+  aug: 7, august: 7,
+  sep: 8, sept: 8, september: 8,
+  oct: 9, october: 9,
+  nov: 10, november: 10,
+  dec: 11, december: 11,
+};
 
 function countMatches(text: string, rx: RegExp): number {
   return text.match(rx)?.length ?? 0;
@@ -309,12 +326,13 @@ function classifyCandidateRole(src: ScoredSource): CandidateRole {
   const label = src.label.toLowerCase();
   const text = src.text.toLowerCase();
   const format = detectSourceFormat(src.text);
+  const isHtmlBody = label === "html-body";
 
   const labelTimeline = TIMELINE_LABEL_RX.test(label) ? 3 : 0;
   const labelContent = CONTENT_LABEL_RX.test(label) ? 3 : 0;
   const explicitSchedule = EXPLICIT_SCHEDULE_RX.test(text) ? 4 : 0;
   const breakMentions = BREAK_RX.test(text) ? 2 : 0;
-  const dateMentions = Math.min(5, countMatches(src.text, DATE_TOKEN_RX));
+  const dateMentions = Math.min(isHtmlBody ? 2 : 5, countMatches(src.text, DATE_TOKEN_RX));
   const weekMentions = Math.min(5, countMatches(text, /\bweek\s+\d+\b/g));
   const lectureMentions = Math.min(5, countMatches(text, /\blecture\s+\d+\b/g));
   const slideSignals = SLIDE_DECK_RX.test(text) ? 3 : 0;
@@ -334,6 +352,12 @@ function classifyCandidateRole(src: ScoredSource): CandidateRole {
     slideSignals +
     lectureMentions +
     (src.score > 1.5 ? 1 : 0);
+
+  if (isHtmlBody && explicitSchedule === 0 && calendarFormat === 0 && structuredSchedule === 0) {
+    if (lectureMentions > 0 || slideSignals > 0 || contentScore >= timelineScore) return "content";
+    if (timelineScore >= 6) return "mixed";
+    return "content";
+  }
 
   if (timelineScore >= 6 && contentScore >= 4) return "mixed";
   if (timelineScore >= contentScore + 2 && timelineScore >= 5) return "timeline";
@@ -453,8 +477,22 @@ async function extractTopicsExpanded(
   return { topics, usedLabel, usedWindow };
 }
 
+function hasInstructionalContent(topic: ParsedTopic): boolean {
+  return (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
+}
+
 function isBreakTopic(topic: ParsedTopic): boolean {
-  return BREAK_RX.test(topic.weekLabel ?? "") || BREAK_RX.test(topic.notes ?? "");
+  const label = topic.weekLabel ?? "";
+  const notes = topic.notes ?? "";
+  const text = `${label} ${notes}`.trim();
+  if (!text) return false;
+
+  if (FULL_BREAK_RX.test(label)) return true;
+  if (FULL_BREAK_RX.test(notes) && !hasInstructionalContent(topic)) return true;
+
+  if (!/\bno class\b/i.test(text)) return false;
+  if (PARTIAL_NO_CLASS_RX.test(text) && hasInstructionalContent(topic)) return false;
+  return !hasInstructionalContent(topic);
 }
 
 function tokenizeWeekText(topic: ParsedTopic): Set<string> {
@@ -570,6 +608,83 @@ function isSparseTimeline(topics: ParsedTopic[]): boolean {
   return averageGap > 10;
 }
 
+function normalizeCalendarYear(yearRaw: string): number {
+  const year = Number.parseInt(yearRaw, 10);
+  if (yearRaw.length === 2) return year < 70 ? 2000 + year : 1900 + year;
+  return year;
+}
+
+function inferYearsForMonth(
+  monthIndex: number,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): number[] {
+  const years = new Set<number>();
+  const start = termStartDate ? parseISO(`${termStartDate}T12:00:00Z`) : null;
+  const end = termEndDate ? parseISO(`${termEndDate}T12:00:00Z`) : null;
+
+  if (start && !Number.isNaN(start.getTime())) {
+    years.add(start.getUTCFullYear());
+    if (monthIndex < start.getUTCMonth()) years.add(start.getUTCFullYear() + 1);
+  }
+  if (end && !Number.isNaN(end.getTime())) {
+    years.add(end.getUTCFullYear());
+    if (monthIndex > end.getUTCMonth()) years.add(end.getUTCFullYear() - 1);
+  }
+  if (years.size === 0) years.add(new Date().getUTCFullYear());
+  return [...years];
+}
+
+function inferIsoDateFromText(
+  text: string,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): string | undefined {
+  if (!text.trim()) return undefined;
+
+  const termStart = termStartDate ? parseISO(`${termStartDate}T12:00:00Z`) : null;
+  const termEnd = termEndDate ? parseISO(`${termEndDate}T12:00:00Z`) : null;
+  const windowStart = termStart && !Number.isNaN(termStart.getTime()) ? subDays(termStart, 21) : null;
+  const windowEnd = termEnd && !Number.isNaN(termEnd.getTime()) ? addDays(termEnd, 21) : null;
+  const candidates = new Set<string>();
+
+  const monthDayYearRx = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:,?\s+(\d{2,4}))?\b/gi;
+  for (const match of text.matchAll(monthDayYearRx)) {
+    const monthIndex = MONTH_TO_INDEX[match[1].toLowerCase()];
+    if (monthIndex == null) continue;
+    const day = Number.parseInt(match[2], 10);
+    const years = match[3]
+      ? [normalizeCalendarYear(match[3])]
+      : inferYearsForMonth(monthIndex, termStartDate, termEndDate);
+    for (const year of years) {
+      const candidate = new Date(Date.UTC(year, monthIndex, day, 12));
+      if (Number.isNaN(candidate.getTime())) continue;
+      if (windowStart && candidate < windowStart) continue;
+      if (windowEnd && candidate > windowEnd) continue;
+      candidates.add(candidate.toISOString().slice(0, 10));
+    }
+  }
+
+  const numericDateRx = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g;
+  for (const match of text.matchAll(numericDateRx)) {
+    const monthIndex = Number.parseInt(match[1], 10) - 1;
+    const day = Number.parseInt(match[2], 10);
+    if (monthIndex < 0 || monthIndex > 11) continue;
+    const years = match[3]
+      ? [normalizeCalendarYear(match[3])]
+      : inferYearsForMonth(monthIndex, termStartDate, termEndDate);
+    for (const year of years) {
+      const candidate = new Date(Date.UTC(year, monthIndex, day, 12));
+      if (Number.isNaN(candidate.getTime())) continue;
+      if (windowStart && candidate < windowStart) continue;
+      if (windowEnd && candidate > windowEnd) continue;
+      candidates.add(candidate.toISOString().slice(0, 10));
+    }
+  }
+
+  return [...candidates].sort()[0];
+}
+
 interface TimelineSpine {
   topics: ParsedTopic[];
   anchors: TimelineAnchorRecord[];
@@ -619,7 +734,11 @@ function buildTimelineSpine(args: {
       sequenceNumber: index + 1,
       anchorDate: topic.startDate ?? null,
       anchorType,
-      isInstructional: !isBreakTopic(topic) && ((topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0),
+      isInstructional:
+        !isBreakTopic(topic) &&
+        (args.topics.length <= 8 && args.topics.some((t) => Boolean(t.startDate))
+          ? Boolean(topic.startDate) || hasInstructionalContent(topic)
+          : hasInstructionalContent(topic)),
       calendarConfidence,
       sourceRefs: args.sourceRefs,
       notes: topic.notes ?? null,
@@ -1422,6 +1541,8 @@ function organizeModulesAsTimeline(
   contentModules: CanvasModuleInfo[],
   lectureCalendar: WeekDateRange[],
   courseName: string,
+  termStartDate: string | null,
+  termEndDate: string | null,
 ): ParsedTopic[] {
   if (contentModules.length === 0) return [];
 
@@ -1495,6 +1616,13 @@ function organizeModulesAsTimeline(
       const calWeek = lectureToWeek.get(p.lecStart);
       if (calWeek) startDate = calWeek.startDate;
     }
+    if (!startDate) {
+      startDate = inferIsoDateFromText(
+        [p.cleanLabel, ...p.module.topics, ...p.module.readings].join(" | "),
+        termStartDate,
+        termEndDate,
+      );
+    }
 
     timeline.push({
       weekNumber: i + 1,
@@ -1512,6 +1640,58 @@ function organizeModulesAsTimeline(
 
   console.log(`[pipeline] ${courseName}: module fallback organized ${contentModules.length} modules → ${timeline.length} timeline entries`);
   return timeline;
+}
+
+function pickPreferredWeekLabel(a: ParsedTopic, b: ParsedTopic): string {
+  const score = (topic: ParsedTopic) => {
+    let value = hasInstructionalContent(topic) ? 4 : 0;
+    if (!isBreakTopic(topic)) value += 2;
+    if (topic.weekLabel && !GENERIC_WEEK_LABEL_RX.test(topic.weekLabel)) value += 2;
+    value += Math.min(2, (topic.topics?.length ?? 0));
+    return value;
+  };
+  return score(a) >= score(b) ? a.weekLabel : b.weekLabel;
+}
+
+function mergeTopicLists(a: string[] | undefined, b: string[] | undefined): string[] {
+  return [...new Set([...(a ?? []), ...(b ?? [])])];
+}
+
+function mergeNotes(a?: string | null, b?: string | null): string | undefined {
+  const notes = [...new Set([a, b].filter((note): note is string => Boolean(note && note.trim())))];
+  return notes.length > 0 ? notes.join("; ") : undefined;
+}
+
+function collapseSameStartDateTopics(topics: ParsedTopic[], courseName: string): ParsedTopic[] {
+  if (topics.length < 2) return topics;
+
+  const collapsed: ParsedTopic[] = [];
+  for (const topic of topics) {
+    const previous = collapsed[collapsed.length - 1];
+    if (previous && previous.startDate && topic.startDate && previous.startDate === topic.startDate) {
+      const merged: ParsedTopic = {
+        ...previous,
+        weekLabel: pickPreferredWeekLabel(previous, topic),
+        topics: mergeTopicLists(previous.topics, topic.topics),
+        readings: mergeTopicLists(previous.readings, topic.readings),
+        notes: mergeNotes(previous.notes, topic.notes),
+        courseName: topic.courseName ?? previous.courseName,
+      };
+      collapsed[collapsed.length - 1] = merged;
+      continue;
+    }
+    collapsed.push({
+      ...topic,
+      topics: [...(topic.topics ?? [])],
+      readings: [...(topic.readings ?? [])],
+    });
+  }
+
+  const normalized = renumberSequentialWeeks(collapsed);
+  if (normalized.length !== topics.length) {
+    console.log(`[pipeline] ${courseName}: collapsed ${topics.length - normalized.length} duplicate same-date week(s)`);
+  }
+  return normalized;
 }
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
@@ -1608,8 +1788,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   const shouldUseModuleScaffold =
     !hasTimelineAuthority &&
-    contentModules.length >= Math.max(8, aiTopics.length + 3) &&
-    contentModules.length >= Math.ceil(aiTopics.length * 1.5);
+    contentModules.length >= Math.max(4, Math.min(8, aiTopics.length || 4));
   let usedModuleScaffold = false;
 
   if (shouldUseModuleScaffold) {
@@ -1617,6 +1796,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       contentModules,
       lectureCalendarBuild.source === "lecture-anchors" ? lectureCalendar : [],
       input.courseName,
+      input.termStartDate,
+      input.termEndDate,
     );
     if (scaffold.length > 0) {
       aiTopics = mergeContentOntoTimeline(scaffold, aiTopics, input.courseName);
@@ -1646,12 +1827,19 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   } else if (aiTopics.length === 0) {
     // No AI topics but we have content modules — organize them into a timeline
-    const organizedModules = organizeModulesAsTimeline(contentModules, lectureCalendar, input.courseName);
+    const organizedModules = organizeModulesAsTimeline(
+      contentModules,
+      lectureCalendar,
+      input.courseName,
+      input.termStartDate,
+      input.termEndDate,
+    );
     if (organizedModules.length > 0) {
       finalTopics = organizedModules;
       moduleIdsToDelete = input.modules.map((m) => m.id); // delete all old modules, we're replacing them
       debug.stage4OutputWeeks = organizedModules.length;
       debug.fallbackUsed = true;
+      usedModuleScaffold = true;
       console.log(`[pipeline] ${input.courseName}: Stage 4 module-only fallback → ${organizedModules.length} organized entries`);
     } else {
       finalTopics = [];
@@ -1683,7 +1871,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   }
 
   // ── STAGE 5: VALIDATE ──
-  const validated = validateTimeline(finalTopics, input.termStartDate, input.termEndDate);
+  const collapsedTopics = collapseSameStartDateTopics(finalTopics, input.courseName);
+  const validated = validateTimeline(collapsedTopics, input.termStartDate, input.termEndDate);
   debug.stage5Warnings = validated.warnings;
 
   if (validated.warnings.length > 0) {
