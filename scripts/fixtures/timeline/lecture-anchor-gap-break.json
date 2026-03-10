@@ -1,0 +1,75 @@
+{
+  "kind": "finalize",
+  "name": "lecture-anchor-gap-break",
+  "input": {
+    "topics": [
+      {
+        "weekNumber": 1,
+        "weekLabel": "Unit 5",
+        "startDate": "2026-02-23",
+        "topics": [
+          "Lecture 17",
+          "Lecture 18",
+          "Lecture 19"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Gen Chem 2"
+      },
+      {
+        "weekNumber": 2,
+        "weekLabel": "Unit 6",
+        "startDate": "2026-03-02",
+        "topics": [
+          "Lecture 20",
+          "Lecture 21",
+          "Lecture 22"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Gen Chem 2"
+      },
+      {
+        "weekNumber": 3,
+        "weekLabel": "Unit 7",
+        "startDate": "2026-03-16",
+        "topics": [
+          "Lecture 23",
+          "Lecture 24"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Gen Chem 2"
+      },
+      {
+        "weekNumber": 4,
+        "weekLabel": "Unit 8",
+        "startDate": "2026-03-23",
+        "topics": [
+          "Lecture 25",
+          "Lecture 26"
+        ],
+        "readings": [],
+        "notes": null,
+        "courseName": "Gen Chem 2"
+      }
+    ],
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-05-15",
+    "courseName": "Gen Chem 2",
+    "timelineSource": "none",
+    "lectureCalendarSource": "lecture-anchors",
+    "usedModuleScaffold": true,
+    "hasTimelineAuthority": false
+  },
+  "expect": {
+    "topicCount": 5,
+    "breakDates": [
+      "2026-03-09"
+    ],
+    "repairActionsInclude": [
+      "inserted_gap_break_weeks"
+    ],
+    "timelineQuality": "usable"
+  }
+}

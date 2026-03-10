@@ -514,7 +514,7 @@ function hasInstructionalContent(topic: ParsedTopic): boolean {
 
 function isBreakTopic(topic: ParsedTopic): boolean {
   const label = topic.weekLabel ?? "";
-  const notes = topic.notes ?? "";
+  const notes = normalizeNotesValue(topic.notes) ?? "";
   const text = `${label} ${notes}`.trim();
   if (!text) return false;
 
@@ -725,9 +725,23 @@ function inferIsoDateFromText(
   return [...candidates].sort()[0];
 }
 
-function stripBreakSegments(notes?: string | null): string | undefined {
-  if (!notes) return undefined;
-  const cleaned = notes
+function normalizeNotesValue(notes: unknown): string | undefined {
+  if (typeof notes === "string") {
+    return notes.trim() ? notes : undefined;
+  }
+  if (Array.isArray(notes)) {
+    const flattened = notes
+      .flatMap((item) => typeof item === "string" ? [item.trim()] : [])
+      .filter(Boolean);
+    return flattened.length > 0 ? flattened.join("; ") : undefined;
+  }
+  return undefined;
+}
+
+function stripBreakSegments(notes?: unknown): string | undefined {
+  const normalized = normalizeNotesValue(notes);
+  if (!normalized) return undefined;
+  const cleaned = normalized
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && !BREAK_SEGMENT_RX.test(segment));
@@ -741,9 +755,10 @@ function cleanBreakLabel(label: string): string {
     .trim();
 }
 
-function summarizeBreakSegments(notes?: string | null): string | undefined {
-  if (!notes) return undefined;
-  const segments = notes
+function summarizeBreakSegments(notes?: unknown): string | undefined {
+  const normalized = normalizeNotesValue(notes);
+  if (!normalized) return undefined;
+  const segments = normalized
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
@@ -759,7 +774,8 @@ function inferBreakStartDate(
   const currentStart = parseISO(`${topic.startDate}T12:00:00Z`);
   if (Number.isNaN(currentStart.getTime())) return undefined;
 
-  const segments = `${topic.weekLabel ?? ""}; ${topic.notes ?? ""}`
+  const notes = normalizeNotesValue(topic.notes) ?? "";
+  const segments = `${topic.weekLabel ?? ""}; ${notes}`
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
@@ -795,7 +811,7 @@ function inferBreakStartDate(
 }
 
 function inferBreakLabel(topic: ParsedTopic): string {
-  const text = `${topic.weekLabel ?? ""} ${topic.notes ?? ""}`;
+  const text = `${topic.weekLabel ?? ""} ${normalizeNotesValue(topic.notes) ?? ""}`;
   if (/\bspring break\b/i.test(text)) return "Spring Break — No Class";
   if (/\bread(?:ing)? days?\b/i.test(text)) return "Reading Days";
   if (/\bbye week\b/i.test(text)) return "Bye Week — No Class";
@@ -821,7 +837,7 @@ function splitMixedBreakWeeks(
     const breakStart = inferBreakStartDate(topic, termStartDate, termEndDate);
     const hasMixedBreakSignals =
       hasInstructionalContent(topic) &&
-      BREAK_SEGMENT_RX.test(`${topic.weekLabel ?? ""} ${topic.notes ?? ""}`) &&
+      BREAK_SEGMENT_RX.test(`${topic.weekLabel ?? ""} ${normalizeNotesValue(topic.notes) ?? ""}`) &&
       Boolean(breakStart);
 
     if (!hasMixedBreakSignals || !breakStart) {
@@ -847,6 +863,65 @@ function splitMixedBreakWeeks(
         courseName: topic.courseName,
       });
     }
+  }
+
+  return result;
+}
+
+function insertBreakWeeksFromDateGaps(
+  topics: ParsedTopic[],
+  courseName: string,
+): ParsedTopic[] {
+  if (topics.length < 2 || isSparseTimeline(topics)) return topics;
+
+  const ordered = [...topics].sort((a, b) => {
+    if (a.startDate && b.startDate && a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
+    if (a.startDate && !b.startDate) return -1;
+    if (!a.startDate && b.startDate) return 1;
+    return a.weekNumber - b.weekNumber;
+  });
+
+  const existingBreakStarts = new Set(
+    ordered
+      .filter((topic) => topic.startDate && isBreakTopic(topic))
+      .map((topic) => topic.startDate as string),
+  );
+
+  const result: ParsedTopic[] = [];
+  let inserted = 0;
+
+  for (let i = 0; i < ordered.length; i++) {
+    const current = ordered[i];
+    result.push(current);
+
+    const next = ordered[i + 1];
+    if (!current.startDate || !next?.startDate) continue;
+    if (isBreakTopic(current) || isBreakTopic(next)) continue;
+
+    let cursor = addDays(parseISO(`${current.startDate}T12:00:00Z`), 7);
+    const nextStart = parseISO(`${next.startDate}T12:00:00Z`);
+
+    while (differenceInCalendarDays(nextStart, cursor) >= 7) {
+      const breakStart = cursor.toISOString().slice(0, 10);
+      if (!existingBreakStarts.has(breakStart)) {
+        existingBreakStarts.add(breakStart);
+        inserted += 1;
+        result.push({
+          weekNumber: current.weekNumber + inserted * 0.1,
+          weekLabel: "No Class / Academic Break",
+          startDate: breakStart,
+          topics: [],
+          readings: [],
+          notes: "Inferred no-class week from lecture schedule gap",
+          courseName,
+        });
+      }
+      cursor = addDays(cursor, 7);
+    }
+  }
+
+  if (inserted > 0) {
+    console.log(`[pipeline] ${courseName}: inserted ${inserted} break week(s) from dated gaps`);
   }
 
   return result;
@@ -1921,6 +1996,15 @@ export function finalizeTimelineForPersistence(args: {
     repairActionsApplied.push(`split_mixed_break_weeks:${splitBreakTopics.length - finalizedTopics.length}`);
   }
   finalizedTopics = splitBreakTopics;
+
+  const gapBreakTopics =
+    args.lectureCalendarSource === "lecture-anchors"
+      ? insertBreakWeeksFromDateGaps(finalizedTopics, args.courseName)
+      : finalizedTopics;
+  if (gapBreakTopics.length > finalizedTopics.length) {
+    repairActionsApplied.push(`inserted_gap_break_weeks:${gapBreakTopics.length - finalizedTopics.length}`);
+  }
+  finalizedTopics = gapBreakTopics;
 
   const collapsedTopics = collapseSameStartDateTopics(finalizedTopics, args.courseName);
   if (collapsedTopics.length < finalizedTopics.length) {
