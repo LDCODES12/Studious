@@ -471,12 +471,9 @@ async function extractTopicsExpanded(
       ? src.text
       : bestWindow(src.text, LARGE_WINDOW_SIZE);
 
-    // Append module context so the AI sees both syllabus and Canvas structure
-    const winWithModules = moduleContext ? win + moduleContext : win;
-
     const fmt = detectSourceFormat(src.text);
     const hint = `${src.label}, format: ${fmt}`;
-    const raw = await parseSyllabusTopics(winWithModules, hint);
+    const raw = await parseSyllabusTopics(win, hint, moduleContext || undefined);
     const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
     const richWeeks = result.filter(

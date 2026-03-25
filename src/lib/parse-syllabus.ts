@@ -670,9 +670,14 @@ export function extractScheduleFromCalendarEvents(
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".
  *               Passed as a one-line prefix so the AI knows what format to expect.
  */
-export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
+export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
   const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
+
+  // If module context is provided, append it clearly separated in the user message
+  const promptWithModules = moduleContext
+    ? `${userContent}\n\n${moduleContext}`
+    : userContent;
 
   try {
     const { object } = await generateObject({
@@ -731,6 +736,13 @@ WHAT NOT TO EXTRACT:
 - Grading policies, office hours, late policy, attendance rules
 - Administrative dates (registration deadlines, drop dates)
 
+CANVAS MODULE CONTEXT: The input may include a section marked "CANVAS MODULE STRUCTURE" after the syllabus text. This is supplementary data from the course's Canvas LMS — it shows how the instructor organized content into modules. Use it as follows:
+- The SYLLABUS SCHEDULE is always the primary source for week structure, dates, and topic ordering
+- Use module data to ENRICH your extraction: fill in topic names for weeks where the syllabus only has dates, add readings listed in modules but missing from the syllabus
+- If the syllabus has no schedule at all but modules exist, use the module structure as the basis for week entries
+- Do NOT let module names override or replace topic names you found in the syllabus schedule
+- Module items that look like filenames (e.g. "prinz_marder_2004.pdf") are readings — extract readable titles (e.g. "Prinz & Marder (2004)")
+
 Each week must have:
 - weekNumber: integer starting at 1
 - weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class"). For date-only sessions use descriptive labels like "Seminar Session 1".
@@ -741,7 +753,7 @@ Each week must have:
 - courseName: exact course name/code from the syllabus header
 
 If you cannot find an explicit schedule, return empty weeks array.`,
-      prompt: userContent,
+      prompt: promptWithModules,
       abortSignal: AbortSignal.timeout(120_000),
       maxRetries: 1,
     });
