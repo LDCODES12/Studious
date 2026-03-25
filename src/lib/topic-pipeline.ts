@@ -271,13 +271,15 @@ async function classifyModules(
       schema: classificationSchema,
       system: `You classify Canvas LMS module names into exactly one of three categories:
 
-- "content": Modules that represent academic course content students learn (e.g. "Unit 1: Chemical Equilibria", "Week 3: The French Revolution", "Module 4 - Thermodynamics", "Intro to Linear Algebra").
-- "assessment": Modules that are primarily containers for graded items (e.g. "Quiz", "Midterm", "Exam 2", "Final Project", "Homework Submissions").
+- "content": Modules that represent academic course content students learn (e.g. "Unit 1: Chemical Equilibria", "Week 3: The French Revolution", "Module 4 - Thermodynamics", "Intro to Linear Algebra", "Class 1 Paper", "Week 2 Readings", "Lecture 5 Materials").
+- "assessment": Modules that are primarily containers for graded submissions the student turns in (e.g. "Quiz", "Midterm", "Exam 2", "Homework Submissions", "Problem Set Drop Box").
 - "administrative": Modules that are course logistics, tools, or orientation (e.g. "Orientation", "Welcome", "Course Information", "Aktiv Chemistry", "Piazza", "Discussion Module", "Syllabus", "Getting Started", "Zoom Links").
 
 Rules:
 - A module named like "Unit 1" or "Module 1" with NO descriptive subtitle is still "content" — it is a content container even without a topic name.
 - Modules that combine content with assessment (e.g. "Week 5: Exam Review") are "content".
+- "Paper" in an academic context usually means a research paper to READ, not a paper to submit. Modules like "Class 1 Paper", "Paper(s)", "Reading 3" are "content" — they contain readings for class discussion.
+- Only classify as "assessment" when the module is clearly a submission container (quiz, exam, homework dropbox). If it could be either reading material or a submission, prefer "content".
 - When in doubt between content and administrative, prefer "content".
 - Classify EVERY module in the input list.`,
       prompt: JSON.stringify(moduleNames),
@@ -1123,9 +1125,12 @@ function buildLectureCalendar(
   }
 
   // Find lecture meetings (not labs, discussions, etc.)
-  const lectureMeetings = classSchedule.meetings.filter(
-    (m) => m.label.toLowerCase() === "lecture",
-  );
+  // Labels may be freeform from AI extraction (e.g. "Lecture (Section 1)"),
+  // so match any label that starts with "lecture" or is unlabeled (default).
+  const lectureMeetings = classSchedule.meetings.filter((m) => {
+    const l = m.label.toLowerCase().trim();
+    return l === "" || l.startsWith("lecture");
+  });
   if (lectureMeetings.length === 0) {
     return { weeks: [], source: "none" };
   }

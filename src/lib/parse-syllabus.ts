@@ -530,7 +530,7 @@ Look for statements like:
 - "Class: Mon/Wed/Fri 9–9:50am"
 
 For each distinct meeting type (Lecture, Lab, Discussion, Recitation, etc.) return:
-- label: the meeting type name (e.g. "Lecture", "Lab", "Discussion")
+- label: the meeting type as a single word — exactly one of "Lecture", "Lab", "Discussion", or "Recitation". Do NOT include section numbers, room info, or qualifiers (e.g. write "Lecture", not "Lecture (Section 1)").
 - days: array of RFC 5545 day codes. Use: MO TU WE TH FR SA SU
   Common abbreviations: M=MO, T=TU, W=WE, R or Th=TH, F=FR
 - startTime: 24-hour HH:MM (e.g. "10:00", "14:30")
