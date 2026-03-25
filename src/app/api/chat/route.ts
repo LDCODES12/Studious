@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { streamText, convertToModelMessages } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
 import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
@@ -87,8 +87,8 @@ export async function POST(request: NextRequest) {
 
   const log = apiLogger("POST /api/chat", session.user.id);
 
-  const { messages: uiMessages, courseId } = await request.json();
-  log.info("chat request", { courseId, messageCount: uiMessages?.length ?? 0 });
+  const { messages: uiMessages, courseId, previousResponseId } = await request.json();
+  log.info("chat request", { courseId, hasPrevResponse: !!previousResponseId, messageCount: uiMessages?.length ?? 0 });
 
   // Log first message of a chat session as an intervention event
   const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
@@ -102,8 +102,6 @@ export async function POST(request: NextRequest) {
     }).catch(() => {});
   }
 
-  const messages = await convertToModelMessages(uiMessages);
-
   // Build context — single-course or cross-course depending on courseId
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
@@ -114,10 +112,14 @@ export async function POST(request: NextRequest) {
   // RAG: embed last user message for single-course mode
   let materialContext = "";
   if (courseId) {
-    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
-    if (lastUserMessage && "content" in lastUserMessage && typeof lastUserMessage.content === "string") {
+    const lastUserMsg = [...(uiMessages ?? [])].reverse().find((m: { role: string }) => m.role === "user");
+    const lastUserText = lastUserMsg?.parts
+      ?.filter((p: { type: string }) => p.type === "text")
+      .map((p: { text: string }) => p.text)
+      .join("") ?? "";
+    if (lastUserText) {
       try {
-        const vector = await generateEmbedding(lastUserMessage.content);
+        const vector = await generateEmbedding(lastUserText);
         const materials = await searchMaterials(courseId, vector, 3);
         if (materials.length > 0) {
           materialContext =
@@ -163,12 +165,46 @@ Today is ${today}.
 ${adaptiveRules}
 ${promptText}${materialContext}`;
 
-  const result = streamText({
-    model: openai("gpt-4o-mini"),
-    system,
-    messages,
-  });
+  // ── Responses API conversation chaining ──────────────────────────────────
+  // previousResponseId comes from the client (round-tripped via message metadata).
+  // First message: not present → send full system + messages.
+  // Subsequent messages: present → send only the latest user text + instructions.
+  const config = modelConfig("high");
 
-  log.info("streaming response started", { courseId: courseId ?? "cross-course" });
-  return result.toUIMessageStreamResponse();
+  const result = previousResponseId
+    ? (() => {
+        const lastMsg = uiMessages[uiMessages.length - 1];
+        const lastText = (lastMsg.parts ?? [])
+          .filter((p: { type: string }) => p.type === "text")
+          .map((p: { text: string }) => p.text)
+          .join("");
+        log.info("streaming continuation", { previousResponseId });
+        return streamText({
+          ...config,
+          prompt: lastText,
+          providerOptions: {
+            openai: {
+              ...config.providerOptions.openai,
+              previousResponseId,
+              instructions: system,
+            },
+          },
+        });
+      })()
+    : await (async () => {
+        log.info("streaming new conversation", { courseId: courseId ?? "cross-course" });
+        const messages = await convertToModelMessages(uiMessages);
+        return streamText({ ...config, system, messages });
+      })();
+
+  // Emit responseId to client via message metadata so the next turn can chain.
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      if (part.type === "finish-step" && "providerMetadata" in part) {
+        const rid = (part.providerMetadata?.openai as { responseId?: string } | undefined)?.responseId;
+        if (rid) return { responseId: rid };
+      }
+      return undefined;
+    },
+  });
 }

@@ -78,7 +78,7 @@ export interface SyllabusEvent {
   type: "assignment" | "exam" | "quiz" | "project" | "reading" | "lab" | "other";
   dueDate: string;
   courseName: string;
-  description?: string;
+  description: string | null;
   selected: boolean;
 }
 

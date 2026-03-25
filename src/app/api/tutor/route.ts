@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { streamText, convertToModelMessages } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
 import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
@@ -46,8 +46,8 @@ export async function POST(request: NextRequest) {
 
   const log = apiLogger("POST /api/tutor", session.user.id);
 
-  const { messages: uiMessages, courseId, topicName } = await request.json();
-  log.info("tutor request", { courseId, topicName, messageCount: uiMessages?.length ?? 0 });
+  const { messages: uiMessages, courseId, topicName, previousResponseId } = await request.json();
+  log.info("tutor request", { courseId, topicName, hasPrevResponse: !!previousResponseId, messageCount: uiMessages?.length ?? 0 });
 
   // Log first message as a tutoring session event
   const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
@@ -61,8 +61,6 @@ export async function POST(request: NextRequest) {
     }).catch(() => {});
   }
 
-  const messages = await convertToModelMessages(uiMessages);
-
   // Build course context
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
@@ -70,16 +68,15 @@ export async function POST(request: NextRequest) {
   let materialContext = "";
   if (courseId) {
     try {
-      // For the first exchange, search by topic name; after that, use the latest user message
+      const lastUserMsg = [...(uiMessages ?? [])].reverse().find((m: { role: string }) => m.role === "user");
+      const lastUserText = lastUserMsg?.parts
+        ?.filter((p: { type: string }) => p.type === "text")
+        .map((p: { text: string }) => p.text)
+        .join("") ?? "";
+
       const ragQuery = userMessages.length <= 1 && topicName
         ? topicName
-        : (() => {
-            const lastUser = [...messages].reverse().find((m) => m.role === "user");
-            if (lastUser && "content" in lastUser && typeof lastUser.content === "string") {
-              return topicName ? `${topicName}: ${lastUser.content}` : lastUser.content;
-            }
-            return topicName ?? null;
-          })();
+        : (lastUserText ? (topicName ? `${topicName}: ${lastUserText}` : lastUserText) : topicName ?? null);
 
       if (ragQuery) {
         const vector = await generateEmbedding(ragQuery);
@@ -128,12 +125,42 @@ export async function POST(request: NextRequest) {
 Today is ${today}.${topicContext}${adaptiveRules}
 ${promptText}${materialContext}`;
 
-  const result = streamText({
-    model: openai("gpt-4o-mini"),
-    system,
-    messages,
-  });
+  // ── Responses API conversation chaining ──────────────────────────────────
+  const config = modelConfig("high");
 
-  log.info("streaming tutor response", { courseId: courseId ?? "none", topicName: topicName ?? "free-form" });
-  return result.toUIMessageStreamResponse();
+  const result = previousResponseId
+    ? (() => {
+        const lastMsg = uiMessages[uiMessages.length - 1];
+        const lastText = (lastMsg.parts ?? [])
+          .filter((p: { type: string }) => p.type === "text")
+          .map((p: { text: string }) => p.text)
+          .join("");
+        log.info("streaming tutor continuation", { previousResponseId });
+        return streamText({
+          ...config,
+          prompt: lastText,
+          providerOptions: {
+            openai: {
+              ...config.providerOptions.openai,
+              previousResponseId,
+              instructions: system,
+            },
+          },
+        });
+      })()
+    : await (async () => {
+        log.info("streaming new tutor session", { courseId: courseId ?? "none", topicName: topicName ?? "free-form" });
+        const messages = await convertToModelMessages(uiMessages);
+        return streamText({ ...config, system, messages });
+      })();
+
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      if (part.type === "finish-step" && "providerMetadata" in part) {
+        const rid = (part.providerMetadata?.openai as { responseId?: string } | undefined)?.responseId;
+        if (rid) return { responseId: rid };
+      }
+      return undefined;
+    },
+  });
 }

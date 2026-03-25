@@ -3,11 +3,11 @@
  *
  * Generated once per week on first dashboard visit, cached in LearningEvent.
  * Focuses on LEARNING CONTENT — topics, readings, key deadlines — not class times.
- * Uses gpt-4o-mini for cost efficiency.
+ * Uses gpt-5.4-nano with medium reasoning.
  */
 
 import { generateObject } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { modelConfig } from "@/lib/ai-models";
 import { z } from "zod";
 import crypto from "crypto";
 import { db } from "@/lib/db";
@@ -350,7 +350,7 @@ async function generateOverview(
   const dayOfWeek = format(now, "EEEE");
 
   const { object } = await generateObject({
-    model: openai("gpt-4o-mini"),
+    ...modelConfig("medium"),
     schema: weekOverviewSchema,
     system: `You write brief weekly learning overviews for a college student. Focus on CONTENT — what topics they're learning, what readings matter, what assignments to prioritize. Do NOT mention class times or schedules. Be specific — reference actual topic names, assignment names, and readings. Keep the summary to 2-3 sentences. Keep each course note to one concise sentence about what to focus on. Be encouraging but honest about heavy workloads.`,
     prompt: `Today is ${dayOfWeek}, ${format(now, "MMMM d")}.

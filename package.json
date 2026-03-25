@@ -12,7 +12,7 @@
     "check:timeline-fixtures": "node --experimental-strip-types scripts/check-topic-pipeline-fixtures.mjs"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.30",
+    "@ai-sdk/openai": "^3.0.48",
     "@ai-sdk/react": "^3.0.99",
     "@auth/prisma-adapter": "^2.11.1",
     "@prisma/client": "^6.19.2",
@@ -25,7 +25,7 @@
     "@schedule-x/resize": "3.7.3",
     "@schedule-x/scroll-controller": "3.7.3",
     "@schedule-x/theme-shadcn": "3.7.3",
-    "ai": "^6.0.97",
+    "ai": "^6.0.138",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -34,7 +34,6 @@
     "lucide-react": "^0.574.0",
     "next": "16.1.6",
     "next-auth": "^5.0.0-beta.30",
-    "openai": "^6.22.0",
     "pdfjs-dist": "^5.4.624",
     "prisma": "^6.19.2",
     "radix-ui": "^1.4.3",
@@ -42,7 +41,8 @@
     "react-dom": "19.2.3",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.1",
-    "temporal-polyfill": "^0.3.0"
+    "temporal-polyfill": "^0.3.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

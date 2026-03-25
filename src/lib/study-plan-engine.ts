@@ -12,7 +12,7 @@
 
 import { db } from "@/lib/db";
 import { generateObject } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { modelConfig } from "@/lib/ai-models";
 import { z } from "zod";
 import {
   addDays,
@@ -698,7 +698,7 @@ export async function enrichWithAI(
 
   try {
     const { object } = await generateObject({
-      model: openai("gpt-4o-mini"),
+      ...modelConfig("medium"),
       schema: approachSchema,
       system: `You generate brief study approach tips for scheduled study sessions.
 For each session, write:

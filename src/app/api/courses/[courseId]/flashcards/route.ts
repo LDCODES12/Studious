@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import OpenAI from "openai";
+import { generateObject } from "ai";
+import { modelConfig } from "@/lib/ai-models";
+import { z } from "zod";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const flashcardSchema = z.object({
+  cards: z.array(z.object({ front: z.string(), back: z.string() })),
+});
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -82,13 +86,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
   combinedText = combinedText.slice(0, 40000);
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a flashcard generator for university students. Create flashcards from the provided course material that test understanding of key concepts, definitions, formulas, and relationships.
+  let cards: { front: string; back: string }[];
+  try {
+    const { object } = await generateObject({
+      ...modelConfig("medium"),
+      schema: flashcardSchema,
+      system: `You are a flashcard generator for university students. Create flashcards from the provided course material that test understanding of key concepts, definitions, formulas, and relationships.
 
 Rules:
 - Generate 15-20 flashcards
@@ -97,30 +100,13 @@ Rules:
 - Mix difficulty: definitions, conceptual understanding, application
 - Include key formulas/equations where relevant (use plain text notation)
 - Avoid trivial facts like page numbers or dates
-- Make the front side specific enough to have ONE clear answer
-
-Return JSON with a "cards" array. Each item must have:
-- front: the question/prompt
-- back: the answer/explanation`,
-      },
-      {
-        role: "user",
-        content: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
-      },
-    ],
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    return NextResponse.json({ error: "Failed to generate flashcards" }, { status: 500 });
-  }
-
-  let cards: { front: string; back: string }[];
-  try {
-    const parsed = JSON.parse(content);
-    cards = parsed.cards ?? [];
+- Make the front side specific enough to have ONE clear answer`,
+      prompt: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
+      abortSignal: AbortSignal.timeout(45_000),
+    });
+    cards = object.cards;
   } catch {
-    return NextResponse.json({ error: "Failed to parse flashcards" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to generate flashcards" }, { status: 500 });
   }
 
   const deckTitle = title || `${course.name} — ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;

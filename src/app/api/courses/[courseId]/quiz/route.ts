@@ -2,9 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
-import OpenAI from "openai";
+import { generateObject } from "ai";
+import { modelConfig } from "@/lib/ai-models";
+import { z } from "zod";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const quizSchema = z.object({
+  questions: z.array(
+    z.object({
+      question: z.string(),
+      options: z.array(z.string()).length(4),
+      correctIndex: z.number().int().min(0).max(3),
+      explanation: z.string().nullable(),
+    })
+  ),
+});
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -88,13 +99,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
   combinedText = combinedText.slice(0, 60000);
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a quiz generator for university students. Based on the provided course material, generate exactly 8 multiple choice questions that test conceptual understanding.
+  let questions: { question: string; options: string[]; correctIndex: number; explanation: string | null }[];
+  try {
+    const { object } = await generateObject({
+      ...modelConfig("medium"),
+      schema: quizSchema,
+      system: `You are a quiz generator for university students. Based on the provided course material, generate exactly 8 multiple choice questions that test conceptual understanding.
 
 Rules:
 - Questions should test understanding, not just memorization
@@ -102,32 +112,13 @@ Rules:
 - Only one option is correct
 - Include a brief explanation of why the answer is correct
 - Vary difficulty (2 easy, 4 medium, 2 hard)
-- Do NOT ask about page numbers, dates, or administrative details
-
-Return JSON with a "questions" array. Each item must have:
-- question: the question text
-- options: array of exactly 4 strings
-- correctIndex: 0-3 (index of the correct option)
-- explanation: 1-2 sentence explanation of the correct answer`,
-      },
-      {
-        role: "user",
-        content: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
-      },
-    ],
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    return log.respond(NextResponse.json({ error: "Failed to generate quiz" }, { status: 500 }));
-  }
-
-  let questions: { question: string; options: string[]; correctIndex: number; explanation?: string }[];
-  try {
-    const parsed = JSON.parse(content);
-    questions = parsed.questions ?? [];
+- Do NOT ask about page numbers, dates, or administrative details`,
+      prompt: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
+      abortSignal: AbortSignal.timeout(45_000),
+    });
+    questions = object.questions;
   } catch {
-    return log.respond(NextResponse.json({ error: "Failed to parse quiz" }, { status: 500 }));
+    return log.respond(NextResponse.json({ error: "Failed to generate quiz" }, { status: 500 }));
   }
 
   const quizTitle = title || `${course.name} Quiz — ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;

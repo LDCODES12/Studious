@@ -8,10 +8,10 @@ const COLORS = ["blue", "green", "purple", "orange", "rose"];
 type TopicData = {
   weekNumber: number;
   weekLabel: string;
-  startDate?: string;
+  startDate: string | null;
   topics: string[];
   readings: string[];
-  notes?: string;
+  notes: string | null;
 };
 
 export async function POST(request: NextRequest) {

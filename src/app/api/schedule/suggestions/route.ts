@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import OpenAI from "openai";
+import { generateObject } from "ai";
+import { modelConfig } from "@/lib/ai-models";
+import { z } from "zod";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const suggestionsSchema = z.object({
+  suggestions: z.array(
+    z.object({
+      day: z.string(),
+      time: z.string(),
+      task: z.string(),
+      reason: z.string(),
+    })
+  ),
+});
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -13,15 +24,12 @@ export async function POST(request: NextRequest) {
   const { assignments, calendarEvents } = await request.json();
 
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a study planner. Given a student's upcoming deadlines and existing calendar events, suggest 3-5 focused study sessions for the next 2 weeks.
+    const { object } = await generateObject({
+      ...modelConfig("low"),
+      schema: suggestionsSchema,
+      system: `You are a study planner. Given a student's upcoming deadlines and existing calendar events, suggest 3-5 focused study sessions for the next 2 weeks.
 
-Return JSON with a "suggestions" array. Each suggestion must have:
+Each suggestion must have:
 - day: ISO date (YYYY-MM-DD)
 - time: suggested time range (e.g. "2:00–4:00 PM")
 - task: what to study/do (e.g. "Review lecture notes for Midterm 2", "Start Problem Set 3")
@@ -32,28 +40,20 @@ Rules:
 - Prioritize sessions 2-4 days before each deadline
 - Keep sessions realistic (1-3 hours each)
 - Today's date is ${new Date().toISOString().split("T")[0]}`,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            deadlines: (assignments as { title: string; dueDate: string; course?: { name: string } }[]).map(
-              (a) => ({
-                title: a.title,
-                dueDate: a.dueDate,
-                course: a.course?.name,
-              })
-            ),
-            existingEvents: calendarEvents,
-          }),
-        },
-      ],
+      prompt: JSON.stringify({
+        deadlines: (assignments as { title: string; dueDate: string; course?: { name: string } }[]).map(
+          (a) => ({
+            title: a.title,
+            dueDate: a.dueDate,
+            course: a.course?.name,
+          })
+        ),
+        existingEvents: calendarEvents,
+      }),
+      abortSignal: AbortSignal.timeout(25_000),
     });
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) return NextResponse.json({ suggestions: [] });
-
-    const parsed = JSON.parse(content);
-    return NextResponse.json({ suggestions: parsed.suggestions ?? [] });
+    return NextResponse.json({ suggestions: object.suggestions });
   } catch {
     return NextResponse.json({ suggestions: [] });
   }

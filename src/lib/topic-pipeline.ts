@@ -14,7 +14,9 @@
  *   5. VALIDATE   — algorithmic sanity checks
  */
 
-import OpenAI from "openai";
+import { generateObject } from "ai";
+import { modelConfig } from "./ai-models.ts";
+import { z } from "zod";
 import { addDays, addYears, differenceInCalendarDays, parseISO, startOfWeek, subDays } from "date-fns";
 import {
   parseSyllabusTopics,
@@ -25,10 +27,9 @@ import {
   bestWindow,
   detectSourceFormat,
   isContentfulTopic,
+  parsedTopicSchema,
   type ParsedTopic,
 } from "./parse-syllabus.ts";
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -257,16 +258,18 @@ async function classifyModules(
 ): Promise<Map<string, ModuleCategory>> {
   if (moduleNames.length === 0) return new Map();
 
+  const classificationSchema = z.object({
+    classifications: z.array(z.object({
+      name: z.string(),
+      category: z.enum(["content", "assessment", "administrative"]),
+    })),
+  });
+
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      temperature: 0,
-      seed: 1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You classify Canvas LMS module names into exactly one of three categories:
+    const { object } = await generateObject({
+      ...modelConfig("low"),
+      schema: classificationSchema,
+      system: `You classify Canvas LMS module names into exactly one of three categories:
 
 - "content": Modules that represent academic course content students learn (e.g. "Unit 1: Chemical Equilibria", "Week 3: The French Revolution", "Module 4 - Thermodynamics", "Intro to Linear Algebra").
 - "assessment": Modules that are primarily containers for graded items (e.g. "Quiz", "Midterm", "Exam 2", "Final Project", "Homework Submissions").
@@ -276,22 +279,14 @@ Rules:
 - A module named like "Unit 1" or "Module 1" with NO descriptive subtitle is still "content" — it is a content container even without a topic name.
 - Modules that combine content with assessment (e.g. "Week 5: Exam Review") are "content".
 - When in doubt between content and administrative, prefer "content".
-- Classify EVERY module in the input list.
+- Classify EVERY module in the input list.`,
+      prompt: JSON.stringify(moduleNames),
+      abortSignal: AbortSignal.timeout(20_000),
+    });
 
-Return JSON: { "classifications": [{ "name": "<exact module name>", "category": "content" | "assessment" | "administrative" }] }`,
-        },
-        { role: "user", content: JSON.stringify(moduleNames) },
-      ],
-    }, { timeout: 15_000 });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) return new Map();
-    const parsed = JSON.parse(content);
     const map = new Map<string, ModuleCategory>();
-    for (const item of (parsed.classifications ?? []) as { name: string; category: string }[]) {
-      if (item.category === "content" || item.category === "assessment" || item.category === "administrative") {
-        map.set(item.name, item.category);
-      }
+    for (const item of object.classifications) {
+      map.set(item.name, item.category);
     }
     return map;
   } catch (err) {
@@ -725,27 +720,27 @@ function inferIsoDateFromText(
   return [...candidates].sort()[0];
 }
 
-function normalizeNotesValue(notes: unknown): string | undefined {
+function normalizeNotesValue(notes: unknown): string | null {
   if (typeof notes === "string") {
-    return notes.trim() ? notes : undefined;
+    return notes.trim() ? notes : null;
   }
   if (Array.isArray(notes)) {
     const flattened = notes
       .flatMap((item) => typeof item === "string" ? [item.trim()] : [])
       .filter(Boolean);
-    return flattened.length > 0 ? flattened.join("; ") : undefined;
+    return flattened.length > 0 ? flattened.join("; ") : null;
   }
-  return undefined;
+  return null;
 }
 
-function stripBreakSegments(notes?: unknown): string | undefined {
+function stripBreakSegments(notes?: unknown): string | null {
   const normalized = normalizeNotesValue(notes);
-  if (!normalized) return undefined;
+  if (!normalized) return null;
   const cleaned = normalized
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && !BREAK_SEGMENT_RX.test(segment));
-  return cleaned.length > 0 ? cleaned.join("; ") : undefined;
+  return cleaned.length > 0 ? cleaned.join("; ") : null;
 }
 
 function cleanBreakLabel(label: string): string {
@@ -755,31 +750,31 @@ function cleanBreakLabel(label: string): string {
     .trim();
 }
 
-function summarizeBreakSegments(notes?: unknown): string | undefined {
+function summarizeBreakSegments(notes?: unknown): string | null {
   const normalized = normalizeNotesValue(notes);
-  if (!normalized) return undefined;
+  if (!normalized) return null;
   const segments = normalized
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
-  return segments.length > 0 ? segments.join("; ") : undefined;
+  return segments.length > 0 ? segments.join("; ") : null;
 }
 
 function inferBreakStartDate(
   topic: ParsedTopic,
   termStartDate: string | null,
   termEndDate: string | null,
-): string | undefined {
-  if (!topic.startDate) return undefined;
+): string | null {
+  if (!topic.startDate) return null;
   const currentStart = parseISO(`${topic.startDate}T12:00:00Z`);
-  if (Number.isNaN(currentStart.getTime())) return undefined;
+  if (Number.isNaN(currentStart.getTime())) return null;
 
   const notes = normalizeNotesValue(topic.notes) ?? "";
   const segments = `${topic.weekLabel ?? ""}; ${notes}`
     .split(/[;\n]+/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
-  if (segments.length === 0) return undefined;
+  if (segments.length === 0) return null;
 
   const prioritized = [
     ...segments.filter((segment) => /\bspring break\b/i.test(segment)),
@@ -800,14 +795,14 @@ function inferBreakStartDate(
   }
 
   if (sawExplicitBreakDate) {
-    return undefined;
+    return null;
   }
 
   if (prioritized.some((segment) => FULL_BREAK_RX.test(segment))) {
     return addDays(currentStart, 7).toISOString().slice(0, 10);
   }
 
-  return undefined;
+  return null;
 }
 
 function inferBreakLabel(topic: ParsedTopic): string {
@@ -1523,7 +1518,7 @@ function groupLecturesIntoWeeks(
       startDate: week.startDate,
       topics: allTopics,
       readings: [...new Set(allReadings)], // dedupe
-      notes: allNotes.length > 0 ? allNotes.join("; ") : undefined,
+      notes: allNotes.length > 0 ? allNotes.join("; ") : null,
       courseName: firstTopic.courseName,
     });
   }
@@ -1583,17 +1578,14 @@ async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
     return input.groupedTopics;
   }
 
+  const enrichSchema = z.object({ weeks: z.array(parsedTopicSchema) });
+
   const t0 = Date.now();
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      temperature: 0,
-      seed: 1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You enrich a course timeline with additional data from Canvas modules.
+    const { object } = await generateObject({
+      ...modelConfig("medium"),
+      schema: enrichSchema,
+      system: `You enrich a course timeline with additional data from Canvas modules.
 
 You will receive:
 1. GROUPED TIMELINE: Pre-grouped weekly topics with dates and per-lecture detail already assigned. This is the PRIMARY source — do not rearrange, regroup, or remove any entries.
@@ -1606,33 +1598,23 @@ YOUR JOB — ENRICH, never delete:
 - KEEP all existing readings exactly as they are — do not add, remove, or rename them
 - KEEP all existing dates, weekNumbers, and weekLabels unchanged
 
-OUTPUT: valid JSON only, in the form { "weeks": [...] }
-Same structure as input: { weekNumber, weekLabel, startDate, topics, readings, notes, courseName }
-
 If you cannot match a module to any week, skip it — do not force it.`,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            groupedTimeline: input.groupedTopics.map((t) => ({
-              weekNumber: t.weekNumber,
-              weekLabel: t.weekLabel,
-              startDate: t.startDate,
-              topics: t.topics,
-              readings: t.readings,
-              notes: t.notes,
-              courseName: t.courseName,
-            })),
-            canvasModules: input.contentModules,
-          }),
-        },
-      ],
-    }, { timeout: 45_000 });
+      prompt: JSON.stringify({
+        groupedTimeline: input.groupedTopics.map((t) => ({
+          weekNumber: t.weekNumber,
+          weekLabel: t.weekLabel,
+          startDate: t.startDate,
+          topics: t.topics,
+          readings: t.readings,
+          notes: t.notes,
+          courseName: t.courseName,
+        })),
+        canvasModules: input.contentModules,
+      }),
+      abortSignal: AbortSignal.timeout(60_000),
+    });
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) return input.groupedTopics;
-    const parsed = JSON.parse(content);
-    const enriched = Array.isArray(parsed.weeks) ? parsed.weeks as ParsedTopic[] : [];
+    const enriched = object.weeks as ParsedTopic[];
 
     // Safety: enriched must have roughly same number of weeks
     if (enriched.length >= input.groupedTopics.length * 0.8 && enriched.length <= input.groupedTopics.length * 1.2) {
@@ -1694,7 +1676,7 @@ function validateTimeline(
       warnings.push(
         `Non-chronological: week ${dated[i].weekNumber} (${dated[i].startDate}) before week ${dated[i - 1].weekNumber} (${dated[i - 1].startDate})`,
       );
-      dated[i].startDate = undefined;
+      dated[i].startDate = null;
     }
   }
 
@@ -1824,7 +1806,7 @@ function organizeModulesAsTimeline(
     );
 
     // Find date from lecture calendar
-    let startDate: string | undefined;
+    let startDate: string | null = null;
     if (p.lecStart !== null) {
       const calWeek = lectureToWeek.get(p.lecStart);
       if (calWeek) startDate = calWeek.startDate;
@@ -1834,7 +1816,7 @@ function organizeModulesAsTimeline(
         [p.cleanLabel, ...p.module.topics, ...p.module.readings].join(" | "),
         termStartDate,
         termEndDate,
-      );
+      ) ?? null;
     }
 
     timeline.push({
@@ -1847,6 +1829,7 @@ function organizeModulesAsTimeline(
           ? [`Lectures ${p.lecStart}–${p.lecEnd}`]
           : [],
       readings: usefulReadings,
+      notes: null,
       courseName,
     });
   }
@@ -1870,9 +1853,9 @@ function mergeTopicLists(a: string[] | undefined, b: string[] | undefined): stri
   return [...new Set([...(a ?? []), ...(b ?? [])])];
 }
 
-function mergeNotes(a?: string | null, b?: string | null): string | undefined {
+function mergeNotes(a?: string | null, b?: string | null): string | null {
   const notes = [...new Set([a, b].filter((note): note is string => Boolean(note && note.trim())))];
-  return notes.length > 0 ? notes.join("; ") : undefined;
+  return notes.length > 0 ? notes.join("; ") : null;
 }
 
 function collapseSameStartDateTopics(topics: ParsedTopic[], courseName: string): ParsedTopic[] {

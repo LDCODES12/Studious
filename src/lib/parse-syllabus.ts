@@ -1,25 +1,65 @@
-import OpenAI from "openai";
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 1 });
+import { generateObject } from "ai";
+import { modelConfig } from "./ai-models.ts";
+import { z } from "zod";
 
 export interface ParsedEvent {
   title: string;
   type: "assignment" | "exam" | "quiz" | "project" | "reading" | "lab" | "other";
   dueDate: string;
   courseName: string;
-  description?: string;
+  description: string | null;
 }
 
+// ─── Shared Zod Schemas ──────────────────────────────────────────────────────
+
+const parsedEventSchema = z.object({
+  events: z.array(z.object({
+    title: z.string(),
+    type: z.enum(["assignment", "exam", "quiz", "project", "reading", "lab", "other"]),
+    dueDate: z.string(),
+    courseName: z.string(),
+    description: z.string().nullable(),
+  })),
+});
+
+const dropRulesSchema = z.object({
+  rules: z.array(z.object({
+    groupName: z.string(),
+    dropLowest: z.number(),
+    dropHighest: z.number(),
+  })),
+});
+
+/** Shared schema for ParsedTopic — also used by topic-pipeline.ts */
+export const parsedTopicSchema = z.object({
+  weekNumber: z.number(),
+  weekLabel: z.string(),
+  startDate: z.string().nullable(),
+  topics: z.array(z.string()),
+  readings: z.array(z.string()),
+  notes: z.string().nullable(),
+  courseName: z.string(),
+});
+
+const classScheduleSchema = z.object({
+  meetings: z.array(z.object({
+    label: z.string(),
+    days: z.array(z.string()),
+    startTime: z.string(),
+    endTime: z.string(),
+    location: z.string(),
+  })),
+  semesterStart: z.string().nullable(),
+  semesterEnd: z.string().nullable(),
+  finalExamDate: z.string().nullable(),
+});
+
 export async function parseSyllabusText(text: string): Promise<ParsedEvent[]> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini-2024-07-18",
-    temperature: 0,
-    seed: 1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a syllabus parser. Extract every graded assessment (quizzes, exams, assignments, projects, labs) that has an explicitly written date in the syllabus. Include all of them — do not miss any.
+  try {
+    const { object } = await generateObject({
+      ...modelConfig("low"),
+      schema: parsedEventSchema,
+      system: `You are a syllabus parser. Extract every graded assessment (quizzes, exams, assignments, projects, labs) that has an explicitly written date in the syllabus. Include all of them — do not miss any.
 
 WHAT TO INCLUDE:
 - Every quiz date explicitly listed (check all tables, schedules, and regrade sections — they often contain quiz dates in a "Quiz Date" column)
@@ -37,27 +77,16 @@ RULES:
 - Only use dates explicitly written in the syllabus text. Never estimate or extrapolate.
 - Each quiz/exam should appear exactly once with its own date.
 - If multiple quizzes are listed in a table, create one entry per quiz.
-- Use the year from the syllabus header (e.g. Spring 2026 → year is 2026).
+- Use the year from the syllabus header (e.g. Spring 2026 → year is 2026).`,
+      prompt: text,
+      abortSignal: AbortSignal.timeout(45_000),
+      maxRetries: 1,
+    });
 
-Return a JSON object with an "events" array. Each event must have:
-- title: name of the assessment (e.g. "Quiz 1", "Midterm Exam 2", "Final Exam")
-- type: one of "assignment", "exam", "quiz", "project", "lab", "other"
-- dueDate: ISO date string (YYYY-MM-DD)
-- courseName: course name/number from the syllabus header
-- description: optional brief note (e.g. "6:30–8:00 pm, in person")`,
-      },
-      {
-        role: "user",
-        content: text,
-      },
-    ],
-  }, { timeout: 45_000 });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) return [];
-
-  const parsed = JSON.parse(content);
-  return parsed.events ?? [];
+    return object.events;
+  } catch {
+    return [];
+  }
 }
 
 // ─── Drop Rule Extraction ─────────────────────────────────────────────────────
@@ -75,15 +104,10 @@ export interface ExtractedDropRule {
 export async function extractDropRules(text: string): Promise<ExtractedDropRule[]> {
   const truncated = text.slice(0, 8000);
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      temperature: 0,
-      seed: 1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a grading policy parser. Find every statement in this syllabus that says a certain number of lowest or highest scores will be dropped for a category of assignments.
+    const { object } = await generateObject({
+      ...modelConfig("low"),
+      schema: dropRulesSchema,
+      system: `You are a grading policy parser. Find every statement in this syllabus that says a certain number of lowest or highest scores will be dropped for a category of assignments.
 
 Examples to detect:
 - "The lowest quiz score will be dropped" → groupName: "Quiz", dropLowest: 1
@@ -96,19 +120,14 @@ Rules:
 - Only extract explicitly stated drop rules, never infer them
 - groupName should be the category name as stated in the syllabus (e.g. "Quiz", "Homework", "Lab")
 - If no drop rules are found, return an empty array
-- Do not include regrade policies or late work policies
+- Do not include regrade policies or late work policies`,
+      prompt: truncated,
+      abortSignal: AbortSignal.timeout(20_000),
+      maxRetries: 1,
+    });
 
-Return JSON: { "rules": [{ "groupName": string, "dropLowest": number, "dropHighest": number }] }`,
-        },
-        { role: "user", content: truncated },
-      ],
-    }, { timeout: 20_000 });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) return [];
-    const parsed = JSON.parse(content);
-    return (parsed.rules ?? []).filter(
-      (r: ExtractedDropRule) => r.dropLowest > 0 || r.dropHighest > 0
+    return object.rules.filter(
+      (r) => r.dropLowest > 0 || r.dropHighest > 0
     );
   } catch {
     return [];
@@ -118,10 +137,10 @@ Return JSON: { "rules": [{ "groupName": string, "dropLowest": number, "dropHighe
 export interface ParsedTopic {
   weekNumber: number;
   weekLabel: string;
-  startDate?: string;
+  startDate: string | null;
   topics: string[];
   readings: string[];
-  notes?: string;
+  notes: string | null;
   courseName: string;
 }
 
@@ -210,7 +229,7 @@ export function needsAudit(weeks: ParsedTopic[]): boolean {
 }
 
 /**
- * Sends the extracted weeks + source snippet to GPT-4o-mini for a quality
+ * Sends the extracted weeks + source snippet to gpt-5.4-nano for a quality
  * review. The model corrects week labels, removes hallucinated or policy
  * topics, fixes date ordering, and drops empty weeks.
  *
@@ -220,15 +239,13 @@ export async function auditSchedule(
   weeks: ParsedTopic[],
   sourceText: string
 ): Promise<ParsedTopic[]> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini-2024-07-18",
-    temperature: 0,
-    seed: 1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a schedule quality auditor. You will receive:
+  const auditSchema = z.object({ weeks: z.array(parsedTopicSchema) });
+
+  try {
+    const { object } = await generateObject({
+      ...modelConfig("medium"),
+      schema: auditSchema,
+      system: `You are a schedule quality auditor. You will receive:
 1. EXTRACTED SCHEDULE — a JSON array of schedule entries (possibly with errors). Entries may represent weeks OR individual lectures — preserve whichever granularity was extracted.
 2. ORIGINAL SOURCE — the text window used for extraction (up to 12k chars)
 
@@ -239,29 +256,19 @@ Your job is to fix the extracted schedule:
 - Ensure weekNumbers are sequential with no gaps — renumber if needed.
 - Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
 - Do NOT invent topics that aren't in the source. Only fix, never fabricate.
-- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks — that is handled by a downstream stage.
+- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks — that is handled by a downstream stage.`,
+      prompt: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE:\n${sourceText.slice(0, 12000)}`,
+      abortSignal: AbortSignal.timeout(60_000),
+      maxRetries: 1,
+    });
 
-Return JSON: { "weeks": [...] } using the exact same field structure. Return only the corrected array — no explanations, no extra fields.`,
-      },
-      {
-        role: "user",
-        content: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE:\n${sourceText.slice(0, 12000)}`,
-      },
-    ],
-  }, { timeout: 45_000 });
-
-  const raw = response.choices[0]?.message?.content;
-  if (!raw) return weeks;
-
-  try {
-    const parsed = JSON.parse(raw);
-    const audited: ParsedTopic[] = parsed.weeks ?? [];
+    const audited = object.weeks as ParsedTopic[];
     // Accept only if the audit produced at least half as many weeks (avoid catastrophic drops)
-    if (Array.isArray(audited) && audited.length >= Math.max(1, weeks.length / 2)) {
+    if (audited.length >= Math.max(1, weeks.length / 2)) {
       return audited;
     }
   } catch {
-    // JSON parse failed — return unmodified
+    // generation failed — return unmodified
   }
   return weeks;
 }
@@ -511,15 +518,10 @@ export async function extractClassSchedule(
   const tail = text.slice(-3000);
   const truncated = header + (text.length > 6000 ? "\n\n--- END OF SYLLABUS ---\n\n" + tail : "");
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      temperature: 0,
-      seed: 1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You extract class meeting schedule from a course syllabus.
+    const { object } = await generateObject({
+      ...modelConfig("low"),
+      schema: classScheduleSchema,
+      system: `You extract class meeting schedule from a course syllabus.
 
 Look for statements like:
 - "Lectures: MWF 10:00–10:50 AM, Chemistry 201"
@@ -542,21 +544,16 @@ Also extract:
 
 Rules:
 - Only extract meeting patterns explicitly stated. Never guess.
-- If no clear meeting schedule exists, return { "meetings": [], "semesterStart": null, "semesterEnd": null, "finalExamDate": null }
+- If no clear meeting schedule exists, return empty meetings array with null dates
 - Exam/midterm dates are NOT recurring meetings, but DO extract the final exam date in the finalExamDate field
-- Convert all times to 24-hour format
+- Convert all times to 24-hour format`,
+      prompt: truncated,
+      abortSignal: AbortSignal.timeout(25_000),
+      maxRetries: 1,
+    });
 
-Return JSON: { "meetings": [...], "semesterStart": "YYYY-MM-DD" | null, "semesterEnd": "YYYY-MM-DD" | null, "finalExamDate": "YYYY-MM-DD" | null }`,
-        },
-        { role: "user", content: truncated },
-      ],
-    }, { timeout: 20_000 });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) return null;
-    const parsed = JSON.parse(content) as ExtractedClassSchedule;
-    if (!parsed.meetings || parsed.meetings.length === 0) return null;
-    return parsed;
+    if (!object.meetings || object.meetings.length === 0) return null;
+    return object as ExtractedClassSchedule;
   } catch {
     return null;
   }
@@ -675,18 +672,13 @@ export function extractScheduleFromCalendarEvents(
  */
 export async function parseSyllabusTopics(text: string, hint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
+  const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
 
-  const model = "gpt-4.1-mini-2025-04-14";
-
-  const response = await openai.chat.completions.create({
-    model,
-    temperature: 0,
-    seed: 1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
+  try {
+    const { object } = await generateObject({
+      ...modelConfig("high"),
+      schema: topicsSchema,
+      system: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
 
 CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY written in the text as a schedule. If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITHOUT a clear topic schedule, return {"weeks": []}. Never invent or infer topics from the course name.
 
@@ -739,7 +731,7 @@ WHAT NOT TO EXTRACT:
 - Grading policies, office hours, late policy, attendance rules
 - Administrative dates (registration deadlines, drop dates)
 
-OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include EVERY week — do not truncate. Each week must have:
+Each week must have:
 - weekNumber: integer starting at 1
 - weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class"). For date-only sessions use descriptive labels like "Seminar Session 1".
 - startDate: ISO date YYYY-MM-DD if determinable, otherwise omit
@@ -748,17 +740,13 @@ OUTPUT: Return JSON with a "weeks" array. If you find a real schedule, include E
 - notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
 - courseName: exact course name/code from the syllabus header
 
-If you cannot find an explicit schedule, return {"weeks": []}.`,
-      },
-      { role: "user", content: userContent },
-    ],
-  }, { timeout: 90_000 });
+If you cannot find an explicit schedule, return empty weeks array.`,
+      prompt: userContent,
+      abortSignal: AbortSignal.timeout(120_000),
+      maxRetries: 1,
+    });
 
-  const content = response.choices[0]?.message?.content;
-  if (!content) return [];
-  try {
-    const parsed = JSON.parse(content);
-    return Array.isArray(parsed.weeks) ? parsed.weeks : [];
+    return object.weeks as ParsedTopic[];
   } catch {
     return [];
   }

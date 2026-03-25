@@ -24,6 +24,11 @@ export function AIChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: courseId ? { courseId } : {},
+      prepareSendMessagesRequest: ({ messages: msgs, body }) => {
+        const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+        const rid = (lastAssistant?.metadata as { responseId?: string } | undefined)?.responseId;
+        return { body: { ...body, ...(rid ? { previousResponseId: rid } : {}) } };
+      },
     }),
   });
 
