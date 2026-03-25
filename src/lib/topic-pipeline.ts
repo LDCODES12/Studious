@@ -122,6 +122,7 @@ export interface PipelineDebug {
   stage2Classifications: { name: string; category: string }[];
   stage3Sources: number;
   stage3Weeks: number;
+  moduleContextChars: number;
   lectureCalendarDates: number;
   stage4OutputWeeks: number;
   stage5Warnings: string[];
@@ -413,9 +414,49 @@ interface ExtractionResult {
   usedWindow: string;
 }
 
+/**
+ * Serialize content modules into a compact text block that can be appended to
+ * syllabus text before AI extraction.  This gives the model both sources of
+ * truth — the syllabus schedule AND the Canvas module structure — so it can
+ * cross-reference topics, fill gaps, and produce richer results.
+ *
+ * Budget: ~5 000 chars to avoid crowding out the syllabus window.
+ */
+function serializeModulesForExtraction(
+  modules: CanvasModuleInfo[],
+  budget = 5000,
+): string {
+  if (modules.length === 0) return "";
+
+  const lines: string[] = [
+    "",
+    "--- CANVAS MODULE STRUCTURE (supplementary context — use to correlate topics and fill gaps) ---",
+  ];
+
+  for (const m of modules) {
+    const header = m.weekLabel;
+    const topicList = (m.topics ?? []).filter(Boolean);
+    const readingList = (m.readings ?? []).filter(Boolean);
+
+    let entry = header;
+    if (topicList.length > 0) entry += `\n  Topics: ${topicList.join(", ")}`;
+    if (readingList.length > 0) entry += `\n  Readings: ${readingList.join(", ")}`;
+
+    // Check budget before adding
+    const candidate = lines.join("\n") + "\n" + entry + "\n---";
+    if (candidate.length > budget) break;
+
+    lines.push(entry);
+  }
+
+  lines.push("---");
+  return lines.join("\n");
+}
+
 async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
+  moduleContext?: string,
 ): Promise<ExtractionResult> {
   const FULL_TEXT_THRESHOLD = 40_000;
   const LARGE_WINDOW_SIZE = 30_000;
@@ -430,9 +471,12 @@ async function extractTopicsExpanded(
       ? src.text
       : bestWindow(src.text, LARGE_WINDOW_SIZE);
 
+    // Append module context so the AI sees both syllabus and Canvas structure
+    const winWithModules = moduleContext ? win + moduleContext : win;
+
     const fmt = detectSourceFormat(src.text);
     const hint = `${src.label}, format: ${fmt}`;
-    const raw = await parseSyllabusTopics(win, hint);
+    const raw = await parseSyllabusTopics(winWithModules, hint);
     const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
     const richWeeks = result.filter(
@@ -1570,7 +1614,7 @@ function groupLecturesIntoWeeks(
 // ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
 
 interface EnrichInput {
-  contentModules: { weekLabel: string; topics: string[] }[];
+  contentModules: { weekLabel: string; topics: string[]; readings: string[] }[];
   groupedTopics: ParsedTopic[];
   courseName: string;
 }
@@ -2058,6 +2102,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     stage2Classifications: [],
     stage3Sources: input.candidates.length,
     stage3Weeks: 0,
+    moduleContextChars: 0,
     lectureCalendarDates: 0,
     stage4OutputWeeks: 0,
     stage5Warnings: [],
@@ -2096,9 +2141,19 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   }));
 
   // ── STAGE 3: EXTRACT with source authority split ──
+  // Serialize module structure once so the AI sees both syllabus + Canvas modules
+  const moduleContext = serializeModulesForExtraction(contentModules);
+  debug.moduleContextChars = moduleContext.length;
+
+  if (moduleContext.length > 0) {
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 3 injecting ${moduleContext.length} chars of module context (${contentModules.length} modules)`,
+    );
+  }
+
   const [timelineExtraction, contentExtraction] = await Promise.all([
-    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName),
-    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName),
+    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, moduleContext),
+    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, moduleContext),
   ]);
 
   debug.timelineSource = timelineExtraction.usedLabel;
@@ -2223,6 +2278,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       contentModules: contentModules.map((m) => ({
         weekLabel: m.weekLabel,
         topics: m.topics,
+        readings: m.readings,
       })),
       groupedTopics: aiTopics,
       courseName: input.courseName,
