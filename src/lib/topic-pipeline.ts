@@ -1594,11 +1594,14 @@ async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
 
 You will receive:
 1. GROUPED TIMELINE: Pre-grouped weekly topics with dates and per-lecture detail already assigned. This is the PRIMARY source — do not rearrange, regroup, or remove any entries.
-2. CANVAS MODULES: Module names and their content items (slides, handouts, worksheets, etc.)
+2. CANVAS MODULES: Module names and their content items (slides, handouts, worksheets, papers, etc.)
 
 YOUR JOB — ENRICH, never delete:
 - Match each Canvas module to the corresponding week(s) in the timeline by topic/unit overlap
+- When topic overlap is weak (e.g. seminar courses), match by sequential numbering: "Class 1 Paper" → week 1, "Class 2 Paper(s)" → week 2, etc.
+- Module items that are file names (e.g. "prinz_marder_2004.pdf", "Iaccarino et al.pdf") are readings — add them to the readings array and extract a readable title (e.g. "Prinz & Marder (2004)", "Iaccarino et al.")
 - If a module mentions content not in any week's topics, ADD it as a new topic entry
+- For weeks with empty topics that get matched to a module, derive a meaningful topic from the module content (e.g. "Paper discussion: Prinz & Marder (2004)")
 - KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
 - KEEP all existing readings exactly as they are — do not add, remove, or rename them
 - KEEP all existing dates, weekNumbers, and weekLabels unchanged
@@ -2142,8 +2145,13 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     );
   }
 
+  // Use module scaffold ONLY when:
+  // - AI extraction has no dated entries (no timeline authority), AND
+  // - There's no lecture calendar to assign dates to per-lecture AI topics, AND
+  // - We have enough content modules to form a meaningful scaffold
   const shouldUseModuleScaffold =
     !hasTimelineAuthority &&
+    lectureCalendar.length === 0 &&
     contentModules.length >= Math.max(4, Math.min(8, aiTopics.length || 4));
   let usedModuleScaffold = false;
 
