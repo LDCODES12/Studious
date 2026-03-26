@@ -239,6 +239,11 @@ export async function POST(request: NextRequest) {
       const normalizedDue = canonicalDueValue(dueAt ?? dueDate);
       const normalizedReleased = canonicalDateTime(releasedAt);
       const normalizedLateDue = canonicalDateTime(lateDueAt);
+
+      // Debug: log raw date fields for report assignments to diagnose late-due-date issue
+      if (title.includes("Report") || title.includes("report")) {
+        console.log(`[gs-debug] ${title} | dueAt=${dueAt} | dueDate=${dueDate} | lateDueAt=${lateDueAt} | normalized=${normalizedDue} | _debug=${JSON.stringify((gsAssignment as unknown as Record<string, unknown>)._debug ?? null)}`);
+      }
       const fingerprint = gradescopeFingerprint?.trim() || makeFingerprint(title, normalizedDue);
       const syntheticGsId = `fp:${fingerprint}`;
       const dbStatus = mapDbStatus(status);

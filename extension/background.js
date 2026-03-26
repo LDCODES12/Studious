@@ -810,6 +810,13 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               const { status, score, maxScore } = deriveStatusAndScores(container);
               if (debug.statusCounts[status] !== undefined) debug.statusCounts[status]++;
 
+              // Debug: capture raw time tags for diagnosing date issues
+              const _timeTags = Array.from(container.querySelectorAll("time[datetime]")).map(t => ({
+                dt: t.getAttribute("datetime"),
+                aria: t.getAttribute("aria-label") || "",
+                text: (t.parentElement?.textContent || "").slice(0, 80),
+              }));
+
               pushResult({
                 title,
                 score,
@@ -821,6 +828,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 dueAt: dueAt || null,
                 releasedAt: releasedAt || null,
                 lateDueAt: lateDueAt || null,
+                _debug: _timeTags.length > 0 ? { timeTags: _timeTags } : undefined,
               });
               debug.parsed++;
             }
