@@ -578,8 +578,21 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               for (const tag of timeTags) {
                 const parsed = canonicalDateTime(tag.getAttribute("datetime"));
                 if (!parsed) continue;
+                // Check the text NEAR this specific tag — walk preceding siblings
+                // to find the closest label, so "Late Due Date:" only matches its own tag.
+                let precedingText = "";
+                let node = tag.previousSibling;
+                while (node) {
+                  const t = (node.textContent || "").trim();
+                  if (t) { precedingText = t; break; }
+                  node = node.previousSibling;
+                }
+                // Also check parent if parent is a wrapper element (not the cell itself)
+                const parentLabel = tag.parentElement !== cell
+                  ? (tag.parentElement?.textContent || "")
+                  : "";
                 const label = (
-                  `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${tag.parentElement?.textContent || ""}`
+                  `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${precedingText} ${parentLabel}`
                 ).toLowerCase();
                 if (label.includes("release")) continue;
                 if (label.includes("late due") || label.includes("hard due")) {
