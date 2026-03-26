@@ -473,8 +473,23 @@ async function extractTopicsExpanded(
 
     const fmt = detectSourceFormat(src.text);
     const hint = `${src.label}, format: ${fmt}`;
-    const raw = await parseSyllabusTopics(win, hint, moduleContext || undefined);
-    const result = sanitizeSchedule(raw).filter(isContentfulTopic);
+    // First pass: clean extraction from syllabus only
+    const raw = await parseSyllabusTopics(win, hint);
+    let result = sanitizeSchedule(raw).filter(isContentfulTopic);
+
+    // Second pass: if weak results AND we have module context, retry with modules
+    const richWeeksFirst = result.filter(
+      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+    ).length;
+    const isWeakResult = result.length === 0 || (result.length >= 4 && richWeeksFirst / result.length < 0.4);
+    if (isWeakResult && moduleContext) {
+      console.log(`[pipeline] ${courseName} extract[${ci}] weak result (${result.length} weeks, ${richWeeksFirst} rich) — retrying with module context`);
+      const rawRetry = await parseSyllabusTopics(win, hint, moduleContext);
+      const retryResult = sanitizeSchedule(rawRetry).filter(isContentfulTopic);
+      if (retryResult.length > result.length) {
+        result = retryResult;
+      }
+    }
 
     const richWeeks = result.filter(
       (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
