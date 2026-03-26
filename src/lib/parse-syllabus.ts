@@ -1,5 +1,5 @@
 import { generateObject } from "ai";
-import { modelConfig } from "./ai-models.ts";
+import { modelConfig, type ReasoningTier } from "./ai-models.ts";
 import { z } from "zod";
 
 export interface ParsedEvent {
@@ -670,7 +670,7 @@ export function extractScheduleFromCalendarEvents(
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".
  *               Passed as a one-line prefix so the AI knows what format to expect.
  */
-export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string): Promise<ParsedTopic[]> {
+export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string, reasoningTier?: ReasoningTier): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
   const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
 
@@ -681,7 +681,7 @@ export async function parseSyllabusTopics(text: string, hint?: string, moduleCon
 
   try {
     const { object } = await generateObject({
-      ...modelConfig("high"),
+      ...modelConfig(reasoningTier ?? "high"),
       schema: topicsSchema,
       system: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
 

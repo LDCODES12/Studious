@@ -483,8 +483,8 @@ async function extractTopicsExpanded(
     ).length;
     const isWeakResult = result.length === 0 || (result.length >= 4 && richWeeksFirst / result.length < 0.4);
     if (isWeakResult && moduleContext) {
-      console.log(`[pipeline] ${courseName} extract[${ci}] weak result (${result.length} weeks, ${richWeeksFirst} rich) — retrying with module context`);
-      const rawRetry = await parseSyllabusTopics(win, hint, moduleContext);
+      console.log(`[pipeline] ${courseName} extract[${ci}] weak result (${result.length} weeks, ${richWeeksFirst} rich) — retrying with module context (gpt-5.4-mini)`);
+      const rawRetry = await parseSyllabusTopics(win, hint, moduleContext, "max");
       const retryResult = sanitizeSchedule(rawRetry).filter(isContentfulTopic);
       if (retryResult.length > result.length) {
         result = retryResult;
