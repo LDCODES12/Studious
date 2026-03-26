@@ -424,7 +424,7 @@ interface ExtractionResult {
  */
 function serializeModulesForExtraction(
   modules: CanvasModuleInfo[],
-  budget = 5000,
+  budget = 10000,
 ): string {
   if (modules.length === 0) return "";
 
@@ -1646,7 +1646,7 @@ YOUR JOB — ENRICH, never delete:
 - If a module mentions content not in any week's topics, ADD it as a new topic entry
 - For weeks with empty topics that get matched to a module, derive a meaningful topic from the module content (e.g. "Paper discussion: Prinz & Marder (2004)")
 - KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
-- KEEP all existing readings exactly as they are — do not add, remove, or rename them
+- KEEP all existing readings exactly as they are — do not remove or rename them. You MAY add new readings from module data.
 - KEEP all existing dates, weekNumbers, and weekLabels unchanged
 
 If you cannot match a module to any week, skip it — do not force it.`,

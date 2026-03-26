@@ -685,7 +685,7 @@ export async function parseSyllabusTopics(text: string, hint?: string, moduleCon
       schema: topicsSchema,
       system: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
 
-CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY written in the text as a schedule. If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITHOUT a clear topic schedule, return {"weeks": []}. Never invent or infer topics from the course name.
+CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY present in the provided text (syllabus and/or Canvas module data). If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITH NO topic schedule AND NO Canvas module data, return {"weeks": []}. Never invent or infer topics from the course name alone.
 
 A real schedule looks like:
 - "Week 1 (Jan 13): Introduction to Calculus, Limits"
@@ -736,12 +736,12 @@ WHAT NOT TO EXTRACT:
 - Grading policies, office hours, late policy, attendance rules
 - Administrative dates (registration deadlines, drop dates)
 
-CANVAS MODULE CONTEXT: The input may include a section marked "CANVAS MODULE STRUCTURE" after the syllabus text. This is supplementary data from the course's Canvas LMS — it shows how the instructor organized content into modules. Use it as follows:
-- The SYLLABUS SCHEDULE is always the primary source for week structure, dates, and topic ordering
-- Use module data to ENRICH your extraction: fill in topic names for weeks where the syllabus only has dates, add readings listed in modules but missing from the syllabus
-- If the syllabus has no schedule at all but modules exist, use the module structure as the basis for week entries
-- Do NOT let module names override or replace topic names you found in the syllabus schedule
+CANVAS MODULE CONTEXT: The input may include a section marked "CANVAS MODULE STRUCTURE" after the syllabus text. This is real data from the course's Canvas LMS showing how the instructor organized content into modules. Both sources are valid — use ALL available information:
+- When the syllabus has a clear schedule: use it as the primary structure for weeks/dates, then ENRICH each week with topic details and readings from the matching module
+- When the syllabus has NO schedule (only policies/grading): use the Canvas module structure as the basis for week entries — each module becomes a week
+- When both have topic info: COMBINE them. The syllabus gives structure/dates, modules add granular topic names and readings
 - Module items that look like filenames (e.g. "prinz_marder_2004.pdf") are readings — extract readable titles (e.g. "Prinz & Marder (2004)")
+- Ignore module items that are clearly assessments (quizzes, homework submissions, exam dropboxes) — focus on content topics and readings
 
 Each week must have:
 - weekNumber: integer starting at 1
@@ -752,7 +752,7 @@ Each week must have:
 - notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
 - courseName: exact course name/code from the syllabus header
 
-If you cannot find an explicit schedule, return empty weeks array.`,
+If you cannot find an explicit schedule AND no Canvas module data is provided, return empty weeks array.`,
       prompt: promptWithModules,
       abortSignal: AbortSignal.timeout(120_000),
       maxRetries: 1,
