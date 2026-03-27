@@ -569,6 +569,19 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               }
               return parseDateTimesFromText(cell.textContent || "")[0] || null;
             };
+            const classifyTimeTag = (tag) => {
+              // Use aria-label and CSS class ONLY — never parentElement.textContent
+              // which mixes text from sibling tags and causes misclassification.
+              const aria = (tag.getAttribute("aria-label") || "").toLowerCase();
+              const cls = (tag.className || "").toLowerCase();
+              if (cls.includes("release") || aria.includes("release")) return "release";
+              if (aria.includes("late due") || aria.includes("hard due")) return "late-due";
+              if (cls.includes("due") || aria.includes("due")) return "due";
+              // Fallback: check the tag's own inner text only (not parent)
+              const own = (tag.textContent || "").toLowerCase();
+              if (own.includes("late due") || own.includes("hard due")) return "late-due";
+              return "due"; // default: treat unknown as regular due
+            };
             const parseDueFields = (cell) => {
               if (!cell) return { dueAt: null, lateDueAt: null };
               let dueAt = null;
@@ -578,24 +591,9 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               for (const tag of timeTags) {
                 const parsed = canonicalDateTime(tag.getAttribute("datetime"));
                 if (!parsed) continue;
-                // Check the text NEAR this specific tag — walk preceding siblings
-                // to find the closest label, so "Late Due Date:" only matches its own tag.
-                let precedingText = "";
-                let node = tag.previousSibling;
-                while (node) {
-                  const t = (node.textContent || "").trim();
-                  if (t) { precedingText = t; break; }
-                  node = node.previousSibling;
-                }
-                // Also check parent if parent is a wrapper element (not the cell itself)
-                const parentLabel = tag.parentElement !== cell
-                  ? (tag.parentElement?.textContent || "")
-                  : "";
-                const label = (
-                  `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${precedingText} ${parentLabel}`
-                ).toLowerCase();
-                if (label.includes("release")) continue;
-                if (label.includes("late due") || label.includes("hard due")) {
+                const kind = classifyTimeTag(tag);
+                if (kind === "release") continue;
+                if (kind === "late-due") {
                   if (!lateDueAt) lateDueAt = parsed;
                   continue;
                 }
@@ -667,12 +665,10 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
                 for (const tag of Array.from(container.querySelectorAll("time[datetime]"))) {
                   const parsed = canonicalDateTime(tag.getAttribute("datetime"));
                   if (!parsed) continue;
-                  const label = (
-                    `${tag.getAttribute("aria-label") || ""} ${tag.className || ""} ${tag.parentElement?.textContent || ""}`
-                  ).toLowerCase();
-                  if (!releasedAt && label.includes("release")) releasedAt = parsed;
-                  if (!lateDueAt && (label.includes("late due") || label.includes("hard due"))) lateDueAt = parsed;
-                  if (!dueAt && label.includes("due") && !label.includes("late")) dueAt = parsed;
+                  const kind = classifyTimeTag(tag);
+                  if (!releasedAt && kind === "release") releasedAt = parsed;
+                  if (!lateDueAt && kind === "late-due") lateDueAt = parsed;
+                  if (!dueAt && kind === "due") dueAt = parsed;
                 }
               }
 
@@ -814,7 +810,8 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
               const _timeTags = Array.from(container.querySelectorAll("time[datetime]")).map(t => ({
                 dt: t.getAttribute("datetime"),
                 aria: t.getAttribute("aria-label") || "",
-                text: (t.parentElement?.textContent || "").slice(0, 80),
+                cls: t.className || "",
+                kind: classifyTimeTag(t),
               }));
 
               pushResult({
