@@ -8,8 +8,11 @@
     "start": "next start",
     "lint": "eslint",
     "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/",
+    "copy-grid": "esbuild src/lib/pdf-calendar-grid.ts --bundle --format=esm --outfile=extension/pdf-calendar-grid.js",
+    "prep-extension": "npm run copy-pdfjs && npm run copy-grid",
     "check:timelines": "node scripts/check-timeline-regressions.js",
-    "check:timeline-fixtures": "node --experimental-strip-types scripts/check-topic-pipeline-fixtures.mjs"
+    "check:timeline-fixtures": "node --experimental-strip-types scripts/check-topic-pipeline-fixtures.mjs",
+    "check:pdf-grid": "node --experimental-strip-types scripts/check-pdf-grid-fixtures.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.48",
@@ -50,6 +53,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.27.4",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "shadcn": "^3.8.5",

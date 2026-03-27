@@ -1,0 +1,52 @@
+{
+  "name": "not-a-grid-schedule-table",
+  "source": "Synthetic 3-column week/date/topic schedule table (not a calendar grid)",
+  "items": [
+    {"x": 72, "y": 700, "w": 40, "str": "Week"},
+    {"x": 160, "y": 700, "w": 35, "str": "Date"},
+    {"x": 310, "y": 700, "w": 40, "str": "Topic"},
+
+    {"x": 72, "y": 680, "w": 10, "str": "1"},
+    {"x": 160, "y": 680, "w": 55, "str": "Jan 13"},
+    {"x": 310, "y": 680, "w": 150, "str": "Introduction to Chemistry"},
+
+    {"x": 72, "y": 660, "w": 10, "str": "2"},
+    {"x": 160, "y": 660, "w": 55, "str": "Jan 20"},
+    {"x": 310, "y": 660, "w": 100, "str": "Atomic Structure"},
+
+    {"x": 72, "y": 640, "w": 10, "str": "3"},
+    {"x": 160, "y": 640, "w": 55, "str": "Jan 27"},
+    {"x": 310, "y": 640, "w": 120, "str": "Chemical Bonding"},
+
+    {"x": 72, "y": 620, "w": 10, "str": "4"},
+    {"x": 160, "y": 620, "w": 50, "str": "Feb 3"},
+    {"x": 310, "y": 620, "w": 80, "str": "Stoichiometry"},
+
+    {"x": 72, "y": 600, "w": 10, "str": "5"},
+    {"x": 160, "y": 600, "w": 55, "str": "Feb 10"},
+    {"x": 310, "y": 600, "w": 60, "str": "Gas Laws"},
+
+    {"x": 72, "y": 580, "w": 10, "str": "6"},
+    {"x": 160, "y": 580, "w": 55, "str": "Feb 17"},
+    {"x": 310, "y": 580, "w": 100, "str": "Thermodynamics"},
+
+    {"x": 72, "y": 560, "w": 10, "str": "7"},
+    {"x": 160, "y": 560, "w": 55, "str": "Feb 24"},
+    {"x": 310, "y": 560, "w": 60, "str": "Midterm"},
+
+    {"x": 72, "y": 540, "w": 10, "str": "8"},
+    {"x": 160, "y": 540, "w": 50, "str": "Mar 3"},
+    {"x": 310, "y": 540, "w": 80, "str": "Equilibrium"},
+
+    {"x": 72, "y": 520, "w": 10, "str": "9"},
+    {"x": 160, "y": 520, "w": 55, "str": "Mar 10"},
+    {"x": 310, "y": 520, "w": 80, "str": "Spring Break"},
+
+    {"x": 72, "y": 500, "w": 15, "str": "10"},
+    {"x": 160, "y": 500, "w": 55, "str": "Mar 17"},
+    {"x": 310, "y": 500, "w": 100, "str": "Acid-Base Chemistry"}
+  ],
+  "expected": {
+    "kind": "not-grid"
+  }
+}

@@ -22,6 +22,7 @@ globalThis.Worker = class extends _OriginalWorker {
 };
 
 import * as pdfjsLib from "./lib/pdf.min.mjs";
+import { analyzeCalendarGrid } from "./pdf-calendar-grid.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
   "lib/pdf.worker.min.mjs"
@@ -116,7 +117,41 @@ function extractPageText(items) {
   const textItems = items.filter((it) => "str" in it && it.str.trim().length > 0);
   if (textItems.length === 0) return "";
 
-  // ── Column detection ────────────────────────────────────────────────────────
+  // ── Calendar grid analysis (three-tier fallback) ────────────────────────────
+  // Tier 1: Cell-aware extraction — associates content items with their column
+  //         headers (dates) by X position, producing correct TSV cells.
+  // Tier 2: Grid-like fallback — enough structural signal to know this is a
+  //         calendar page, but not enough to extract cells. Skip two-column
+  //         split (which would destroy the grid) and use line-aware assembly.
+  // Tier 3: Not a grid — normal two-column detection + line assembly.
+  const gridItems = textItems.map((it) => ({
+    x: it.transform[4],
+    y: it.transform[5],
+    w: it.width ?? 0,
+    str: it.str,
+  }));
+  const analysis = analyzeCalendarGrid(gridItems);
+
+  if (analysis.kind === "grid") {
+    console.log(
+      "[offscreen] cell-aware calendar grid:",
+      analysis.columnCount, "cols,",
+      analysis.rowBandCount, "rows,",
+      "confidence:", analysis.confidence.toFixed(2),
+    );
+    return analysis.text;
+  }
+
+  if (analysis.kind === "grid-like") {
+    console.log(
+      "[offscreen] grid-like page (confidence:",
+      analysis.confidence.toFixed(2),
+      ") — line-aware fallback, skipping two-column split",
+    );
+    return assembleLines(textItems);
+  }
+
+  // ── Not a grid: two-column detection (unchanged) ────────────────────────────
   // Collect left-edge X positions, sort them, and look for the biggest gap.
   // pdfjs item.transform = [scaleX, skewX, skewY, scaleY, translateX, translateY]
   const xs = textItems.map((it) => it.transform[4]).sort((a, b) => a - b);
@@ -124,19 +159,7 @@ function extractPageText(items) {
 
   let columnBoundary = null; // X coordinate separating left from right column
 
-  // Skip two-column detection for calendar grid pages (7-column Sun–Sat layout).
-  // A calendar grid has ~6 evenly-spaced column boundaries; the biggest-gap
-  // heuristic would fire on the middle boundary and split the grid into
-  // "left 3.5 days" / "right 3.5 days", destroying the weekly row grouping.
-  // Instead we let assembleLines group items by Y (row = one week) and insert
-  // tabs between the 7 day cells so the row structure is preserved intact.
-  const rawPageText = textItems.map((it) => it.str).join(" ").toLowerCase();
-  const dayNameHits = (rawPageText.match(
-    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\b/g
-  ) ?? []).length;
-  const isCalendarGrid = dayNameHits >= 5;
-
-  if (!isCalendarGrid && xRange > 180 && textItems.length > 20) {
+  if (xRange > 180 && textItems.length > 20) {
     // Find the largest gap between consecutive sorted X values
     let maxGap = 0;
     let gapAt  = -1;
@@ -152,10 +175,6 @@ function extractPageText(items) {
       columnBoundary = (xs[gapAt - 1] + xs[gapAt]) / 2;
       console.log("[offscreen] two-column layout detected, boundary X ≈", columnBoundary.toFixed(1));
     }
-  }
-
-  if (isCalendarGrid) {
-    console.log("[offscreen] calendar grid detected — skipping two-column heuristic, dayNameHits:", dayNameHits);
   }
 
   // ── Line assembly ───────────────────────────────────────────────────────────
