@@ -1230,6 +1230,25 @@ function buildLectureCalendar(
     return { weeks: [], source: "none" };
   }
 
+  // Canvas termStartAt is often the academic period boundary (e.g. winter break),
+  // not the first day of classes. Use the earliest assignment date to clamp:
+  // if termStart is >21 days before the first assignment, use the assignment date.
+  const datedAssignments = assignments
+    .filter((a) => a.dueDate)
+    .map((a) => a.dueDate!.slice(0, 10))
+    .sort();
+  if (datedAssignments.length > 0) {
+    const firstAssignment = new Date(datedAssignments[0] + "T12:00:00");
+    const termStart = new Date(termStartDate + "T12:00:00");
+    const gapDays = (firstAssignment.getTime() - termStart.getTime()) / (1000 * 60 * 60 * 24);
+    if (gapDays > 21) {
+      // Term start is too early (likely includes break) — use 1 week before first assignment
+      const adjusted = new Date(firstAssignment);
+      adjusted.setDate(adjusted.getDate() - 7);
+      termStartDate = adjusted.toISOString().slice(0, 10);
+    }
+  }
+
   // Find lecture meetings (not labs, discussions, etc.)
   // Labels may be freeform from AI extraction (e.g. "Lecture (Section 1)"),
   // so match any label that starts with "lecture" or is unlabeled (default).
@@ -2122,6 +2141,14 @@ export function finalizeTimelineForPersistence(args: {
     repairActionsApplied.push("stripped_carried_break_notes");
   }
   finalizedTopics = strippedBreakNotesTopics;
+
+  // Deduplicate readings within each week (AI may output the same reading
+  // from both syllabus and module context)
+  for (const topic of finalizedTopics) {
+    if (topic.readings && topic.readings.length > 0) {
+      topic.readings = [...new Set(topic.readings)];
+    }
+  }
 
   const validated = validateTimeline(finalizedTopics, args.termStartDate, args.termEndDate);
   finalizedTopics = validated.topics;
