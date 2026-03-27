@@ -670,19 +670,14 @@ export function extractScheduleFromCalendarEvents(
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".
  *               Passed as a one-line prefix so the AI knows what format to expect.
  */
-export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string, reasoningTier?: ReasoningTier, structureHint?: string): Promise<ParsedTopic[]> {
+export async function parseSyllabusTopics(text: string, hint?: string, reasoningTier?: ReasoningTier, structureHint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
   const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
 
   // If structure hint is provided, prepend it so the AI sees deterministic facts first
-  const withStructure = structureHint
+  const finalPrompt = structureHint
     ? `${structureHint}\n\n${userContent}`
     : userContent;
-
-  // If module context is provided, append it clearly separated in the user message
-  const promptWithModules = moduleContext
-    ? `${withStructure}\n\n${moduleContext}`
-    : withStructure;
 
   try {
     const { object } = await generateObject({
@@ -741,13 +736,6 @@ WHAT NOT TO EXTRACT:
 - Grading policies, office hours, late policy, attendance rules
 - Administrative dates (registration deadlines, drop dates)
 
-CANVAS MODULE CONTEXT: The input may include a section marked "CANVAS MODULE STRUCTURE" after the syllabus text. This is real data from the course's Canvas LMS showing how the instructor organized content into modules. Both sources are valid — use ALL available information:
-- When the syllabus has a clear schedule: use it as the primary structure for weeks/dates, then ENRICH each week with topic details and readings from the matching module
-- When the syllabus has NO schedule (only policies/grading): use the Canvas module structure as the basis for week entries — each module becomes a week
-- When both have topic info: COMBINE them. The syllabus gives structure/dates, modules add granular topic names and readings
-- Module items that look like filenames (e.g. "prinz_marder_2004.pdf") are readings — extract readable titles (e.g. "Prinz & Marder (2004)")
-- Ignore module items that are clearly assessments (quizzes, homework submissions, exam dropboxes) — focus on content topics and readings
-
 Each week must have:
 - weekNumber: integer starting at 1
 - weekLabel: 3-7 word description of the PRIMARY TOPIC(S) covered — must name actual subjects (e.g. "Dynamic Programming and Memoization", "The French Revolution, Causes"). NEVER use "Week 1", "Regular Class", "TBD", or any placeholder. If a week has only a break note use that (e.g. "Spring Break — No Class"). For date-only sessions use descriptive labels like "Seminar Session 1".
@@ -757,8 +745,8 @@ Each week must have:
 - notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
 - courseName: exact course name/code from the syllabus header
 
-If you cannot find an explicit schedule AND no Canvas module data is provided, return empty weeks array.`,
-      prompt: promptWithModules,
+If you cannot find an explicit schedule, return empty weeks array.`,
+      prompt: finalPrompt,
       abortSignal: AbortSignal.timeout(120_000),
       maxRetries: 1,
     });

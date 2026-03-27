@@ -1,17 +1,18 @@
 /**
- * Topic Pipeline: Multi-stage AI enrichment for course content timelines.
+ * Topic Pipeline — "One fact, one gate, one owner."
  *
- * Philosophy: NEVER throw away data. Enhance and combine all sources.
- * Use as many AI calls as needed to produce the richest possible timeline.
+ * Each data source enters through exactly one stage. AI returns patches
+ * (deltas), not full rewritten timelines.
  *
  * Stages:
  *   1. COLLECT    — gather inputs (done by caller)
  *   2. CLASSIFY   — AI classifies Canvas modules as content/assessment/admin
- *   3. EXTRACT    — existing parseSyllabusTopics with expanded windowing
- *   3b. CALENDAR  — algorithmic lecture-to-date mapping (no AI)
+ *   2b. SPINE     — deterministic: lecture calendar + structure hint
+ *   3. EXTRACT    — AI extracts topics/readings from syllabus only (no modules)
  *   3c. GROUP     — algorithmic: group per-lecture entries into calendar weeks
- *   4. ENRICH     — AI adds module data + readings to pre-grouped weeks
- *   5. VALIDATE   — algorithmic sanity checks
+ *   4. NORMALIZE  — AI classifies module items into typed per-week deltas
+ *   5. FUSE       — deterministic: apply syllabus facts + module deltas onto spine
+ *   6. FINALIZE   — algorithmic sanity checks + validation
  */
 
 import { generateObject } from "ai";
@@ -27,7 +28,6 @@ import {
   bestWindow,
   detectSourceFormat,
   isContentfulTopic,
-  parsedTopicSchema,
   type ParsedTopic,
 } from "./parse-syllabus.ts";
 
@@ -122,7 +122,8 @@ export interface PipelineDebug {
   stage2Classifications: { name: string; category: string }[];
   stage3Sources: number;
   stage3Weeks: number;
-  moduleContextChars: number;
+  moduleNormalizerDeltas: number;
+  singlePassExtraction: boolean;
   lectureCalendarDates: number;
   stage4OutputWeeks: number;
   stage5Warnings: string[];
@@ -385,6 +386,21 @@ function splitCandidatesByAuthority(candidates: ScoredSource[]) {
   };
 }
 
+/**
+ * Detect when the timeline and content candidate sets share >50% of sources.
+ * When they overlap, running two extraction passes is wasteful and produces
+ * near-duplicate outputs that cause downstream duplication.
+ */
+function candidateSetsOverlap(
+  timelineCandidates: ScoredSource[],
+  contentCandidates: ScoredSource[],
+): boolean {
+  const tLabels = new Set(timelineCandidates.map((c) => c.label));
+  const cLabels = new Set(contentCandidates.map((c) => c.label));
+  const overlap = [...tLabels].filter((l) => cLabels.has(l)).length;
+  return overlap / Math.max(tLabels.size, cLabels.size) > 0.5;
+}
+
 function summarizeAuthorityCandidates(
   candidates: Array<ScoredSource & { role?: CandidateRole }>,
   usedLabel: string,
@@ -412,45 +428,6 @@ interface ExtractionResult {
   topics: ParsedTopic[];
   usedLabel: string;
   usedWindow: string;
-}
-
-/**
- * Serialize content modules into a compact text block that can be appended to
- * syllabus text before AI extraction.  This gives the model both sources of
- * truth — the syllabus schedule AND the Canvas module structure — so it can
- * cross-reference topics, fill gaps, and produce richer results.
- *
- * Budget: ~5 000 chars to avoid crowding out the syllabus window.
- */
-function serializeModulesForExtraction(
-  modules: CanvasModuleInfo[],
-  budget = 10000,
-): string {
-  if (modules.length === 0) return "";
-
-  const lines: string[] = [
-    "",
-    "--- CANVAS MODULE STRUCTURE (supplementary context — use to correlate topics and fill gaps) ---",
-  ];
-
-  for (const m of modules) {
-    const header = m.weekLabel;
-    const topicList = (m.topics ?? []).filter(Boolean);
-    const readingList = (m.readings ?? []).filter(Boolean);
-
-    let entry = header;
-    if (topicList.length > 0) entry += `\n  Topics: ${topicList.join(", ")}`;
-    if (readingList.length > 0) entry += `\n  Readings: ${readingList.join(", ")}`;
-
-    // Check budget before adding
-    const candidate = lines.join("\n") + "\n" + entry + "\n---";
-    if (candidate.length > budget) break;
-
-    lines.push(entry);
-  }
-
-  lines.push("---");
-  return lines.join("\n");
 }
 
 /**
@@ -518,7 +495,6 @@ function buildStructureHint(
 async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
-  moduleContext?: string,
   structureHint?: string,
 ): Promise<ExtractionResult> {
   const FULL_TEXT_THRESHOLD = 40_000;
@@ -536,9 +512,7 @@ async function extractTopicsExpanded(
 
     const fmt = detectSourceFormat(src.text);
     const hint = `${src.label}, format: ${fmt}`;
-    // Always send both syllabus + module context, use stronger model when modules present
-    const tier = moduleContext ? "max" : "high";
-    const raw = await parseSyllabusTopics(win, hint, moduleContext || undefined, tier, structureHint || undefined);
+    const raw = await parseSyllabusTopics(win, hint, "high", structureHint || undefined);
     const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
     const richWeeks = result.filter(
@@ -1692,76 +1666,227 @@ function groupLecturesIntoWeeks(
   return withBreaks;
 }
 
-// ─── Stage 4: ENRICH ─────────────────────────────────────────────────────────
+// ─── Module Normalizer ──────────────────────────────────────────────────────
 
-interface EnrichInput {
-  contentModules: { weekLabel: string; topics: string[]; readings: string[] }[];
-  groupedTopics: ParsedTopic[];
-  courseName: string;
+interface ModuleDelta {
+  weekNumber: number;
+  addTopics: string[];
+  addReadings: string[];
+  sourceModule: string;
 }
 
-async function enrichTimeline(input: EnrichInput): Promise<ParsedTopic[]> {
-  console.log(`[pipeline] ${input.courseName}: Stage 4 enrichTimeline — ${input.groupedTopics.length} weeks, ${input.contentModules.length} modules`);
+interface NormalizerResult {
+  deltas: ModuleDelta[];
+  coveredWeeks: number[];
+}
 
-  if (input.contentModules.length === 0) {
-    console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no content modules`);
-    return input.groupedTopics;
-  }
+const moduleDeltaSchema = z.object({
+  deltas: z.array(z.object({
+    weekNumber: z.number(),
+    addTopics: z.array(z.string()),
+    addReadings: z.array(z.string()),
+    sourceModule: z.string(),
+  })),
+  coveredWeeks: z.array(z.number()),
+});
 
-  const enrichSchema = z.object({ weeks: z.array(parsedTopicSchema) });
+/**
+ * The ONE AI call for module data. Classifies each module item into typed
+ * facts and matches modules to spine weeks. Returns per-week deltas —
+ * only new topics and readings to add.
+ *
+ * Resources (slides, problem sets, handouts) and assessments are excluded.
+ */
+async function normalizeModules(
+  modules: CanvasModuleInfo[],
+  spine: { weekNumber: number; weekLabel: string; startDate: string | null; topics: string[]; readings: string[] }[],
+  courseName: string,
+): Promise<NormalizerResult> {
+  if (modules.length === 0 || spine.length === 0) return { deltas: [], coveredWeeks: [] };
 
   const t0 = Date.now();
   try {
     const { object } = await generateObject({
       ...modelConfig("medium"),
-      schema: enrichSchema,
-      system: `You enrich a course timeline with additional data from Canvas modules.
+      schema: moduleDeltaSchema,
+      system: `You normalize Canvas module content into typed additions for a course timeline.
 
-You will receive:
-1. GROUPED TIMELINE: Pre-grouped weekly topics with dates and per-lecture detail already assigned. This is the PRIMARY source — do not rearrange, regroup, or remove any entries.
-2. CANVAS MODULES: Module names and their content items (slides, handouts, worksheets, papers, etc.)
+You receive:
+1. SPINE: The weekly structure with weekNumber, weekLabel, startDate, and existing topics/readings already extracted from the syllabus
+2. MODULES: Canvas module names with their content items (topics and readings arrays)
 
-YOUR JOB — ENRICH, never delete:
-- Match each Canvas module to the corresponding week(s) in the timeline by topic/unit overlap
-- When topic overlap is weak (e.g. seminar courses), match by sequential numbering: "Class 1 Paper" → week 1, "Class 2 Paper(s)" → week 2, etc.
-- Module items that are file names (e.g. "prinz_marder_2004.pdf", "Iaccarino et al.pdf") are readings — add them to the readings array and extract a readable title (e.g. "Prinz & Marder (2004)", "Iaccarino et al.")
-- If a module mentions content not in any week's topics, ADD it as a new topic entry
-- For weeks with empty topics that get matched to a module, derive a meaningful topic from the module content (e.g. "Paper discussion: Prinz & Marder (2004)")
-- KEEP all existing topics exactly as they are — do not rename, summarize, or reorder them
-- KEEP all existing readings exactly as they are — do not remove or rename them. You MAY add new readings from module data.
-- KEEP all existing dates, weekNumbers, and weekLabels unchanged
+For each module:
+- Match it to the best spine week by comparing module content against the week's existing topics, readings, and weekLabel. Use topic/subject overlap as the primary signal, sequential position as a tiebreaker (e.g. "Class 1 Paper" → week 1, "Unit 3" → week with matching topic)
+- Classify each item in the module:
+  - topic: actual subject matter, lecture themes, discussion topics → addTopics
+  - assigned_reading: papers, textbook chapters, articles, author names → addReadings
+  - resource: slides, problem sets, handouts, worksheets, videos, PowerPoints → SKIP
+  - assessment: quiz blanks, exam keys, answer sheets, homework submissions → SKIP
+- Extract readable titles from filenames (e.g. "prinz_marder_2004.pdf" → "Prinz & Marder (2004)")
+- Only output items classified as topic or assigned_reading
+- Do NOT output items that are already present in a week's existing topics or readings
+- If a module cannot be confidently matched to any week, skip it entirely
 
-If you cannot match a module to any week, skip it — do not force it.`,
+Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at least one module, even if you classified all items as resource/assessment and added nothing to addTopics/addReadings. This distinguishes "no modules matched this week" from "modules matched but nothing was worth adding."`,
       prompt: JSON.stringify({
-        groupedTimeline: input.groupedTopics.map((t) => ({
-          weekNumber: t.weekNumber,
-          weekLabel: t.weekLabel,
-          startDate: t.startDate,
-          topics: t.topics,
-          readings: t.readings,
-          notes: t.notes,
-          courseName: t.courseName,
+        spine: spine.map((w) => ({
+          weekNumber: w.weekNumber,
+          weekLabel: w.weekLabel,
+          startDate: w.startDate,
+          topics: w.topics,
+          readings: w.readings,
         })),
-        canvasModules: input.contentModules,
+        modules: modules.map((m) => ({
+          name: m.weekLabel,
+          topics: m.topics,
+          readings: m.readings,
+        })),
       }),
-      abortSignal: AbortSignal.timeout(60_000),
+      abortSignal: AbortSignal.timeout(45_000),
     });
 
-    const enriched = object.weeks as ParsedTopic[];
+    const deltas = object.deltas as ModuleDelta[];
+    // Filter out deltas targeting non-existent weeks; validate + dedup coveredWeeks
+    const validWeeks = new Set(spine.map((w) => w.weekNumber));
+    const valid = deltas.filter((d) => validWeeks.has(d.weekNumber));
+    const validCovered = [...new Set(object.coveredWeeks ?? [])].filter((w) => validWeeks.has(w));
 
-    // Safety: enriched must have roughly same number of weeks
-    if (enriched.length >= input.groupedTopics.length * 0.8 && enriched.length <= input.groupedTopics.length * 1.2) {
-      const withReadings = enriched.filter(w => (w.readings ?? []).length > 0).length;
-      console.log(`[pipeline] ${input.courseName}: Stage 4 done in ${Date.now() - t0}ms — ${enriched.length} weeks, ${withReadings} with readings`);
-      return enriched;
-    }
-    console.warn(`[pipeline] ${input.courseName}: Stage 4 REJECTED — produced ${enriched.length} weeks vs ${input.groupedTopics.length} input (>20% drift), keeping original`);
-    return input.groupedTopics;
+    console.log(
+      `[pipeline] ${courseName}: normalizeModules done in ${Date.now() - t0}ms — ` +
+      `${valid.length} deltas, ${validCovered.length} covered from ${modules.length} modules`,
+    );
+    return { deltas: valid, coveredWeeks: validCovered };
   } catch (err) {
-    console.warn(`[pipeline] ${input.courseName}: Stage 4 FAILED after ${Date.now() - t0}ms:`, err);
-    return input.groupedTopics;
+    console.warn(`[pipeline] ${courseName}: normalizeModules FAILED after ${Date.now() - t0}ms:`, err);
+    return { deltas: [], coveredWeeks: [] };
   }
 }
+
+// ─── Fusion (deterministic) ──────────────────────────────────────────────────
+
+/**
+ * Normalize a string for dedup comparison: lowercase, strip punctuation,
+ * collapse whitespace. Two strings that normalize identically are duplicates.
+ */
+function normalizeForDedup(s: string): string {
+  return s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Deterministic fusion: apply module deltas onto syllabus-extracted topics.
+ * Cannot change week count, ordering, or dates — only adds new topics/readings.
+ */
+function fuseTimeline(
+  syllabusFacts: ParsedTopic[],
+  moduleDeltas: ModuleDelta[],
+  courseName: string,
+): ParsedTopic[] {
+  if (moduleDeltas.length === 0) return syllabusFacts;
+
+  // Group deltas by target week
+  const deltasByWeek = new Map<number, ModuleDelta[]>();
+  for (const delta of moduleDeltas) {
+    const existing = deltasByWeek.get(delta.weekNumber);
+    if (existing) {
+      existing.push(delta);
+    } else {
+      deltasByWeek.set(delta.weekNumber, [delta]);
+    }
+  }
+
+  let totalAdded = 0;
+
+  const fused = syllabusFacts.map((week) => {
+    const deltas = deltasByWeek.get(week.weekNumber);
+    if (!deltas) return week;
+
+    const existingTopicNorms = new Set(
+      (week.topics ?? []).map(normalizeForDedup),
+    );
+    const existingReadingNorms = new Set(
+      (week.readings ?? []).map(normalizeForDedup),
+    );
+
+    const newTopics = [...(week.topics ?? [])];
+    const newReadings = [...(week.readings ?? [])];
+
+    for (const delta of deltas) {
+      for (const topic of delta.addTopics) {
+        const norm = normalizeForDedup(topic);
+        if (norm && !existingTopicNorms.has(norm)) {
+          existingTopicNorms.add(norm);
+          newTopics.push(topic);
+          totalAdded++;
+        }
+      }
+      for (const reading of delta.addReadings) {
+        const norm = normalizeForDedup(reading);
+        if (norm && !existingReadingNorms.has(norm)) {
+          existingReadingNorms.add(norm);
+          newReadings.push(reading);
+          totalAdded++;
+        }
+      }
+    }
+
+    return { ...week, topics: newTopics, readings: newReadings };
+  });
+
+  if (totalAdded > 0) {
+    console.log(`[pipeline] ${courseName}: fuseTimeline added ${totalAdded} items from module deltas`);
+  }
+
+  return fused;
+}
+
+/**
+ * Per-week fallback for uncovered weeks. For weeks the normalizer didn't
+ * examine (not in coveredWeeks), additively merge scaffold content.
+ * Covered weeks are trusted even if empty (normalizer decided all items
+ * were resources/assessments).
+ */
+function applyPerWeekFallback(
+  fused: ParsedTopic[],
+  fallback: ParsedTopic[],
+  coveredWeeks: Set<number>,
+): ParsedTopic[] {
+  const fallbackByWeek = new Map<number, ParsedTopic>();
+  for (const t of fallback) fallbackByWeek.set(t.weekNumber, t);
+
+  return fused.map((week) => {
+    // Covered weeks: trust normalizer result (even if empty — it examined the week)
+    if (coveredWeeks.has(week.weekNumber)) return week;
+
+    // Uncovered week: merge scaffold content additively
+    const fb = fallbackByWeek.get(week.weekNumber);
+    if (!fb) return week;
+
+    const existingTopicNorms = new Set((week.topics ?? []).map(normalizeForDedup));
+    const existingReadingNorms = new Set((week.readings ?? []).map(normalizeForDedup));
+
+    const mergedTopics = [...(week.topics ?? [])];
+    for (const t of fb.topics ?? []) {
+      const norm = normalizeForDedup(t);
+      if (norm && !existingTopicNorms.has(norm)) {
+        existingTopicNorms.add(norm);
+        mergedTopics.push(t);
+      }
+    }
+
+    const mergedReadings = [...(week.readings ?? [])];
+    for (const r of fb.readings ?? []) {
+      const norm = normalizeForDedup(r);
+      if (norm && !existingReadingNorms.has(norm)) {
+        existingReadingNorms.add(norm);
+        mergedReadings.push(r);
+      }
+    }
+
+    return { ...week, topics: mergedTopics, readings: mergedReadings };
+  });
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 const TOKEN_STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "of", "for", "in", "to", "on", "with",
@@ -1910,10 +2035,11 @@ function organizeModulesAsTimeline(
     return 0;
   });
 
-  // Filter useful readings (slides, worksheets, problem sets, handouts)
-  // Remove quiz blanks/keys, exam blanks/keys, and generic items
-  const USEFUL_READING_RX = /slide|worksheet|handout|problem\s+set|packet|review|derivation|video|reading/i;
-  const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope/i;
+  // Filter to actual assigned readings only — papers, chapters, articles
+  // Resources (slides, problem sets, handouts, videos) are excluded per
+  // "one fact, one gate" — those belong in CourseMaterial, not readings
+  const ASSIGNED_READING_RX = /reading|chapter|paper|article|\.pdf$|et\s+al|journal|\(\d{4}\)/i;
+  const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope|slide|powerpoint|worksheet|problem\s+set|packet|handout|video/i;
 
   // Build lecture-to-calendar-week map for date assignment
   const lectureToWeek = new Map<number, WeekDateRange>();
@@ -1933,9 +2059,9 @@ function organizeModulesAsTimeline(
     const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
     const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
 
-    // Filter readings
+    // Filter readings — only actual assigned readings, not resources
     const usefulReadings = p.module.readings.filter(
-      (r) => USEFUL_READING_RX.test(r) && !SKIP_READING_RX.test(r),
+      (r) => ASSIGNED_READING_RX.test(r) && !SKIP_READING_RX.test(r),
     );
 
     // Find date from lecture calendar
@@ -2142,11 +2268,27 @@ export function finalizeTimelineForPersistence(args: {
   }
   finalizedTopics = strippedBreakNotesTopics;
 
-  // Deduplicate readings within each week (AI may output the same reading
-  // from both syllabus and module context)
+  // Deduplicate topics and readings within each week using canonical
+  // normalization — catches format variants like "Chang & Tsao (2017)"
+  // vs "chang_tsao_2017.pdf" that exact-string Set dedup misses
   for (const topic of finalizedTopics) {
-    if (topic.readings && topic.readings.length > 0) {
-      topic.readings = [...new Set(topic.readings)];
+    if (topic.readings && topic.readings.length > 1) {
+      const seen = new Set<string>();
+      topic.readings = topic.readings.filter((r) => {
+        const norm = normalizeForDedup(r);
+        if (seen.has(norm)) return false;
+        seen.add(norm);
+        return true;
+      });
+    }
+    if (topic.topics && topic.topics.length > 1) {
+      const seen = new Set<string>();
+      topic.topics = topic.topics.filter((t) => {
+        const norm = normalizeForDedup(t);
+        if (seen.has(norm)) return false;
+        seen.add(norm);
+        return true;
+      });
     }
   }
 
@@ -2191,7 +2333,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     stage2Classifications: [],
     stage3Sources: input.candidates.length,
     stage3Weeks: 0,
-    moduleContextChars: 0,
+    moduleNormalizerDeltas: 0,
+    singlePassExtraction: false,
     lectureCalendarDates: 0,
     stage4OutputWeeks: 0,
     stage5Warnings: [],
@@ -2257,21 +2400,31 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     );
   }
 
-  // ── STAGE 3: EXTRACT with source authority split ──
-  // Serialize module structure once so the AI sees both syllabus + Canvas modules
-  const moduleContext = serializeModulesForExtraction(contentModules);
-  debug.moduleContextChars = moduleContext.length;
+  // ── STAGE 3: EXTRACT from syllabus only (no module context) ──
+  // Detect when timeline/content candidate sets overlap — if so, run ONE pass
+  const singlePass = candidateSetsOverlap(
+    authoritySplit.timelineCandidates,
+    authoritySplit.contentCandidates,
+  );
+  debug.singlePassExtraction = singlePass;
 
-  if (moduleContext.length > 0) {
-    console.log(
-      `[pipeline] ${input.courseName}: Stage 3 injecting ${moduleContext.length} chars of module context (${contentModules.length} modules)`,
+  let timelineExtraction: ExtractionResult;
+  let contentExtraction: ExtractionResult;
+
+  if (singlePass) {
+    console.log(`[pipeline] ${input.courseName}: Stage 3 single-pass (candidate sets overlap)`);
+    const single = await extractTopicsExpanded(
+      authoritySplit.classified, input.courseName, structureHint,
     );
+    timelineExtraction = single;
+    contentExtraction = { topics: [], usedLabel: "none", usedWindow: "" };
+  } else {
+    console.log(`[pipeline] ${input.courseName}: Stage 3 dual-pass (disjoint candidate sets)`);
+    [timelineExtraction, contentExtraction] = await Promise.all([
+      extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, structureHint),
+      extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, structureHint),
+    ]);
   }
-
-  const [timelineExtraction, contentExtraction] = await Promise.all([
-    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, moduleContext, structureHint),
-    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, moduleContext, structureHint),
-  ]);
 
   debug.timelineSource = timelineExtraction.usedLabel;
   debug.contentSource = contentExtraction.usedLabel;
@@ -2283,19 +2436,28 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   );
 
   const hasTimelineAuthority = timelineTopics.length > 0;
-  let aiTopics =
-    timelineTopics.length > 0
-      ? mergeContentOntoTimeline(timelineTopics, contentExtraction.topics, input.courseName)
-      : contentExtraction.topics.length > 0
-        ? contentExtraction.topics
-        : timelineExtraction.topics;
+  let aiTopics: ParsedTopic[];
+
+  if (singlePass) {
+    // Single pass — use result directly, no merge needed
+    aiTopics = timelineTopics.length > 0 ? timelineTopics : timelineExtraction.topics;
+  } else {
+    // Dual pass — merge content onto timeline spine
+    aiTopics =
+      timelineTopics.length > 0
+        ? mergeContentOntoTimeline(timelineTopics, contentExtraction.topics, input.courseName)
+        : contentExtraction.topics.length > 0
+          ? contentExtraction.topics
+          : timelineExtraction.topics;
+  }
 
   debug.stage3Weeks = aiTopics.length;
 
   console.log(
     `[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries ` +
     `| timeline=${timelineExtraction.usedLabel}:${timelineExtraction.topics.length}` +
-    ` | content=${contentExtraction.usedLabel}:${contentExtraction.topics.length}`,
+    ` | content=${contentExtraction.usedLabel}:${contentExtraction.topics.length}` +
+    ` | singlePass=${singlePass}`,
   );
 
   // Use module scaffold ONLY when:
@@ -2307,6 +2469,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     lectureCalendar.length === 0 &&
     contentModules.length >= Math.max(4, Math.min(8, aiTopics.length || 4));
   let usedModuleScaffold = false;
+  let savedScaffold: ParsedTopic[] | null = null;
 
   if (shouldUseModuleScaffold) {
     const scaffold = organizeModulesAsTimeline(
@@ -2317,11 +2480,22 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       input.termEndDate,
     );
     if (scaffold.length > 0) {
-      aiTopics = mergeContentOntoTimeline(scaffold, aiTopics, input.courseName);
+      savedScaffold = scaffold;
+
+      // Merge syllabus content onto scaffold STRUCTURE (not scaffold content).
+      // This gives us: scaffold dates/ordering + syllabus topics/readings.
+      // Scaffold regex content does NOT enter the pipeline.
+      const scaffoldStructure = scaffold.map((t) => ({
+        ...t,
+        topics: [] as string[],
+        readings: [] as string[],
+      }));
+      aiTopics = mergeContentOntoTimeline(scaffoldStructure, aiTopics, input.courseName);
+
       debug.fallbackUsed = true;
       usedModuleScaffold = true;
       console.log(
-        `[pipeline] ${input.courseName}: Stage 3d replaced weak content-only timeline with ${scaffold.length}-entry module scaffold`,
+        `[pipeline] ${input.courseName}: Stage 3d merged syllabus content onto ${scaffold.length}-entry scaffold structure`,
       );
     }
   }
@@ -2332,7 +2506,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     aiTopics = grouped;
   }
 
-  // ── STAGE 4: ENRICH with module data ──
+  // ── STAGE 4: NORMALIZE MODULES → per-week deltas ──
+  // ── STAGE 5: FUSE — deterministic merge of syllabus facts + module deltas ──
   let finalTopics: ParsedTopic[];
   let moduleIdsToDelete: string[];
 
@@ -2340,10 +2515,11 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     finalTopics = [];
     moduleIdsToDelete = [];
     debug.fallbackUsed = true;
-    console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no data from either source`);
+    console.log(`[pipeline] ${input.courseName}: Stage 4-5 skipped — no data from either source`);
 
   } else if (aiTopics.length === 0) {
-    // No AI topics but we have content modules — organize them into a timeline
+    // No AI topics but we have content modules — organize into a timeline,
+    // then run normalizer for proper classification + filename humanization.
     const organizedModules = organizeModulesAsTimeline(
       contentModules,
       lectureCalendar,
@@ -2352,40 +2528,93 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       input.termEndDate,
     );
     if (organizedModules.length > 0) {
-      finalTopics = organizedModules;
-      moduleIdsToDelete = input.modules.map((m) => m.id); // delete all old modules, we're replacing them
-      debug.stage4OutputWeeks = organizedModules.length;
-      debug.fallbackUsed = true;
+      // Structure-only spine for normalizer: no scaffold content to suppress humanization.
+      // Normalizer matches modules to weeks by weekLabel and sequential position.
+      const structureSpine = organizedModules.map((t) => ({
+        weekNumber: t.weekNumber,
+        weekLabel: t.weekLabel,
+        startDate: t.startDate ?? null,
+        topics: [] as string[],
+        readings: [] as string[],
+      }));
+
+      const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
+        contentModules, structureSpine, input.courseName,
+      );
+      debug.moduleNormalizerDeltas = moduleDeltas.length;
+
+      // Always: structure-only base → fuse → per-week fallback from full scaffold.
+      // If normalizer returned deltas=[] but coveredWeeks=[1,2,...], that's valid
+      // ("examined, nothing to add"). If both empty (true failure), fallback
+      // restores scaffold content for all weeks naturally.
+      const structureOnly = organizedModules.map((t) => ({
+        ...t,
+        topics: [] as string[],
+        readings: [] as string[],
+      }));
+      const fused = fuseTimeline(structureOnly, moduleDeltas, input.courseName);
+      finalTopics = applyPerWeekFallback(fused, organizedModules, new Set(coveredWeeks));
+
+      moduleIdsToDelete = input.modules.map((m) => m.id);
+      debug.stage4OutputWeeks = finalTopics.length;
+      debug.fallbackUsed = coveredWeeks.length === 0;
       usedModuleScaffold = true;
-      console.log(`[pipeline] ${input.courseName}: Stage 4 module-only fallback → ${organizedModules.length} organized entries`);
+      console.log(
+        `[pipeline] ${input.courseName}: Stage 4 module-only → ${finalTopics.length} entries ` +
+        `(${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`,
+      );
     } else {
       finalTopics = [];
       moduleIdsToDelete = nonContentModuleIds;
       debug.fallbackUsed = true;
-      console.log(`[pipeline] ${input.courseName}: Stage 4 skipped — no AI topics, keeping ${contentModules.length} content modules`);
+      console.log(`[pipeline] ${input.courseName}: Stage 4-5 skipped — no AI topics, keeping ${contentModules.length} content modules`);
     }
 
-  } else {
-    // Enrich grouped topics with module data
-    console.log(
-      `[pipeline] ${input.courseName}: Stage 4 enriching ${aiTopics.length} weeks` +
-      (contentModules.length > 0 ? ` with ${contentModules.length} content modules` : ""),
+  } else if (usedModuleScaffold && savedScaffold) {
+    // aiTopics = scaffold structure + syllabus content (no scaffold regex content).
+    // Use aiTopics as normalizer spine: syllabus content provides dedup context,
+    // scaffold regex content is NOT in spine so won't suppress humanized replacements.
+    const spineForNormalizer = aiTopics.map((t) => ({
+      weekNumber: t.weekNumber,
+      weekLabel: t.weekLabel,
+      startDate: t.startDate ?? null,
+      topics: t.topics ?? [],
+      readings: t.readings ?? [],
+    }));
+
+    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
+      contentModules, spineForNormalizer, input.courseName,
     );
+    debug.moduleNormalizerDeltas = moduleDeltas.length;
 
-    const enriched = await enrichTimeline({
-      contentModules: contentModules.map((m) => ({
-        weekLabel: m.weekLabel,
-        topics: m.topics,
-        readings: m.readings,
-      })),
-      groupedTopics: aiTopics,
-      courseName: input.courseName,
-    });
+    // Fuse onto aiTopics (syllabus content base), then per-week fallback from full scaffold
+    const fused = fuseTimeline(aiTopics, moduleDeltas, input.courseName);
+    finalTopics = applyPerWeekFallback(fused, savedScaffold, new Set(coveredWeeks));
 
-    finalTopics = enriched;
     moduleIdsToDelete = input.modules.map((m) => m.id);
     debug.stage4OutputWeeks = finalTopics.length;
-    console.log(`[pipeline] ${input.courseName}: Stage 4 produced ${finalTopics.length} enriched weeks`);
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 4-5 scaffold path → ${finalTopics.length} weeks ` +
+      `(${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`,
+    );
+
+  } else {
+    // Normalize modules into typed deltas, then fuse deterministically
+    const spineForNormalizer = aiTopics.map((t) => ({
+      weekNumber: t.weekNumber,
+      weekLabel: t.weekLabel,
+      startDate: t.startDate ?? null,
+      topics: t.topics ?? [],
+      readings: t.readings ?? [],
+    }));
+
+    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(contentModules, spineForNormalizer, input.courseName);
+    debug.moduleNormalizerDeltas = moduleDeltas.length;
+
+    finalTopics = fuseTimeline(aiTopics, moduleDeltas, input.courseName);
+    moduleIdsToDelete = input.modules.map((m) => m.id);
+    debug.stage4OutputWeeks = finalTopics.length;
+    console.log(`[pipeline] ${input.courseName}: Stage 4-5 produced ${finalTopics.length} weeks (${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`);
   }
 
   // ── STAGE 5: FINALIZE + VALIDATE ──
