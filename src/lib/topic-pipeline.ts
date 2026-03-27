@@ -453,10 +453,73 @@ function serializeModulesForExtraction(
   return lines.join("\n");
 }
 
+/**
+ * Builds a deterministic structure hint from Canvas assignment data.
+ * Only fires when assignments contain numbered lecture references (e.g. "Lecture #5").
+ * The hint tells the AI exactly how many lectures exist so it doesn't collapse
+ * to coarse unit-level entries when module context is present.
+ */
+function buildStructureHint(
+  assignments: AssignmentDateInfo[],
+  lectureCalendar: WeekDateRange[],
+): string {
+  // Extract lecture numbers from assignment titles
+  const lectureNums = new Set<number>();
+  for (const a of assignments) {
+    if (!a.dueDate) continue;
+    const m = a.title.match(/\blecture\s*#?\s*(\d+)\b/i);
+    if (m) lectureNums.add(Number.parseInt(m[1], 10));
+    const range = a.title.match(/\blectures?\s*(\d+)\s*[-–]\s*(\d+)\b/i);
+    if (range) {
+      const lo = Number.parseInt(range[1], 10);
+      const hi = Number.parseInt(range[2], 10);
+      for (let n = lo; n <= hi; n++) lectureNums.add(n);
+    }
+  }
+
+  if (lectureNums.size < 5) return "";
+
+  const sorted = [...lectureNums].sort((a, b) => a - b);
+  const min = sorted[0];
+  const max = sorted[sorted.length - 1];
+
+  // Get date range from dated assignments
+  const dated = assignments
+    .filter((a) => a.dueDate)
+    .map((a) => a.dueDate!.slice(0, 10))
+    .sort();
+  const firstDate = dated[0] ?? "";
+  const lastDate = dated[dated.length - 1] ?? "";
+
+  const weekCount = lectureCalendar.length;
+  const lecturesPerWeek = weekCount > 0
+    ? Math.round(lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0) / weekCount)
+    : 0;
+
+  const lines: string[] = [
+    "--- COURSE STRUCTURE (from Canvas assignment data — ground truth) ---",
+    `Assignment data shows ${max} individually-numbered lectures (Lecture ${min} – Lecture ${max}).`,
+  ];
+
+  if (firstDate && lastDate) {
+    lines.push(`Course spans ${firstDate} to ${lastDate} (~${weekCount || "unknown"} weeks).`);
+  }
+
+  if (lecturesPerWeek > 0) {
+    lines.push(`Lecture calendar: ${weekCount} weeks, ~${lecturesPerWeek} lectures per week.`);
+  }
+
+  lines.push("→ Extract ONE entry per individual lecture. Do NOT collapse lectures into units or modules.");
+  lines.push("---");
+
+  return lines.join("\n");
+}
+
 async function extractTopicsExpanded(
   candidates: ScoredSource[],
   courseName: string,
   moduleContext?: string,
+  structureHint?: string,
 ): Promise<ExtractionResult> {
   const FULL_TEXT_THRESHOLD = 40_000;
   const LARGE_WINDOW_SIZE = 30_000;
@@ -475,7 +538,7 @@ async function extractTopicsExpanded(
     const hint = `${src.label}, format: ${fmt}`;
     // Always send both syllabus + module context, use stronger model when modules present
     const tier = moduleContext ? "max" : "high";
-    const raw = await parseSyllabusTopics(win, hint, moduleContext || undefined, tier);
+    const raw = await parseSyllabusTopics(win, hint, moduleContext || undefined, tier, structureHint || undefined);
     const result = sanitizeSchedule(raw).filter(isContentfulTopic);
 
     const richWeeks = result.filter(
@@ -2139,6 +2202,34 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     role: src.role ?? "timeline",
   }));
 
+  // ── STAGE 2b: BUILD LECTURE CALENDAR (before AI extraction) ──
+  // Moved before Stage 3 so we can compute deterministic structure hints for the AI
+  const lectureCalendarBuild = buildLectureCalendar(
+    input.classSchedule,
+    input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
+    input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
+    input.assignments,
+    input.syllabusEvents ?? [],
+  );
+  const lectureCalendar = lectureCalendarBuild.weeks;
+  debug.lectureCalendarSource = lectureCalendarBuild.source;
+  debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
+
+  if (lectureCalendar.length > 0) {
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 2b built lecture calendar — ` +
+      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks (${lectureCalendarBuild.source})`,
+    );
+  }
+
+  // Compute deterministic structure hint from Canvas assignment data
+  const structureHint = buildStructureHint(input.assignments, lectureCalendar);
+  if (structureHint) {
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 2b structure hint computed (${structureHint.length} chars)`,
+    );
+  }
+
   // ── STAGE 3: EXTRACT with source authority split ──
   // Serialize module structure once so the AI sees both syllabus + Canvas modules
   const moduleContext = serializeModulesForExtraction(contentModules);
@@ -2151,8 +2242,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   }
 
   const [timelineExtraction, contentExtraction] = await Promise.all([
-    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, moduleContext),
-    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, moduleContext),
+    extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, moduleContext, structureHint),
+    extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, moduleContext, structureHint),
   ]);
 
   debug.timelineSource = timelineExtraction.usedLabel;
@@ -2179,25 +2270,6 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     `| timeline=${timelineExtraction.usedLabel}:${timelineExtraction.topics.length}` +
     ` | content=${contentExtraction.usedLabel}:${contentExtraction.topics.length}`,
   );
-
-  // ── STAGE 3b: BUILD LECTURE CALENDAR ──
-  const lectureCalendarBuild = buildLectureCalendar(
-    input.classSchedule,
-    input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
-    input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
-    input.assignments,
-    input.syllabusEvents ?? [],
-  );
-  const lectureCalendar = lectureCalendarBuild.weeks;
-  debug.lectureCalendarSource = lectureCalendarBuild.source;
-  debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
-
-  if (lectureCalendar.length > 0) {
-    console.log(
-      `[pipeline] ${input.courseName}: Stage 3b built lecture calendar — ` +
-      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks (${lectureCalendarBuild.source})`,
-    );
-  }
 
   // Use module scaffold ONLY when:
   // - AI extraction has no dated entries (no timeline authority), AND

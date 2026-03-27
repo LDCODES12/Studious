@@ -1141,7 +1141,6 @@ export async function POST(request: NextRequest) {
           where: { courseId: scCourseId, dueDate: { not: null } },
           select: { title: true, dueDate: true },
           orderBy: { dueDate: "asc" },
-          take: 40,
         });
 
         const pipelineInput: PipelineInput = {

@@ -670,14 +670,19 @@ export function extractScheduleFromCalendarEvents(
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".
  *               Passed as a one-line prefix so the AI knows what format to expect.
  */
-export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string, reasoningTier?: ReasoningTier): Promise<ParsedTopic[]> {
+export async function parseSyllabusTopics(text: string, hint?: string, moduleContext?: string, reasoningTier?: ReasoningTier, structureHint?: string): Promise<ParsedTopic[]> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
   const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
 
+  // If structure hint is provided, prepend it so the AI sees deterministic facts first
+  const withStructure = structureHint
+    ? `${structureHint}\n\n${userContent}`
+    : userContent;
+
   // If module context is provided, append it clearly separated in the user message
   const promptWithModules = moduleContext
-    ? `${userContent}\n\n${moduleContext}`
-    : userContent;
+    ? `${withStructure}\n\n${moduleContext}`
+    : withStructure;
 
   try {
     const { object } = await generateObject({
