@@ -144,6 +144,36 @@ export interface ParsedTopic {
   courseName: string;
 }
 
+export type ScheduleShape =
+  | "lecture"
+  | "week"
+  | "date"
+  | "module"
+  | "calendar_grid"
+  | "none";
+
+export type RowSemantics =
+  | "lecture_number"
+  | "sequence_number"
+  | "date_only"
+  | "unknown";
+
+export interface ParsedSchedule {
+  weeks: ParsedTopic[];
+  shape: ScheduleShape;
+  rowSemantics: RowSemantics;
+  hasExplicitDates: boolean;
+  hasExplicitBreakRows: boolean;
+}
+
+const parsedScheduleSchema = z.object({
+  weeks: z.array(parsedTopicSchema),
+  shape: z.enum(["lecture", "week", "date", "module", "calendar_grid", "none"]),
+  rowSemantics: z.enum(["lecture_number", "sequence_number", "date_only", "unknown"]),
+  hasExplicitDates: z.boolean(),
+  hasExplicitBreakRows: z.boolean(),
+});
+
 export function renumberSequentialWeeks(weeks: ParsedTopic[]): ParsedTopic[] {
   return [...weeks]
     .sort((a, b) => a.weekNumber - b.weekNumber)
@@ -237,9 +267,14 @@ export function needsAudit(weeks: ParsedTopic[]): boolean {
  */
 export async function auditSchedule(
   weeks: ParsedTopic[],
-  sourceText: string
+  sourceText: string,
+  rowSemantics: RowSemantics = "unknown",
 ): Promise<ParsedTopic[]> {
   const auditSchema = z.object({ weeks: z.array(parsedTopicSchema) });
+  const numberingRule =
+    rowSemantics === "lecture_number"
+      ? "CRITICAL: These rows use lecture-number semantics. Preserve the original lecture identifiers exactly. Do NOT renumber lecture ids to close gaps."
+      : "Ensure weekNumbers are sequential with no gaps — renumber if needed.";
 
   try {
     const { object } = await generateObject({
@@ -253,7 +288,7 @@ Your job is to fix the extracted schedule:
 - Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
 - Fix vague weekLabels like "Regular Class" or "TBD" — use actual topic names from the source if you can find them.
 - Remove entries that have no real topics or readings after cleanup.
-- Ensure weekNumbers are sequential with no gaps — renumber if needed.
+- ${numberingRule}
 - Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
 - Do NOT invent topics that aren't in the source. Only fix, never fabricate.
 - PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks — that is handled by a downstream stage.`,
@@ -670,9 +705,13 @@ export function extractScheduleFromCalendarEvents(
  * @param hint   Optional source description e.g. "pdf-table" or "html-list".
  *               Passed as a one-line prefix so the AI knows what format to expect.
  */
-export async function parseSyllabusTopics(text: string, hint?: string, reasoningTier?: ReasoningTier, structureHint?: string): Promise<ParsedTopic[]> {
+export async function parseSyllabusSchedule(
+  text: string,
+  hint?: string,
+  reasoningTier?: ReasoningTier,
+  structureHint?: string,
+): Promise<ParsedSchedule> {
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
-  const topicsSchema = z.object({ weeks: z.array(parsedTopicSchema) });
 
   // If structure hint is provided, prepend it so the AI sees deterministic facts first
   const finalPrompt = structureHint
@@ -682,10 +721,10 @@ export async function parseSyllabusTopics(text: string, hint?: string, reasoning
   try {
     const { object } = await generateObject({
       ...modelConfig(reasoningTier ?? "high"),
-      schema: topicsSchema,
+      schema: parsedScheduleSchema,
       system: `You are an expert academic content extractor. Your job is to extract the week-by-week or lecture-by-lecture learning schedule from a course syllabus.
 
-CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY present in the provided text (syllabus and/or Canvas module data). If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITH NO topic schedule AND NO Canvas module data, return {"weeks": []}. Never invent or infer topics from the course name alone.
+CRITICAL RULE — DO NOT HALLUCINATE: Only extract content that is EXPLICITLY present in the provided text (syllabus and/or Canvas module data). If the text is primarily course policies, grading breakdowns, contact info, or administrative rules WITH NO topic schedule AND NO Canvas module data, return {"weeks": [], "shape": "none", "rowSemantics": "unknown", "hasExplicitDates": false, "hasExplicitBreakRows": false}. Never invent or infer topics from the course name alone.
 
 A real schedule looks like:
 - "Week 1 (Jan 13): Introduction to Calculus, Limits"
@@ -745,16 +784,60 @@ Each week must have:
 - notes: optional — for special notes like "No class — Spring Break", OR "No topics listed — class meeting date" for date-only sessions
 - courseName: exact course name/code from the syllabus header
 
-If you cannot find an explicit schedule, return empty weeks array.`,
+You must ALSO classify the extracted schedule metadata:
+- shape:
+  - "lecture" = rows are individual numbered lectures or clearly one lecture per row
+  - "week" = rows are weekly entries
+  - "date" = rows are date-based sessions without week/lecture numbering
+  - "module" = rows are modules/units
+  - "calendar_grid" = rows come from a physical weekly calendar grid
+  - "none" = no real schedule found
+- rowSemantics:
+  - "lecture_number" = weekNumber is a lecture identifier
+  - "sequence_number" = weekNumber is just sequential row order / week order
+  - "date_only" = rows are primarily date-based and weekNumber is only sequential
+  - "unknown" = no reliable row semantics
+- hasExplicitDates = true only when the source explicitly gives actual meeting/week dates
+- hasExplicitBreakRows = true only when the source explicitly includes break/no-class rows
+
+Decision rules:
+- lecture + numbered lecture rows => rowSemantics = "lecture_number"
+- week, module, calendar_grid, and most ordered tables/lists => rowSemantics = "sequence_number"
+- pure date/session lists without lecture/week numbering => rowSemantics = "date_only"
+- If no schedule exists, return shape = "none" and rowSemantics = "unknown"
+
+If you cannot find an explicit schedule, return empty weeks array with shape "none".`,
       prompt: finalPrompt,
       abortSignal: AbortSignal.timeout(120_000),
       maxRetries: 1,
     });
 
-    return object.weeks as ParsedTopic[];
+    return {
+      weeks: object.weeks as ParsedTopic[],
+      shape: object.shape,
+      rowSemantics: object.rowSemantics,
+      hasExplicitDates: object.hasExplicitDates,
+      hasExplicitBreakRows: object.hasExplicitBreakRows,
+    };
   } catch {
-    return [];
+    return {
+      weeks: [],
+      shape: "none",
+      rowSemantics: "unknown",
+      hasExplicitDates: false,
+      hasExplicitBreakRows: false,
+    };
   }
+}
+
+export async function parseSyllabusTopics(
+  text: string,
+  hint?: string,
+  reasoningTier?: ReasoningTier,
+  structureHint?: string,
+): Promise<ParsedTopic[]> {
+  const schedule = await parseSyllabusSchedule(text, hint, reasoningTier, structureHint);
+  return schedule.weeks;
 }
 
 // ─── Shared Helpers (used by both route.ts and topic-pipeline.ts) ─────────────

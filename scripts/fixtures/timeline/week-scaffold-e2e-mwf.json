@@ -4,6 +4,7 @@
   "description": "End-to-end scaffold path: MWF course with spring break and finals. Tests finalize (skip break repairs), scaffold-driven spine, and provenance encoding.",
   "input": {
     "courseName": "CHEM 101",
+    "rowSemantics": "sequence_number",
     "scaffoldArgs": {
       "lectureCalendar": [
         {"weekNumber": 1, "startDate": "2026-01-12", "lectures": [

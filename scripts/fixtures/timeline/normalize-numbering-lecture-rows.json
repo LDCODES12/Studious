@@ -1,0 +1,31 @@
+{
+  "kind": "normalize-numbering",
+  "name": "normalize-numbering-lecture-rows",
+  "description": "Lecture-number semantics preserve sparse lecture identifiers instead of renumbering them sequentially.",
+  "input": {
+    "rowSemantics": "lecture_number",
+    "topics": [
+      {
+        "weekNumber": 1,
+        "weekLabel": "Lecture 1",
+        "startDate": null,
+        "topics": ["Intro"],
+        "readings": [],
+        "notes": null,
+        "courseName": "X"
+      },
+      {
+        "weekNumber": 3,
+        "weekLabel": "Lecture 3",
+        "startDate": null,
+        "topics": ["Vectors"],
+        "readings": [],
+        "notes": null,
+        "courseName": "X"
+      }
+    ]
+  },
+  "expect": {
+    "weekNumbers": [1, 3]
+  }
+}

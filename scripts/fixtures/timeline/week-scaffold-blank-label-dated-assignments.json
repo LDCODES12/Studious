@@ -1,0 +1,49 @@
+{
+  "kind": "week-scaffold",
+  "name": "week-scaffold-blank-label-dated-assignments",
+  "description": "Blank-labeled recurring meetings can use the all-meetings scaffold fallback when dated coursework corroborates a weekly pattern.",
+  "input": {
+    "rowSemantics": "sequence_number",
+    "scaffoldArgs": {
+      "lectureCalendar": [],
+      "lectureCalendarSource": "none",
+      "classSchedule": {
+        "meetings": [{"label": "", "days": ["TU"], "startTime": "13:00", "endTime": "14:20"}],
+        "semesterStart": "2026-01-12",
+        "semesterEnd": "2026-02-10"
+      },
+      "termStartDate": "2026-01-12",
+      "termEndDate": "2026-02-10",
+      "syllabusEvents": [],
+      "finalExamDate": null,
+      "assignments": [
+        {"title": "Weekly reflection 1", "dueDate": "2026-01-13"},
+        {"title": "Weekly reflection 2", "dueDate": "2026-01-20"},
+        {"title": "Weekly reflection 3", "dueDate": "2026-01-27"},
+        {"title": "Weekly reflection 4", "dueDate": "2026-02-03"},
+        {"title": "Weekly reflection 5", "dueDate": "2026-02-10"}
+      ]
+    },
+    "aiTopics": [
+      {"weekNumber": 1, "weekLabel": "Week 1: Introduction", "startDate": "2026-01-13", "topics": ["Course overview"], "readings": [], "notes": null, "courseName": "SEMINAR 101"},
+      {"weekNumber": 2, "weekLabel": "Week 2: Methods", "startDate": "2026-01-20", "topics": ["Research methods"], "readings": [], "notes": null, "courseName": "SEMINAR 101"}
+    ]
+  },
+  "expect": {
+    "scaffoldWeeks": 5,
+    "preAI": {
+      "instructionalCount": 5
+    },
+    "postAI": {
+      "instructionalCount": 5,
+      "nonInstructionalCount": 0
+    },
+    "mapped": {
+      "totalRows": 5,
+      "contentRows": 2,
+      "emptyRows": 3,
+      "breakRows": 0,
+      "allDated": true
+    }
+  }
+}

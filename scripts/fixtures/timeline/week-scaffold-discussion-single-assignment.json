@@ -1,0 +1,28 @@
+{
+  "kind": "week-scaffold",
+  "name": "week-scaffold-discussion-single-assignment",
+  "description": "A discussion-only course with a single dated assignment does not establish a recurring pattern and should not build a scaffold.",
+  "input": {
+    "rowSemantics": "sequence_number",
+    "scaffoldArgs": {
+      "lectureCalendar": [],
+      "lectureCalendarSource": "none",
+      "classSchedule": {
+        "meetings": [{"label": "Discussion", "days": ["TH"], "startTime": "13:00", "endTime": "14:20"}],
+        "semesterStart": "2026-01-12",
+        "semesterEnd": "2026-03-12"
+      },
+      "termStartDate": "2026-01-12",
+      "termEndDate": "2026-03-12",
+      "syllabusEvents": [],
+      "finalExamDate": null,
+      "assignments": [
+        {"title": "Final Paper", "dueDate": "2026-03-10"}
+      ]
+    },
+    "aiTopics": null
+  },
+  "expect": {
+    "scaffoldWeeks": 0
+  }
+}

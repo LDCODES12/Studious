@@ -1,0 +1,32 @@
+{
+  "kind": "lecture-calendar",
+  "name": "lecture-calendar-blank-label-assessment-table",
+  "description": "A dated assessment table must not count as explicit schedule evidence for blank-labeled meetings.",
+  "input": {
+    "classSchedule": {
+      "meetings": [
+        {
+          "days": ["MO", "WE", "FR"],
+          "label": "",
+          "startTime": "09:00",
+          "endTime": "09:50",
+          "location": "Louderman 458"
+        }
+      ]
+    },
+    "termStartDate": "2026-01-01",
+    "termEndDate": "2026-05-01",
+    "assignments": [],
+    "syllabusEvents": [],
+    "candidates": [
+      {
+        "label": "quiz-table",
+        "score": 5,
+        "text": "Week\tDate\tQuiz\n1\tJan 12\tQuiz 1\n2\tJan 19\tQuiz 2"
+      }
+    ]
+  },
+  "expect": {
+    "source": "none"
+  }
+}

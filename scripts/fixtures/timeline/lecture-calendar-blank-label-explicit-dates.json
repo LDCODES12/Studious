@@ -1,0 +1,33 @@
+{
+  "kind": "lecture-calendar",
+  "name": "lecture-calendar-blank-label-explicit-dates",
+  "description": "Blank-labeled recurring meetings are promoted to lecture-calendar evidence only when explicit schedule dates corroborate the pattern.",
+  "input": {
+    "classSchedule": {
+      "meetings": [
+        {
+          "days": ["MO", "WE", "FR"],
+          "label": "",
+          "startTime": "09:00",
+          "endTime": "09:50",
+          "location": "Louderman 458"
+        }
+      ]
+    },
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-05-15",
+    "assignments": [],
+    "syllabusEvents": [],
+    "candidates": [
+      {
+        "label": "weekly-schedule",
+        "score": 5,
+        "text": "Weekly Schedule\nMon Jan 12 Introduction\nWed Jan 14 Foundations\nFri Jan 16 Applications\nMon Jan 19 Continuity\nWed Jan 21 Derivatives"
+      }
+    ]
+  },
+  "expect": {
+    "source": "term-start",
+    "firstWeekStart": "2026-01-12"
+  }
+}

@@ -3,6 +3,7 @@
   "name": "week-scaffold-mwf-with-break",
   "description": "Standard MWF course over 16 weeks with a spring break AI label and finals week",
   "input": {
+    "rowSemantics": "sequence_number",
     "scaffoldArgs": {
       "lectureCalendar": [
         {"weekNumber": 1, "startDate": "2026-01-12", "lectures": [

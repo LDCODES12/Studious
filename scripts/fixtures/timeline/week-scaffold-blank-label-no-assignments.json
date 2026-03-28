@@ -1,38 +1,25 @@
 {
-  "kind": "week-scaffold",
+  "kind": "lecture-calendar",
   "name": "week-scaffold-blank-label-no-assignments",
-  "description": "Course with blank-labeled meetings (lecture calendar exists as Tier 1 evidence) and no assignments — scaffold IS built because lecture calendar is structural evidence of weekly regularity. 3 weeks from lecture calendar, capped by termEndDate.",
+  "description": "Blank-labeled meetings with no assignments are ambiguous and should not be promoted to lecture-calendar evidence.",
   "input": {
-    "scaffoldArgs": {
-      "lectureCalendar": [
-        {"weekNumber": 1, "startDate": "2026-01-12", "lectures": [
-          {"lectureNumber": 1, "date": "2026-01-12", "dayOfWeek": "MO"}
-        ]},
-        {"weekNumber": 2, "startDate": "2026-01-19", "lectures": [
-          {"lectureNumber": 2, "date": "2026-01-19", "dayOfWeek": "MO"}
-        ]},
-        {"weekNumber": 3, "startDate": "2026-01-26", "lectures": [
-          {"lectureNumber": 3, "date": "2026-01-26", "dayOfWeek": "MO"}
-        ]}
-      ],
-      "lectureCalendarSource": "term-start",
-      "classSchedule": {
-        "meetings": [{"label": "", "days": ["MO"], "startTime": "15:00", "endTime": "16:00"}],
-        "semesterStart": "2025-12-26",
-        "semesterEnd": "2026-02-06"
-      },
-      "termStartDate": "2025-12-26",
-      "termEndDate": "2026-02-06",
-      "syllabusEvents": [],
-      "finalExamDate": null,
-      "assignments": []
+    "classSchedule": {
+      "meetings": [
+        {
+          "days": ["MO"],
+          "label": "",
+          "startTime": "15:00",
+          "endTime": "16:00",
+          "location": "Seminar Room"
+        }
+      ]
     },
-    "aiTopics": null
+    "termStartDate": "2025-12-26",
+    "termEndDate": "2026-02-06",
+    "assignments": [],
+    "syllabusEvents": []
   },
   "expect": {
-    "scaffoldWeeks": 4,
-    "preAI": {
-      "instructionalCount": 4
-    }
+    "source": "none"
   }
 }

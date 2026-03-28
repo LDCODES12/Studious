@@ -1,0 +1,62 @@
+{
+  "kind": "week-scaffold",
+  "name": "week-scaffold-lecture-row-semantics",
+  "description": "Lecture-based AI output maps by lecture slot semantics instead of row-count inference.",
+  "input": {
+    "rowSemantics": "lecture_number",
+    "scaffoldArgs": {
+      "lectureCalendar": [
+        {"weekNumber": 1, "startDate": "2026-01-12", "lectures": [
+          {"lectureNumber": 1, "date": "2026-01-12", "dayOfWeek": "MO"},
+          {"lectureNumber": 2, "date": "2026-01-14", "dayOfWeek": "WE"},
+          {"lectureNumber": 3, "date": "2026-01-16", "dayOfWeek": "FR"}
+        ]},
+        {"weekNumber": 2, "startDate": "2026-01-19", "lectures": [
+          {"lectureNumber": 4, "date": "2026-01-19", "dayOfWeek": "MO"},
+          {"lectureNumber": 5, "date": "2026-01-21", "dayOfWeek": "WE"},
+          {"lectureNumber": 6, "date": "2026-01-23", "dayOfWeek": "FR"}
+        ]},
+        {"weekNumber": 3, "startDate": "2026-01-26", "lectures": [
+          {"lectureNumber": 7, "date": "2026-01-26", "dayOfWeek": "MO"},
+          {"lectureNumber": 8, "date": "2026-01-28", "dayOfWeek": "WE"},
+          {"lectureNumber": 9, "date": "2026-01-30", "dayOfWeek": "FR"}
+        ]}
+      ],
+      "lectureCalendarSource": "term-start",
+      "classSchedule": {
+        "meetings": [{"label": "Lecture", "days": ["MO", "WE", "FR"], "startTime": "09:00", "endTime": "09:50"}],
+        "semesterStart": "2026-01-12",
+        "semesterEnd": "2026-01-30"
+      },
+      "termStartDate": "2026-01-12",
+      "termEndDate": "2026-01-30",
+      "syllabusEvents": [],
+      "finalExamDate": null,
+      "assignments": []
+    },
+    "aiTopics": [
+      {"weekNumber": 1, "weekLabel": "Lecture 1: Introduction", "startDate": null, "topics": ["Introduction"], "readings": [], "notes": null, "courseName": "PHYS 101"},
+      {"weekNumber": 2, "weekLabel": "Lecture 2: Vectors", "startDate": null, "topics": ["Vectors"], "readings": [], "notes": null, "courseName": "PHYS 101"},
+      {"weekNumber": 3, "weekLabel": "Lecture 3: Motion", "startDate": null, "topics": ["Motion"], "readings": [], "notes": null, "courseName": "PHYS 101"},
+      {"weekNumber": 4, "weekLabel": "Lecture 4: Forces", "startDate": null, "topics": ["Forces"], "readings": [], "notes": null, "courseName": "PHYS 101"},
+      {"weekNumber": 5, "weekLabel": "Lecture 5: Energy", "startDate": null, "topics": ["Energy"], "readings": [], "notes": null, "courseName": "PHYS 101"}
+    ]
+  },
+  "expect": {
+    "scaffoldWeeks": 3,
+    "preAI": {
+      "instructionalCount": 3
+    },
+    "postAI": {
+      "instructionalCount": 3,
+      "nonInstructionalCount": 0
+    },
+    "mapped": {
+      "totalRows": 3,
+      "contentRows": 2,
+      "emptyRows": 1,
+      "breakRows": 0,
+      "allDated": true
+    }
+  }
+}

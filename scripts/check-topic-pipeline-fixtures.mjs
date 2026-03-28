@@ -165,7 +165,12 @@ function runWeekScaffoldFixture(fixture) {
 
   // Content mapping
   if (fixture.input.aiTopics && fixture.expect.mapped) {
-    const mapped = mapContentOntoScaffold(scaffold, fixture.input.aiTopics, fixture.input.scaffoldArgs.courseName ?? "TestCourse");
+    const mapped = mapContentOntoScaffold(
+      scaffold,
+      fixture.input.aiTopics,
+      fixture.input.scaffoldArgs.courseName ?? "TestCourse",
+      fixture.input.rowSemantics ?? "sequence_number",
+    );
     if (fixture.expect.mapped.totalRows != null) {
       assert(mapped.length === fixture.expect.mapped.totalRows, `${fixture.name}: mapped rows: expected ${fixture.expect.mapped.totalRows}, got ${mapped.length}`);
     }
@@ -207,7 +212,12 @@ function runScaffoldE2EFixture(fixture) {
 
   // Stage 3c: classify + map
   classifyAnchorsFromAI(scaffold, fixture.input.aiTopics);
-  const mapped = mapContentOntoScaffold(scaffold, fixture.input.aiTopics, fixture.input.courseName);
+  const mapped = mapContentOntoScaffold(
+    scaffold,
+    fixture.input.aiTopics,
+    fixture.input.courseName,
+    fixture.input.rowSemantics ?? "sequence_number",
+  );
 
   // Stage 6: finalize (with usedWeekScaffold = true)
   const finalized = finalize({
@@ -328,12 +338,21 @@ function runScaffoldE2EFixture(fixture) {
 }
 
 function runLectureCalendarFixture(fixture) {
+  const scheduleEvidence = fixture.input.scheduleEvidence
+    ?? (fixture.input.candidates
+      ? timelinePipelineInternals.extractScheduleEvidence(
+        fixture.input.candidates,
+        fixture.input.termStartDate,
+        fixture.input.termEndDate,
+      )
+      : undefined);
   const result = timelinePipelineInternals.buildLectureCalendar(
     fixture.input.classSchedule,
     fixture.input.termStartDate,
     fixture.input.termEndDate,
     fixture.input.assignments,
     fixture.input.syllabusEvents ?? [],
+    scheduleEvidence,
   );
 
   if (fixture.expect.source) {
@@ -347,6 +366,21 @@ function runLectureCalendarFixture(fixture) {
     for (const date of fixture.expect.weeksInclude) {
       assert(starts.includes(date), `${fixture.name}: missing lecture-calendar week ${date}`);
     }
+  }
+}
+
+function runNormalizeNumberingFixture(fixture) {
+  const result = timelinePipelineInternals.normalizeExtractedTopicNumbers(
+    fixture.input.topics,
+    fixture.input.rowSemantics,
+  );
+
+  if (fixture.expect.weekNumbers) {
+    const actual = result.map((topic) => topic.weekNumber);
+    assert(
+      JSON.stringify(actual) === JSON.stringify(fixture.expect.weekNumbers),
+      `${fixture.name}: expected week numbers ${JSON.stringify(fixture.expect.weekNumbers)}, got ${JSON.stringify(actual)}`,
+    );
   }
 }
 
@@ -364,6 +398,8 @@ async function main() {
       runScaffoldFixture(fixture);
     } else if (fixture.kind === "lecture-calendar") {
       runLectureCalendarFixture(fixture);
+    } else if (fixture.kind === "normalize-numbering") {
+      runNormalizeNumberingFixture(fixture);
     } else if (fixture.kind === "week-scaffold") {
       runWeekScaffoldFixture(fixture);
     } else if (fixture.kind === "scaffold-e2e") {
