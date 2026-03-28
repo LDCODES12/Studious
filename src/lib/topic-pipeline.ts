@@ -55,6 +55,7 @@ export interface ClassScheduleInfo {
   meetings: { label: string; days: string[]; startTime: string; endTime: string }[];
   semesterStart?: string | null;
   semesterEnd?: string | null;
+  finalExamDate?: string | null;
 }
 
 export interface AssignmentDateInfo {
@@ -132,6 +133,9 @@ export interface PipelineDebug {
   timelineSource?: string;
   contentSource?: string;
   lectureCalendarSource?: string;
+  usedWeekScaffold?: boolean;
+  scaffoldWeeks?: number;
+  aiSparseAgainstWeeklyScaffold?: boolean;
 }
 
 export interface FinalizeTimelineResult {
@@ -439,6 +443,7 @@ interface ExtractionResult {
 function buildStructureHint(
   assignments: AssignmentDateInfo[],
   lectureCalendar: WeekDateRange[],
+  weekScaffold?: ScaffoldWeek[] | null,
 ): string {
   // Extract lecture numbers from assignment titles
   const lectureNums = new Set<number>();
@@ -454,40 +459,53 @@ function buildStructureHint(
     }
   }
 
-  if (lectureNums.size < 5) return "";
+  const lines: string[] = [];
 
-  const sorted = [...lectureNums].sort((a, b) => a - b);
-  const min = sorted[0];
-  const max = sorted[sorted.length - 1];
+  // Lecture-number hint (requires >= 5 numbered assignments)
+  if (lectureNums.size >= 5) {
+    const sorted = [...lectureNums].sort((a, b) => a - b);
+    const min = sorted[0];
+    const max = sorted[sorted.length - 1];
 
-  // Get date range from dated assignments
-  const dated = assignments
-    .filter((a) => a.dueDate)
-    .map((a) => a.dueDate!.slice(0, 10))
-    .sort();
-  const firstDate = dated[0] ?? "";
-  const lastDate = dated[dated.length - 1] ?? "";
+    const dated = assignments
+      .filter((a) => a.dueDate)
+      .map((a) => a.dueDate!.slice(0, 10))
+      .sort();
+    const firstDate = dated[0] ?? "";
+    const lastDate = dated[dated.length - 1] ?? "";
 
-  const weekCount = lectureCalendar.length;
-  const lecturesPerWeek = weekCount > 0
-    ? Math.round(lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0) / weekCount)
-    : 0;
+    const weekCount = lectureCalendar.length;
+    const lecturesPerWeek = weekCount > 0
+      ? Math.round(lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0) / weekCount)
+      : 0;
 
-  const lines: string[] = [
-    "--- COURSE STRUCTURE (from Canvas assignment data — ground truth) ---",
-    `Assignment data shows ${max} individually-numbered lectures (Lecture ${min} – Lecture ${max}).`,
-  ];
+    lines.push("--- COURSE STRUCTURE (from Canvas assignment data — ground truth) ---");
+    lines.push(`Assignment data shows ${max} individually-numbered lectures (Lecture ${min} – Lecture ${max}).`);
 
-  if (firstDate && lastDate) {
-    lines.push(`Course spans ${firstDate} to ${lastDate} (~${weekCount || "unknown"} weeks).`);
+    if (firstDate && lastDate) {
+      lines.push(`Course spans ${firstDate} to ${lastDate} (~${weekCount || "unknown"} weeks).`);
+    }
+
+    if (lecturesPerWeek > 0) {
+      lines.push(`Lecture calendar: ${weekCount} weeks, ~${lecturesPerWeek} lectures per week.`);
+    }
+
+    lines.push("→ Extract ONE entry per individual lecture. Do NOT collapse lectures into units or modules.");
+    lines.push("---");
   }
 
-  if (lecturesPerWeek > 0) {
-    lines.push(`Lecture calendar: ${weekCount} weeks, ~${lecturesPerWeek} lectures per week.`);
+  // Calendar context hint (independent — works for lab/studio/non-numbered courses too)
+  if (weekScaffold && weekScaffold.length > 0) {
+    const firstMonday = weekScaffold[0].weekStartDate;
+    const lastMonday = weekScaffold[weekScaffold.length - 1].weekStartDate;
+    if (lines.length > 0) lines.push("");
+    lines.push("--- CALENDAR CONTEXT ---");
+    lines.push(`This course has ${weekScaffold.length} calendar weeks from ${firstMonday} to ${lastMonday}.`);
+    lines.push("If the syllabus shows break weeks (Spring Break, Reading Days, holidays, etc.),");
+    lines.push("include them as separate rows with appropriate labels and dates.");
+    lines.push("These structural signals are used by the system.");
+    lines.push("---");
   }
-
-  lines.push("→ Extract ONE entry per individual lecture. Do NOT collapse lectures into units or modules.");
-  lines.push("---");
 
   return lines.join("\n");
 }
@@ -1062,7 +1080,39 @@ function buildTimelineSpine(args: {
   usedModuleScaffold: boolean;
   lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
   sourceRefs: { label: string; role: CandidateRole }[];
+  usedWeekScaffold?: boolean;
+  weekScaffold?: ScaffoldWeek[] | null;
 }): TimelineSpine {
+  // Scaffold-driven path: one anchor per scaffold week, derived from scaffold evidence
+  if (args.usedWeekScaffold && args.weekScaffold && args.weekScaffold.length > 0) {
+    const evidenceToAnchorType: Record<WeekEvidence, TimelineAnchorType> = {
+      explicit_noninstructional: "break",
+      explicit_instructional: "explicit_date",
+      anchored_instructional: "lecture_group",
+      syllabus_event: "lecture_group",
+      inferred_instructional: "inferred_week",
+      no_evidence: "inferred_week",
+    };
+    const evidenceToConfidence: Record<WeekEvidence, ConfidenceLevel> = {
+      explicit_noninstructional: "high",
+      explicit_instructional: "high",
+      anchored_instructional: "medium",
+      syllabus_event: "medium",
+      inferred_instructional: "low",
+      no_evidence: "low",
+    };
+    const anchors: TimelineAnchorRecord[] = args.weekScaffold.map((sw) => ({
+      sequenceNumber: sw.sequenceNumber,
+      anchorDate: sw.weekStartDate,
+      anchorType: evidenceToAnchorType[sw.evidence],
+      isInstructional: sw.isInstructional,
+      calendarConfidence: evidenceToConfidence[sw.evidence],
+      sourceRefs: args.sourceRefs,
+      notes: sw.hasFinalExam ? "Final exam scheduled" : (sw.label ?? null),
+    }));
+    return { topics: args.topics, anchors, scheduleMode: "weekly" };
+  }
+
   const scheduleMode: ScheduleMode = isSparseTimeline(args.topics)
     ? "sparse"
     : args.topics.some((topic) => Boolean(topic.startDate))
@@ -1121,6 +1171,7 @@ function mergeContentOntoSpine(args: {
   lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
   sourceRefs: { label: string; role: CandidateRole }[];
   usedModuleScaffold: boolean;
+  usedWeekScaffold?: boolean;
   validationWarnings: string[];
 }): SynthesizedTopic[] {
   return args.topics.map((topic, index) => {
@@ -1134,8 +1185,11 @@ function mergeContentOntoSpine(args: {
       notes: topic.notes ?? null,
     };
 
+    // Scaffold role from pipeline-local annotation
+    const scaffoldRole = (topic as ScaffoldAnnotatedTopic)._scaffoldRole;
+
     const hasContent = (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
-    const contentConfidence: ConfidenceLevel =
+    let contentConfidence: ConfidenceLevel =
       !hasContent
         ? "low"
         : args.contentSource !== "none"
@@ -1144,21 +1198,32 @@ function mergeContentOntoSpine(args: {
             ? "medium"
             : "low";
 
+    // Override confidence for scaffold-annotated topics
+    if (scaffoldRole === "break") contentConfidence = "high";
+    else if (scaffoldRole === "empty") contentConfidence = "low";
+
+    const provenance: Record<string, unknown> = {
+      anchorSequenceNumber: anchor.sequenceNumber,
+      anchorType: anchor.anchorType,
+      timelineSource: args.timelineSource,
+      contentSource: args.contentSource,
+      lectureCalendarSource: args.lectureCalendarSource ?? "none",
+      sourceRefs: anchor.sourceRefs,
+      usedModuleScaffold: args.usedModuleScaffold,
+      validationWarnings: args.validationWarnings,
+    };
+
+    if (scaffoldRole) {
+      provenance.usedWeekScaffold = true;
+      provenance.scaffoldRole = scaffoldRole;
+    }
+
     return {
       ...topic,
       dateConfidence: anchor.calendarConfidence,
       contentConfidence,
       scheduleMode: args.spine.scheduleMode,
-      provenance: {
-        anchorSequenceNumber: anchor.sequenceNumber,
-        anchorType: anchor.anchorType,
-        timelineSource: args.timelineSource,
-        contentSource: args.contentSource,
-        lectureCalendarSource: args.lectureCalendarSource ?? "none",
-        sourceRefs: anchor.sourceRefs,
-        usedModuleScaffold: args.usedModuleScaffold,
-        validationWarnings: args.validationWarnings,
-      },
+      provenance,
     };
   });
 }
@@ -1204,24 +1269,8 @@ function buildLectureCalendar(
     return { weeks: [], source: "none" };
   }
 
-  // Canvas termStartAt is often the academic period boundary (e.g. winter break),
-  // not the first day of classes. Use the earliest assignment date to clamp:
-  // if termStart is >21 days before the first assignment, use the assignment date.
-  const datedAssignments = assignments
-    .filter((a) => a.dueDate)
-    .map((a) => a.dueDate!.slice(0, 10))
-    .sort();
-  if (datedAssignments.length > 0) {
-    const firstAssignment = new Date(datedAssignments[0] + "T12:00:00");
-    const termStart = new Date(termStartDate + "T12:00:00");
-    const gapDays = (firstAssignment.getTime() - termStart.getTime()) / (1000 * 60 * 60 * 24);
-    if (gapDays > 21) {
-      // Term start is too early (likely includes break) — use 1 week before first assignment
-      const adjusted = new Date(firstAssignment);
-      adjusted.setDate(adjusted.getDate() - 7);
-      termStartDate = adjusted.toISOString().slice(0, 10);
-    }
-  }
+  // Clamp term start if it's too early (includes winter break)
+  termStartDate = clampTermStart(termStartDate, assignments);
 
   // Find lecture meetings (not labs, discussions, etc.)
   // Labels may be freeform from AI extraction (e.g. "Lecture (Section 1)"),
@@ -1532,6 +1581,402 @@ function scoreLectureSeries(allLectures: LectureDate[], anchors: LectureAnchor[]
   }
 
   return total;
+}
+
+// ─── Stage 2c: WEEK SCAFFOLD (anchor-first weekly timeline) ─────────────────
+
+type WeekEvidence =
+  | "explicit_noninstructional"   // E1: AI break label (the only way isInstructional flips)
+  | "explicit_instructional"      // E1: AI dated content row
+  | "anchored_instructional"      // E2: lecture-anchors calendar
+  | "syllabus_event"              // E2: syllabusEvents exam/quiz in week
+  | "inferred_instructional"      // E3: recurring class schedule pattern
+  | "no_evidence";                // E3: week in term range, no signals
+
+interface ScaffoldWeek {
+  sequenceNumber: number;         // 1-based
+  weekStartDate: string;          // YYYY-MM-DD (Monday of week)
+  isInstructional: boolean;       // true unless E1 AI break label says otherwise
+  evidence: WeekEvidence;         // strongest evidence for classification
+  label?: string;                 // Only from E1 evidence (AI break labels)
+  lectureSlots: LectureDate[];    // from lecture calendar (may include non-lecture meetings via all-meetings fallback)
+  hasFinalExam: boolean;          // metadata: finals scheduled this week (does NOT flip isInstructional)
+  hasAssignmentGap: boolean;      // corroborating signal (metadata only)
+}
+
+/**
+ * Clamp term start date if it's >21 days before the first assignment
+ * (Canvas termStartAt often includes winter break).
+ * Shared by buildLectureCalendar and buildCalendarFromAllMeetings.
+ */
+function clampTermStart(termStartDate: string, assignments: AssignmentDateInfo[]): string {
+  const datedAssignments = assignments
+    .filter((a) => a.dueDate)
+    .map((a) => a.dueDate!.slice(0, 10))
+    .sort();
+  if (datedAssignments.length > 0) {
+    const firstAssignment = new Date(datedAssignments[0] + "T12:00:00");
+    const termStart = new Date(termStartDate + "T12:00:00");
+    const gapDays = (firstAssignment.getTime() - termStart.getTime()) / (1000 * 60 * 60 * 24);
+    if (gapDays > 21) {
+      const adjusted = new Date(firstAssignment);
+      adjusted.setDate(adjusted.getDate() - 7);
+      return adjusted.toISOString().slice(0, 10);
+    }
+  }
+  return termStartDate;
+}
+
+/**
+ * Build an instructional calendar from ALL meeting types (labs, studios, seminars).
+ * Fallback for courses where buildLectureCalendar returns empty because meetings
+ * aren't labeled "lecture".
+ */
+function buildCalendarFromAllMeetings(
+  classSchedule: ClassScheduleInfo,
+  termStartDate: string,
+  termEndDate: string | null,
+  assignments: AssignmentDateInfo[],
+): WeekDateRange[] {
+  const clamped = clampTermStart(termStartDate, assignments);
+  const allDayCodes = new Set<number>();
+  for (const m of classSchedule.meetings) {
+    for (const d of m.days) {
+      const code = DAY_CODES[d.toUpperCase()];
+      if (code !== undefined) allDayCodes.add(code);
+    }
+  }
+  const sortedDays = [...allDayCodes].sort((a, b) => a - b);
+  if (sortedDays.length === 0) return [];
+
+  const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  const parsedStart = new Date(clamped + "T12:00:00");
+  const end = termEndDate ? new Date(termEndDate + "T12:00:00") : new Date(parsedStart);
+  if (!termEndDate) end.setDate(end.getDate() + 16 * 7);
+
+  // For all-meetings fallback, fill the term range without overshooting.
+  const termWeeks = Math.max(1, Math.ceil((end.getTime() - parsedStart.getTime()) / (7 * 24 * 60 * 60 * 1000)));
+  const estimatedCount = Math.max(8, termWeeks * sortedDays.length);
+  const rawLectures = generateLectureSeries(
+    firstLectureOnOrAfter(parsedStart, sortedDays), sortedDays, end, estimatedCount, DAY_NAMES,
+  );
+  // Trim to term end — generateLectureSeries overshoots via hardEnd + 28 days
+  const endStr = end.toISOString().slice(0, 10);
+  const allLectures = rawLectures.filter((lec) => lec.date <= endStr);
+  if (allLectures.length === 0) return [];
+
+  const weekMap = new Map<string, LectureDate[]>();
+  for (const lec of allLectures) {
+    const lecDate = new Date(lec.date + "T12:00:00");
+    const dayOfWeek = lecDate.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(lecDate);
+    monday.setDate(monday.getDate() + mondayOffset);
+    const mondayStr = monday.toISOString().slice(0, 10);
+    if (!weekMap.has(mondayStr)) weekMap.set(mondayStr, []);
+    weekMap.get(mondayStr)!.push(lec);
+  }
+
+  const weeks: WeekDateRange[] = [];
+  const sortedMondays = [...weekMap.keys()].sort();
+  for (let i = 0; i < sortedMondays.length; i++) {
+    weeks.push({ weekNumber: i + 1, startDate: sortedMondays[i], lectures: weekMap.get(sortedMondays[i])! });
+  }
+  return weeks;
+}
+
+/** Compute Monday of the week containing a given YYYY-MM-DD date. */
+function mondayOfWeek(dateStr: string): string {
+  const d = new Date(dateStr + "T12:00:00");
+  const dayOfWeek = d.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  const monday = new Date(d);
+  monday.setDate(monday.getDate() + mondayOffset);
+  return monday.toISOString().slice(0, 10);
+}
+
+/**
+ * Build the authoritative weekly scaffold from deterministic data.
+ * Every calendar week from term start to term end gets a ScaffoldWeek.
+ * Built BEFORE AI extraction — no AI results used here.
+ */
+function buildWeekScaffold(args: {
+  lectureCalendar: WeekDateRange[];
+  lectureCalendarSource: "none" | "term-start" | "lecture-anchors";
+  classSchedule: ClassScheduleInfo;
+  termStartDate: string;
+  termEndDate: string | null;
+  syllabusEvents: SyllabusEventInfo[];
+  finalExamDate: string | null;
+  assignments: AssignmentDateInfo[];
+}): ScaffoldWeek[] {
+  // Resolve instructional calendar (fallback to all meetings if lecture-only is empty)
+  let instructionalCalendar = args.lectureCalendar;
+  let calendarSource = args.lectureCalendarSource;
+
+  if (instructionalCalendar.length === 0 && args.classSchedule.meetings.length > 0) {
+    instructionalCalendar = buildCalendarFromAllMeetings(
+      args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
+    );
+    calendarSource = "term-start";
+  }
+
+  if (instructionalCalendar.length === 0) return [];
+
+  // Step 1: Generate all calendar weeks
+  const calendarMondays = instructionalCalendar.map((w) => w.startDate);
+  let firstMonday = calendarMondays[0];
+  let lastMonday = calendarMondays[calendarMondays.length - 1];
+
+  // Extend to cover finalExamDate and termEndDate
+  if (args.finalExamDate) {
+    const finalsMonday = mondayOfWeek(args.finalExamDate);
+    if (finalsMonday > lastMonday) lastMonday = finalsMonday;
+  }
+  if (args.termEndDate) {
+    const termEndMonday = mondayOfWeek(args.termEndDate);
+    if (termEndMonday > lastMonday) lastMonday = termEndMonday;
+  }
+
+  // Generate every Monday from first to last
+  const scaffold: ScaffoldWeek[] = [];
+  let cursor = new Date(firstMonday + "T12:00:00");
+  const lastDate = new Date(lastMonday + "T12:00:00");
+  let seq = 1;
+
+  while (cursor <= lastDate) {
+    const mondayStr = cursor.toISOString().slice(0, 10);
+    scaffold.push({
+      sequenceNumber: seq++,
+      weekStartDate: mondayStr,
+      isInstructional: true,
+      evidence: "no_evidence",
+      label: undefined,
+      lectureSlots: [],
+      hasFinalExam: false,
+      hasAssignmentGap: false,
+    });
+    cursor.setDate(cursor.getDate() + 7);
+  }
+
+  // Step 2: Overlay lecture calendar slots
+  const weekByMonday = new Map(scaffold.map((w) => [w.weekStartDate, w]));
+  for (const calWeek of instructionalCalendar) {
+    const sw = weekByMonday.get(calWeek.startDate);
+    if (sw) {
+      sw.lectureSlots = calWeek.lectures;
+      sw.evidence = calendarSource === "lecture-anchors" ? "anchored_instructional" : "inferred_instructional";
+      sw.isInstructional = true;
+    }
+  }
+
+  // Step 3: Apply finalExamDate (metadata, does NOT flip isInstructional)
+  if (args.finalExamDate) {
+    const finalsMonday = mondayOfWeek(args.finalExamDate);
+    const sw = weekByMonday.get(finalsMonday);
+    if (sw) sw.hasFinalExam = true;
+  }
+
+  // Step 4: Apply syllabusEvents (E2)
+  for (const evt of args.syllabusEvents) {
+    if (evt.type !== "exam" || !evt.dueDate) continue;
+    const evtMonday = mondayOfWeek(evt.dueDate.slice(0, 10));
+    const sw = weekByMonday.get(evtMonday);
+    if (!sw) continue;
+
+    if (/\bfinal\b/i.test(evt.title) && !sw.hasFinalExam) {
+      sw.hasFinalExam = true;
+    }
+    // Strengthen evidence if currently weaker than E2
+    if (sw.evidence === "no_evidence" || sw.evidence === "inferred_instructional") {
+      sw.evidence = "syllabus_event";
+    }
+  }
+
+  // Step 5: Compute assignment gaps (corroborating metadata only)
+  const assignmentMondays = new Set<string>();
+  for (const a of args.assignments) {
+    if (a.dueDate) assignmentMondays.add(mondayOfWeek(a.dueDate.slice(0, 10)));
+  }
+  for (let i = 1; i < scaffold.length - 1; i++) {
+    const prev = scaffold[i - 1].weekStartDate;
+    const curr = scaffold[i].weekStartDate;
+    const next = scaffold[i + 1].weekStartDate;
+    if (!assignmentMondays.has(curr) && assignmentMondays.has(prev) && assignmentMondays.has(next)) {
+      scaffold[i].hasAssignmentGap = true;
+    }
+  }
+
+  return scaffold;
+}
+
+/**
+ * Post-AI reclassification: update scaffold weeks using AI extraction evidence.
+ * This is the ONLY way a week flips from instructional to non-instructional.
+ */
+function classifyAnchorsFromAI(
+  scaffold: ScaffoldWeek[],
+  aiTopics: ParsedTopic[],
+): void {
+  const weekByMonday = new Map(scaffold.map((w) => [w.weekStartDate, w]));
+
+  for (const topic of aiTopics) {
+    const dateStr = topic.startDate;
+    if (!dateStr) continue;
+    const monday = mondayOfWeek(dateStr);
+    const sw = weekByMonday.get(monday);
+    if (!sw) continue;
+
+    if (isBreakTopic(topic)) {
+      // E1: AI break label — the ONLY gate for flipping isInstructional
+      sw.evidence = "explicit_noninstructional";
+      sw.isInstructional = false;
+      sw.label = topic.weekLabel;
+    } else if (hasInstructionalContent(topic)) {
+      // E1: AI dated content — supersedes E2/E3 evidence
+      if (sw.evidence !== "explicit_noninstructional" && sw.evidence !== "explicit_instructional") {
+        sw.evidence = "explicit_instructional";
+      }
+    }
+  }
+}
+
+/** Pipeline-local annotation — not part of shared ParsedTopic schema. */
+interface ScaffoldAnnotatedTopic extends ParsedTopic {
+  _scaffoldRole?: "content" | "break" | "empty";
+}
+
+/**
+ * Map AI-extracted content onto the scaffold, producing one ParsedTopic per scaffold week.
+ * Break rows are consumed by classifyAnchorsFromAI; content rows are mapped by lecture number or date.
+ */
+function mapContentOntoScaffold(
+  scaffold: ScaffoldWeek[],
+  aiTopics: ParsedTopic[],
+  courseName: string,
+): ScaffoldAnnotatedTopic[] {
+  // Step 1: Filter to content-only topics (breaks already consumed by classifyAnchorsFromAI)
+  const contentTopics = aiTopics.filter((t) => !isBreakTopic(t));
+
+  // Step 2: Build mappings
+  // Scaffold sequence number → scaffold week (weekNumber in week-based AI output = sequence number)
+  const seqToWeek = new Map(scaffold.map((w) => [w.sequenceNumber, w]));
+  // Lecture number → scaffold week (for lecture-based AI output)
+  const lectureNumToWeek = new Map<number, ScaffoldWeek>();
+  for (const sw of scaffold) {
+    for (const slot of sw.lectureSlots) {
+      lectureNumToWeek.set(slot.lectureNumber, sw);
+    }
+  }
+  // Monday → scaffold week
+  const weekByMonday = new Map(scaffold.map((w) => [w.weekStartDate, w]));
+
+  // Detect whether AI output is lecture-level or week-level using the same
+  // heuristic as groupLecturesIntoWeeks: if significantly more topics than
+  // scaffold weeks, weekNumber means lecture number, not week number.
+  const isLectureLevel = contentTopics.length > scaffold.length * 1.3;
+
+  // Step 3: Map each content topic (date-first, then number-based for undated)
+  const mapped = new Map<number, ParsedTopic[]>(); // sequenceNumber → topics
+
+  for (const topic of contentTopics) {
+    let targetWeek: ScaffoldWeek | undefined;
+
+    // By containing week (preferred — works for both week-based and lecture-based AI output)
+    if (topic.startDate) {
+      const monday = mondayOfWeek(topic.startDate);
+      targetWeek = weekByMonday.get(monday);
+    }
+
+    // For undated rows: use the discriminator to pick the right mapping.
+    // Lecture-level output: weekNumber is a lecture number → map via lecture slots.
+    // Week-level output: weekNumber is a sequence number → map via scaffold index.
+    if (!targetWeek) {
+      targetWeek = isLectureLevel
+        ? (lectureNumToWeek.get(topic.weekNumber) ?? seqToWeek.get(topic.weekNumber))
+        : (seqToWeek.get(topic.weekNumber) ?? lectureNumToWeek.get(topic.weekNumber));
+    }
+
+    // Nearest week by date (fallback for unmatched)
+    if (!targetWeek && topic.startDate) {
+      const topicDate = new Date(topic.startDate + "T12:00:00").getTime();
+      let minDist = Infinity;
+      for (const sw of scaffold) {
+        const swDate = new Date(sw.weekStartDate + "T12:00:00").getTime();
+        const dist = Math.abs(topicDate - swDate);
+        if (dist < minDist) { minDist = dist; targetWeek = sw; }
+      }
+      if (targetWeek) {
+        console.log(`[pipeline] ${courseName}: mapContentOntoScaffold — unmatched topic "${topic.weekLabel}" mapped to nearest week ${targetWeek.weekStartDate}`);
+      }
+    }
+
+    // Last resort: append to last instructional week
+    if (!targetWeek) {
+      targetWeek = [...scaffold].reverse().find((sw) => sw.isInstructional);
+      if (!targetWeek) targetWeek = scaffold[scaffold.length - 1];
+      console.warn(`[pipeline] ${courseName}: mapContentOntoScaffold — topic "${topic.weekLabel}" has no date, appended to week ${targetWeek.weekStartDate}`);
+    }
+
+    if (!mapped.has(targetWeek.sequenceNumber)) mapped.set(targetWeek.sequenceNumber, []);
+    mapped.get(targetWeek.sequenceNumber)!.push(topic);
+  }
+
+  // Step 4: Emit one ParsedTopic per scaffold week
+  const result: ScaffoldAnnotatedTopic[] = [];
+
+  for (const sw of scaffold) {
+    const topics = mapped.get(sw.sequenceNumber) ?? [];
+
+    if (!sw.isInstructional) {
+      // Non-instructional week (break)
+      result.push({
+        weekNumber: sw.sequenceNumber,
+        weekLabel: sw.label ?? `Week ${sw.sequenceNumber}`,
+        startDate: sw.weekStartDate,
+        topics: [],
+        readings: [],
+        notes: sw.label ?? "No class",
+        courseName,
+        _scaffoldRole: "break",
+      });
+    } else if (topics.length > 0) {
+      // Instructional week with mapped content — merge
+      const allTopics: string[] = [];
+      const allReadings: string[] = [];
+      const allNotes: string[] = [];
+      for (const t of topics) {
+        if (t.topics && t.topics.length > 0) allTopics.push(...t.topics);
+        if (t.readings) allReadings.push(...t.readings);
+        const n = normalizeNotesValue(t.notes);
+        if (n) allNotes.push(n);
+      }
+      result.push({
+        weekNumber: sw.sequenceNumber,
+        weekLabel: topics[0].weekLabel || `Week ${sw.sequenceNumber}`,
+        startDate: sw.weekStartDate,
+        topics: allTopics,
+        readings: [...new Set(allReadings)],
+        notes: allNotes.length > 0 ? allNotes.join("; ") : null,
+        courseName,
+        _scaffoldRole: "content",
+      });
+    } else {
+      // Instructional week with no content — thin row
+      result.push({
+        weekNumber: sw.sequenceNumber,
+        weekLabel: `Week ${sw.sequenceNumber}`,
+        startDate: sw.weekStartDate,
+        topics: [],
+        readings: [],
+        notes: "No syllabus content for this week",
+        courseName,
+        _scaffoldRole: "empty",
+      });
+    }
+  }
+
+  return result;
 }
 
 // ─── Stage 3c: GROUP lectures into weeks (algorithmic) ──────────────────────
@@ -2178,6 +2623,7 @@ function computeTimelineQuality(args: {
   lectureCalendarSource: string;
   usedModuleScaffold: boolean;
   hasTimelineAuthority: boolean;
+  usedWeekScaffold?: boolean;
 }): TimelineQuality {
   const datedTopics = args.topics.filter((topic) => Boolean(topic.startDate));
   const datedRatio = args.topics.length > 0 ? datedTopics.length / args.topics.length : 0;
@@ -2186,8 +2632,14 @@ function computeTimelineQuality(args: {
   const warningPenalty = args.warnings.length;
   const repairPenalty = args.repairActionsApplied.filter((action) => action !== "used_module_scaffold").length;
 
+  // Scaffold-backed courses: require real content (>= 30% of weeks) for "strong"
+  const scaffoldHasContent = args.usedWeekScaffold
+    ? args.topics.filter((t) => (t.topics?.length ?? 0) > 0 || (t.readings?.length ?? 0) > 0).length /
+      Math.max(args.topics.length, 1) >= 0.3
+    : true;
+
   if (
-    args.hasTimelineAuthority &&
+    (args.hasTimelineAuthority || (args.usedWeekScaffold && scaffoldHasContent)) &&
     datedRatio >= 0.8 &&
     warningPenalty === 0 &&
     repairPenalty === 0 &&
@@ -2200,7 +2652,7 @@ function computeTimelineQuality(args: {
   if (
     datedRatio >= 0.5 &&
     warningPenalty <= 2 &&
-    (args.hasTimelineAuthority || args.lectureCalendarSource === "lecture-anchors" || breakCount > 0)
+    (args.hasTimelineAuthority || args.usedWeekScaffold || args.lectureCalendarSource === "lecture-anchors" || breakCount > 0)
   ) {
     return "usable";
   }
@@ -2217,6 +2669,7 @@ export function finalizeTimelineForPersistence(args: {
   lectureCalendarSource: string;
   usedModuleScaffold: boolean;
   hasTimelineAuthority: boolean;
+  usedWeekScaffold?: boolean;
 }): FinalizeTimelineResult {
   const repairActionsApplied: string[] = [];
 
@@ -2233,20 +2686,23 @@ export function finalizeTimelineForPersistence(args: {
   }
   finalizedTopics = preStrippedBreakNotesTopics;
 
-  const splitBreakTopics = splitMixedBreakWeeks(finalizedTopics, args.termStartDate, args.termEndDate);
-  if (splitBreakTopics.length > finalizedTopics.length) {
-    repairActionsApplied.push(`split_mixed_break_weeks:${splitBreakTopics.length - finalizedTopics.length}`);
-  }
-  finalizedTopics = splitBreakTopics;
+  // Skip break splitting/insertion for scaffold-path courses (scaffold already handled break classification)
+  if (!args.usedWeekScaffold) {
+    const splitBreakTopics = splitMixedBreakWeeks(finalizedTopics, args.termStartDate, args.termEndDate);
+    if (splitBreakTopics.length > finalizedTopics.length) {
+      repairActionsApplied.push(`split_mixed_break_weeks:${splitBreakTopics.length - finalizedTopics.length}`);
+    }
+    finalizedTopics = splitBreakTopics;
 
-  const gapBreakTopics =
-    args.lectureCalendarSource === "lecture-anchors"
-      ? insertBreakWeeksFromDateGaps(finalizedTopics, args.courseName)
-      : finalizedTopics;
-  if (gapBreakTopics.length > finalizedTopics.length) {
-    repairActionsApplied.push(`inserted_gap_break_weeks:${gapBreakTopics.length - finalizedTopics.length}`);
+    const gapBreakTopics =
+      args.lectureCalendarSource === "lecture-anchors"
+        ? insertBreakWeeksFromDateGaps(finalizedTopics, args.courseName)
+        : finalizedTopics;
+    if (gapBreakTopics.length > finalizedTopics.length) {
+      repairActionsApplied.push(`inserted_gap_break_weeks:${gapBreakTopics.length - finalizedTopics.length}`);
+    }
+    finalizedTopics = gapBreakTopics;
   }
-  finalizedTopics = gapBreakTopics;
 
   const collapsedTopics = collapseSameStartDateTopics(finalizedTopics, args.courseName);
   if (collapsedTopics.length < finalizedTopics.length) {
@@ -2309,6 +2765,7 @@ export function finalizeTimelineForPersistence(args: {
     lectureCalendarSource: args.lectureCalendarSource,
     usedModuleScaffold: args.usedModuleScaffold,
     hasTimelineAuthority: args.hasTimelineAuthority,
+    usedWeekScaffold: args.usedWeekScaffold,
   });
 
   return {
@@ -2324,6 +2781,11 @@ export const timelinePipelineInternals = {
   buildLectureCalendar,
   organizeModulesAsTimeline,
   finalizeTimelineForPersistence,
+  buildWeekScaffold,
+  classifyAnchorsFromAI,
+  mapContentOntoScaffold,
+  buildTimelineSpine,
+  mergeContentOntoSpine,
 };
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
@@ -2392,8 +2854,37 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     );
   }
 
-  // Compute deterministic structure hint from Canvas assignment data
-  const structureHint = buildStructureHint(input.assignments, lectureCalendar);
+  // ── STAGE 2c: BUILD WEEK SCAFFOLD (weekly-mode only) ──
+  let weekScaffold: ScaffoldWeek[] | null = null;
+  const isWeeklyMode =
+    input.classSchedule &&
+    input.classSchedule.meetings.length > 0 &&
+    input.termStartDate;
+
+  if (isWeeklyMode) {
+    weekScaffold = buildWeekScaffold({
+      lectureCalendar,
+      lectureCalendarSource: lectureCalendarBuild.source,
+      classSchedule: input.classSchedule!,
+      termStartDate: input.classSchedule?.semesterStart ?? input.termStartDate!,
+      termEndDate: input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
+      syllabusEvents: input.syllabusEvents ?? [],
+      finalExamDate: input.classSchedule?.finalExamDate ?? null,
+      assignments: input.assignments,
+    });
+
+    if (weekScaffold.length > 0) {
+      console.log(
+        `[pipeline] ${input.courseName}: Stage 2c built week scaffold — ` +
+        `${weekScaffold.length} weeks (pre-AI classification)`,
+      );
+    } else {
+      weekScaffold = null; // fallback to legacy path
+    }
+  }
+
+  // Compute deterministic structure hint from Canvas assignment data + scaffold
+  const structureHint = buildStructureHint(input.assignments, lectureCalendar, weekScaffold);
   if (structureHint) {
     console.log(
       `[pipeline] ${input.courseName}: Stage 2b structure hint computed (${structureHint.length} chars)`,
@@ -2465,6 +2956,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   // - There's no lecture calendar to assign dates to per-lecture AI topics, AND
   // - We have enough content modules to form a meaningful scaffold
   const shouldUseModuleScaffold =
+    !(weekScaffold && weekScaffold.length > 0) &&  // weekly scaffold takes priority
     !hasTimelineAuthority &&
     lectureCalendar.length === 0 &&
     contentModules.length >= Math.max(4, Math.min(8, aiTopics.length || 4));
@@ -2500,10 +2992,37 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     }
   }
 
-  // ── STAGE 3c: GROUP lectures into weeks (algorithmic) ──
-  const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
-  if (grouped) {
-    aiTopics = grouped;
+  // ── STAGE 3c: SCAFFOLD reclassify + map, OR legacy GROUP ──
+  let usedWeekScaffold = false;
+  if (weekScaffold && weekScaffold.length > 0) {
+    // Post-AI: reclassify scaffold weeks from AI evidence
+    classifyAnchorsFromAI(weekScaffold, aiTopics);
+
+    // Log warning if AI extraction looks sparse despite weekly schedule evidence
+    if (isSparseTimeline(aiTopics)) {
+      console.warn(
+        `[pipeline] ${input.courseName}: Stage 3c WARNING — AI extraction is sparse ` +
+        `(${aiTopics.length} topics) despite weekly schedule evidence. Scaffold will have many empty weeks.`,
+      );
+      debug.aiSparseAgainstWeeklyScaffold = true;
+    }
+
+    console.log(
+      `[pipeline] ${input.courseName}: Stage 3c scaffold post-AI — ` +
+      `${weekScaffold.filter((w) => w.isInstructional).length} instructional, ` +
+      `${weekScaffold.filter((w) => !w.isInstructional).length} non-instructional ` +
+      `(${weekScaffold.filter((w) => w.evidence === "explicit_noninstructional").length} from explicit evidence)`,
+    );
+
+    aiTopics = mapContentOntoScaffold(weekScaffold, aiTopics, input.courseName);
+    usedWeekScaffold = true;
+    debug.usedWeekScaffold = true;
+    debug.scaffoldWeeks = weekScaffold.length;
+  } else {
+    const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
+    if (grouped) {
+      aiTopics = grouped;
+    }
   }
 
   // ── STAGE 4: NORMALIZE MODULES → per-week deltas ──
@@ -2627,6 +3146,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     lectureCalendarSource: debug.lectureCalendarSource ?? "none",
     usedModuleScaffold,
     hasTimelineAuthority,
+    usedWeekScaffold,
   });
   debug.stage5Warnings = finalized.warnings;
 
@@ -2640,6 +3160,8 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     usedModuleScaffold,
     lectureCalendarSource: debug.lectureCalendarSource,
     sourceRefs: debug.sourceRoles ?? [],
+    usedWeekScaffold,
+    weekScaffold,
   });
 
   const synthesizedTopics = mergeContentOntoSpine({
@@ -2650,6 +3172,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     lectureCalendarSource: debug.lectureCalendarSource,
     sourceRefs: debug.sourceRoles ?? [],
     usedModuleScaffold,
+    usedWeekScaffold,
     validationWarnings: debug.stage5Warnings,
   });
 
@@ -2669,6 +3192,9 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       contentAuthorityRunnerUp: resolvedContentAuthority.runnerUp,
       lectureCalendarSource: debug.lectureCalendarSource ?? "none",
       usedModuleScaffold,
+      usedWeekScaffold: debug.usedWeekScaffold ?? false,
+      scaffoldWeekCount: debug.scaffoldWeeks ?? null,
+      aiSparseAgainstWeeklyScaffold: debug.aiSparseAgainstWeeklyScaffold ?? false,
       stage5Warnings: debug.stage5Warnings,
       repairActionsApplied: finalized.repairActionsApplied,
       timelineQuality: finalized.timelineQuality,

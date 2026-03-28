@@ -106,6 +106,226 @@ function runScaffoldFixture(fixture) {
   }
 }
 
+function runWeekScaffoldFixture(fixture) {
+  const { buildWeekScaffold, classifyAnchorsFromAI, mapContentOntoScaffold } = timelinePipelineInternals;
+
+  // Build scaffold
+  const scaffold = buildWeekScaffold(fixture.input.scaffoldArgs);
+  assert(scaffold.length > 0, `${fixture.name}: scaffold is empty`);
+
+  if (fixture.expect.scaffoldWeeks != null) {
+    assert(scaffold.length === fixture.expect.scaffoldWeeks, `${fixture.name}: expected ${fixture.expect.scaffoldWeeks} scaffold weeks, got ${scaffold.length}`);
+  }
+
+  // Pre-AI checks
+  if (fixture.expect.preAI) {
+    const { instructionalCount, hasFinalExamWeeks } = fixture.expect.preAI;
+    if (instructionalCount != null) {
+      const actual = scaffold.filter((w) => w.isInstructional).length;
+      assert(actual === instructionalCount, `${fixture.name}: pre-AI instructional count: expected ${instructionalCount}, got ${actual}`);
+    }
+    if (hasFinalExamWeeks) {
+      const finalsWeeks = scaffold.filter((w) => w.hasFinalExam).map((w) => w.weekStartDate);
+      for (const date of hasFinalExamWeeks) {
+        assert(finalsWeeks.includes(date), `${fixture.name}: pre-AI missing hasFinalExam week ${date}`);
+      }
+    }
+  }
+
+  // Post-AI reclassification
+  if (fixture.input.aiTopics) {
+    classifyAnchorsFromAI(scaffold, fixture.input.aiTopics);
+  }
+
+  if (fixture.expect.postAI) {
+    const { instructionalCount, nonInstructionalCount, nonInstructionalWeeks, evidenceUpgrades } = fixture.expect.postAI;
+    if (instructionalCount != null) {
+      const actual = scaffold.filter((w) => w.isInstructional).length;
+      assert(actual === instructionalCount, `${fixture.name}: post-AI instructional count: expected ${instructionalCount}, got ${actual}`);
+    }
+    if (nonInstructionalCount != null) {
+      const actual = scaffold.filter((w) => !w.isInstructional).length;
+      assert(actual === nonInstructionalCount, `${fixture.name}: post-AI non-instructional count: expected ${nonInstructionalCount}, got ${actual}`);
+    }
+    if (nonInstructionalWeeks) {
+      const actual = scaffold.filter((w) => !w.isInstructional).map((w) => w.weekStartDate);
+      for (const date of nonInstructionalWeeks) {
+        assert(actual.includes(date), `${fixture.name}: expected non-instructional week ${date} not found`);
+      }
+    }
+    if (evidenceUpgrades) {
+      for (const { weekStartDate, expectedEvidence } of evidenceUpgrades) {
+        const sw = scaffold.find((w) => w.weekStartDate === weekStartDate);
+        assert(sw, `${fixture.name}: evidence upgrade check — week ${weekStartDate} not found`);
+        assert(sw.evidence === expectedEvidence, `${fixture.name}: week ${weekStartDate} evidence: expected ${expectedEvidence}, got ${sw.evidence}`);
+      }
+    }
+  }
+
+  // Content mapping
+  if (fixture.input.aiTopics && fixture.expect.mapped) {
+    const mapped = mapContentOntoScaffold(scaffold, fixture.input.aiTopics, fixture.input.scaffoldArgs.courseName ?? "TestCourse");
+    if (fixture.expect.mapped.totalRows != null) {
+      assert(mapped.length === fixture.expect.mapped.totalRows, `${fixture.name}: mapped rows: expected ${fixture.expect.mapped.totalRows}, got ${mapped.length}`);
+    }
+    if (fixture.expect.mapped.contentRows != null) {
+      const actual = mapped.filter((t) => t._scaffoldRole === "content").length;
+      assert(actual === fixture.expect.mapped.contentRows, `${fixture.name}: content rows: expected ${fixture.expect.mapped.contentRows}, got ${actual}`);
+    }
+    if (fixture.expect.mapped.breakRows != null) {
+      const actual = mapped.filter((t) => t._scaffoldRole === "break").length;
+      assert(actual === fixture.expect.mapped.breakRows, `${fixture.name}: break rows: expected ${fixture.expect.mapped.breakRows}, got ${actual}`);
+    }
+    if (fixture.expect.mapped.emptyRows != null) {
+      const actual = mapped.filter((t) => t._scaffoldRole === "empty").length;
+      assert(actual === fixture.expect.mapped.emptyRows, `${fixture.name}: empty rows: expected ${fixture.expect.mapped.emptyRows}, got ${actual}`);
+    }
+    if (fixture.expect.mapped.allDated) {
+      const undated = mapped.filter((t) => !t.startDate);
+      assert(undated.length === 0, `${fixture.name}: ${undated.length} mapped rows have no startDate`);
+    }
+  }
+}
+
+/**
+ * End-to-end scaffold fixture: runs the full chain from scaffold-annotated topics
+ * through finalizeTimelineForPersistence → buildTimelineSpine → mergeContentOntoSpine.
+ * This covers orchestrator wiring, finalization skipping, scaffold-driven spine,
+ * and provenance encoding — the path not reached by internal-only fixtures.
+ */
+function runScaffoldE2EFixture(fixture) {
+  const {
+    buildWeekScaffold, classifyAnchorsFromAI, mapContentOntoScaffold,
+    finalizeTimelineForPersistence: finalize,
+    buildTimelineSpine, mergeContentOntoSpine,
+  } = timelinePipelineInternals;
+
+  // Stage 2c: build scaffold
+  const scaffold = buildWeekScaffold(fixture.input.scaffoldArgs);
+  assert(scaffold.length > 0, `${fixture.name}: scaffold is empty`);
+
+  // Stage 3c: classify + map
+  classifyAnchorsFromAI(scaffold, fixture.input.aiTopics);
+  const mapped = mapContentOntoScaffold(scaffold, fixture.input.aiTopics, fixture.input.courseName);
+
+  // Stage 6: finalize (with usedWeekScaffold = true)
+  const finalized = finalize({
+    topics: mapped,
+    termStartDate: fixture.input.scaffoldArgs.termStartDate,
+    termEndDate: fixture.input.scaffoldArgs.termEndDate,
+    courseName: fixture.input.courseName,
+    timelineSource: "syllabus",
+    lectureCalendarSource: fixture.input.scaffoldArgs.lectureCalendarSource,
+    usedModuleScaffold: false,
+    hasTimelineAuthority: true,
+    usedWeekScaffold: true,
+  });
+
+  // Verify finalization skipped break splitting/insertion
+  if (fixture.expect.finalize) {
+    if (fixture.expect.finalize.topicCount != null) {
+      assert(finalized.topics.length === fixture.expect.finalize.topicCount,
+        `${fixture.name}: finalized topic count: expected ${fixture.expect.finalize.topicCount}, got ${finalized.topics.length}`);
+    }
+    if (fixture.expect.finalize.noBreakRepairs) {
+      const breakRepairs = finalized.repairActionsApplied.filter(
+        (a) => a.startsWith("split_mixed_break") || a.startsWith("inserted_gap_break"),
+      );
+      assert(breakRepairs.length === 0,
+        `${fixture.name}: scaffold path should skip break repairs, but got: ${breakRepairs.join(", ")}`);
+    }
+    if (fixture.expect.finalize.timelineQuality) {
+      assert(finalized.timelineQuality === fixture.expect.finalize.timelineQuality,
+        `${fixture.name}: quality: expected ${fixture.expect.finalize.timelineQuality}, got ${finalized.timelineQuality}`);
+    }
+  }
+
+  // Stage 7: spine + merge
+  const spine = buildTimelineSpine({
+    topics: finalized.topics,
+    hasTimelineAuthority: true,
+    usedModuleScaffold: false,
+    lectureCalendarSource: fixture.input.scaffoldArgs.lectureCalendarSource,
+    sourceRefs: [],
+    usedWeekScaffold: true,
+    weekScaffold: scaffold,
+  });
+
+  const synthesized = mergeContentOntoSpine({
+    spine,
+    topics: finalized.topics,
+    timelineSource: "syllabus",
+    contentSource: "syllabus",
+    lectureCalendarSource: fixture.input.scaffoldArgs.lectureCalendarSource,
+    sourceRefs: [],
+    usedModuleScaffold: false,
+    usedWeekScaffold: true,
+    validationWarnings: [],
+  });
+
+  // Verify spine
+  if (fixture.expect.spine) {
+    if (fixture.expect.spine.scheduleMode) {
+      assert(spine.scheduleMode === fixture.expect.spine.scheduleMode,
+        `${fixture.name}: scheduleMode: expected ${fixture.expect.spine.scheduleMode}, got ${spine.scheduleMode}`);
+    }
+    if (fixture.expect.spine.anchorCount != null) {
+      assert(spine.anchors.length === fixture.expect.spine.anchorCount,
+        `${fixture.name}: anchor count: expected ${fixture.expect.spine.anchorCount}, got ${spine.anchors.length}`);
+    }
+    if (fixture.expect.spine.breakAnchors != null) {
+      const actual = spine.anchors.filter((a) => a.anchorType === "break").length;
+      assert(actual === fixture.expect.spine.breakAnchors,
+        `${fixture.name}: break anchors: expected ${fixture.expect.spine.breakAnchors}, got ${actual}`);
+    }
+    if (fixture.expect.spine.allDated) {
+      const undated = spine.anchors.filter((a) => !a.anchorDate);
+      assert(undated.length === 0,
+        `${fixture.name}: ${undated.length} anchors have no date`);
+    }
+  }
+
+  // Verify synthesized topics
+  if (fixture.expect.synthesized) {
+    if (fixture.expect.synthesized.count != null) {
+      assert(synthesized.length === fixture.expect.synthesized.count,
+        `${fixture.name}: synthesized count: expected ${fixture.expect.synthesized.count}, got ${synthesized.length}`);
+    }
+    if (fixture.expect.synthesized.scaffoldProvenanceCount != null) {
+      const actual = synthesized.filter((t) => t.provenance?.usedWeekScaffold === true).length;
+      assert(actual === fixture.expect.synthesized.scaffoldProvenanceCount,
+        `${fixture.name}: scaffold provenance count: expected ${fixture.expect.synthesized.scaffoldProvenanceCount}, got ${actual}`);
+    }
+    if (fixture.expect.synthesized.scaffoldRoles) {
+      const roles = { content: 0, break: 0, empty: 0 };
+      for (const t of synthesized) {
+        const role = t.provenance?.scaffoldRole;
+        if (role === "content") roles.content++;
+        else if (role === "break") roles.break++;
+        else if (role === "empty") roles.empty++;
+      }
+      for (const [role, expected] of Object.entries(fixture.expect.synthesized.scaffoldRoles)) {
+        assert(roles[role] === expected,
+          `${fixture.name}: scaffoldRole "${role}": expected ${expected}, got ${roles[role]}`);
+      }
+    }
+    if (fixture.expect.synthesized.breakConfidenceHigh) {
+      const breakTopics = synthesized.filter((t) => t.provenance?.scaffoldRole === "break");
+      for (const bt of breakTopics) {
+        assert(bt.contentConfidence === "high",
+          `${fixture.name}: break topic "${bt.weekLabel}" has contentConfidence "${bt.contentConfidence}", expected "high"`);
+      }
+    }
+    if (fixture.expect.synthesized.emptyConfidenceLow) {
+      const emptyTopics = synthesized.filter((t) => t.provenance?.scaffoldRole === "empty");
+      for (const et of emptyTopics) {
+        assert(et.contentConfidence === "low",
+          `${fixture.name}: empty topic "${et.weekLabel}" has contentConfidence "${et.contentConfidence}", expected "low"`);
+      }
+    }
+  }
+}
+
 function runLectureCalendarFixture(fixture) {
   const result = timelinePipelineInternals.buildLectureCalendar(
     fixture.input.classSchedule,
@@ -143,6 +363,10 @@ async function main() {
       runScaffoldFixture(fixture);
     } else if (fixture.kind === "lecture-calendar") {
       runLectureCalendarFixture(fixture);
+    } else if (fixture.kind === "week-scaffold") {
+      runWeekScaffoldFixture(fixture);
+    } else if (fixture.kind === "scaffold-e2e") {
+      runScaffoldE2EFixture(fixture);
     } else {
       throw new Error(`Unknown fixture kind in ${file}`);
     }
