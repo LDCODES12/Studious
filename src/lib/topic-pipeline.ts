@@ -1728,15 +1728,18 @@ function buildWeekScaffold(args: {
   let firstMonday = calendarMondays[0];
   let lastMonday = calendarMondays[calendarMondays.length - 1];
 
-  // Extend to cover finalExamDate and termEndDate
-  if (args.finalExamDate) {
-    const finalsMonday = mondayOfWeek(args.finalExamDate);
-    if (finalsMonday > lastMonday) lastMonday = finalsMonday;
+  // Determine authoritative end bound from term dates.
+  // Lecture calendar can overshoot (generateLectureSeries adds a 28-day buffer),
+  // so use termEndDate/finalExamDate as the authoritative ceiling.
+  const endBounds = [args.termEndDate, args.finalExamDate]
+    .filter((d): d is string => !!d)
+    .map((d) => mondayOfWeek(d));
+  if (endBounds.length > 0) {
+    // Use the latest end bound — finals may be after last class day.
+    // This both caps overshoot AND extends if lectures end before term does.
+    lastMonday = endBounds.sort().pop()!;
   }
-  if (args.termEndDate) {
-    const termEndMonday = mondayOfWeek(args.termEndDate);
-    if (termEndMonday > lastMonday) lastMonday = termEndMonday;
-  }
+  // If no end bounds available, lastMonday stays as lecture calendar's last entry
 
   // Generate every Monday from first to last
   const scaffold: ScaffoldWeek[] = [];
@@ -2995,17 +2998,11 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   // ── STAGE 3c: SCAFFOLD reclassify + map, OR legacy GROUP ──
   let usedWeekScaffold = false;
   if (weekScaffold && weekScaffold.length > 0) {
+    // Save original AI topics for potential bail-out to legacy path
+    const preScaffoldAiTopics = [...aiTopics];
+
     // Post-AI: reclassify scaffold weeks from AI evidence
     classifyAnchorsFromAI(weekScaffold, aiTopics);
-
-    // Log warning if AI extraction looks sparse despite weekly schedule evidence
-    if (isSparseTimeline(aiTopics)) {
-      console.warn(
-        `[pipeline] ${input.courseName}: Stage 3c WARNING — AI extraction is sparse ` +
-        `(${aiTopics.length} topics) despite weekly schedule evidence. Scaffold will have many empty weeks.`,
-      );
-      debug.aiSparseAgainstWeeklyScaffold = true;
-    }
 
     console.log(
       `[pipeline] ${input.courseName}: Stage 3c scaffold post-AI — ` +
@@ -3014,10 +3011,33 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       `(${weekScaffold.filter((w) => w.evidence === "explicit_noninstructional").length} from explicit evidence)`,
     );
 
-    aiTopics = mapContentOntoScaffold(weekScaffold, aiTopics, input.courseName);
-    usedWeekScaffold = true;
-    debug.usedWeekScaffold = true;
-    debug.scaffoldWeeks = weekScaffold.length;
+    const scaffoldTopics = mapContentOntoScaffold(weekScaffold, aiTopics, input.courseName);
+
+    // Check content density — bail if scaffold is too sparse (biweekly seminars, etc.)
+    const nonEmptyCount = (scaffoldTopics as ScaffoldAnnotatedTopic[]).filter(
+      (t) => t._scaffoldRole !== "empty",
+    ).length;
+    const contentRatio = nonEmptyCount / scaffoldTopics.length;
+
+    if (contentRatio >= 0.4) {
+      aiTopics = scaffoldTopics;
+      usedWeekScaffold = true;
+      debug.usedWeekScaffold = true;
+      debug.scaffoldWeeks = weekScaffold.length;
+    } else {
+      // Scaffold too sparse — bail to legacy path
+      console.warn(
+        `[pipeline] ${input.courseName}: Stage 3c scaffold bail — ` +
+        `${nonEmptyCount}/${scaffoldTopics.length} non-empty (${(contentRatio * 100).toFixed(0)}%), ` +
+        `falling back to legacy path`,
+      );
+      weekScaffold = null;
+      aiTopics = preScaffoldAiTopics;
+      debug.aiSparseAgainstWeeklyScaffold = true;
+
+      const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
+      if (grouped) aiTopics = grouped;
+    }
   } else {
     const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
     if (grouped) {
