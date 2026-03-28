@@ -1,0 +1,35 @@
+{
+  "kind": "week-scaffold",
+  "name": "week-scaffold-blank-label-no-assignments",
+  "description": "Course with blank-labeled meetings (treated as lectures by buildLectureCalendar) but no assignments — scaffold gate rejects based on structural evidence, not meeting labels",
+  "input": {
+    "scaffoldArgs": {
+      "lectureCalendar": [
+        {"weekNumber": 1, "startDate": "2026-01-12", "lectures": [
+          {"lectureNumber": 1, "date": "2026-01-12", "dayOfWeek": "MO"}
+        ]},
+        {"weekNumber": 2, "startDate": "2026-01-19", "lectures": [
+          {"lectureNumber": 2, "date": "2026-01-19", "dayOfWeek": "MO"}
+        ]},
+        {"weekNumber": 3, "startDate": "2026-01-26", "lectures": [
+          {"lectureNumber": 3, "date": "2026-01-26", "dayOfWeek": "MO"}
+        ]}
+      ],
+      "lectureCalendarSource": "term-start",
+      "classSchedule": {
+        "meetings": [{"label": "", "days": ["MO"], "startTime": "15:00", "endTime": "16:00"}],
+        "semesterStart": "2025-12-26",
+        "semesterEnd": "2026-05-15"
+      },
+      "termStartDate": "2025-12-26",
+      "termEndDate": "2026-05-15",
+      "syllabusEvents": [],
+      "finalExamDate": null,
+      "assignments": []
+    },
+    "aiTopics": null
+  },
+  "expect": {
+    "scaffoldWeeks": 0
+  }
+}

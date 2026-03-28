@@ -1623,20 +1623,11 @@ function clampTermStart(termStartDate: string, assignments: AssignmentDateInfo[]
       adjusted.setDate(adjusted.getDate() - 7);
       return adjusted.toISOString().slice(0, 10);
     }
-  } else {
-    // No assignments — Canvas enrollment_term.start_at often lands in December
-    // (winter break). Clamp December starts to the second Monday of January,
-    // a reasonable default for US spring semesters.
-    const termStart = new Date(termStartDate + "T12:00:00");
-    if (termStart.getMonth() === 11) { // December
-      const jan1 = new Date(termStart.getFullYear() + 1, 0, 1, 12);
-      const dow = jan1.getDay();
-      const daysToMonday = dow === 0 ? 1 : dow === 1 ? 0 : 8 - dow;
-      const secondMonday = new Date(jan1);
-      secondMonday.setDate(jan1.getDate() + daysToMonday + 7);
-      return secondMonday.toISOString().slice(0, 10);
-    }
   }
+  // No assignments or gap within 21 days — use raw termStartDate.
+  // Scaffold-level assignment gate (buildWeekScaffold) prevents no-assignment
+  // courses from reaching the scaffold, so the no-assignment case here only
+  // affects lecture calendar hints and legacy grouping.
   return termStartDate;
 }
 
@@ -1723,21 +1714,21 @@ function buildWeekScaffold(args: {
   finalExamDate: string | null;
   assignments: AssignmentDateInfo[];
 }): ScaffoldWeek[] {
+  // Structural eligibility: require dated assignments to build a scaffold.
+  // Without assignment evidence, a course with meetings could be irregular
+  // (biweekly seminar, independent study) regardless of meeting labels.
+  // This is the primary gate — not label-sensitive, not AI-dependent.
+  if (!args.assignments.some((a) => a.dueDate)) return [];
+
   // Resolve instructional calendar (fallback to all meetings if lecture-only is empty)
   let instructionalCalendar = args.lectureCalendar;
   let calendarSource = args.lectureCalendarSource;
 
   if (instructionalCalendar.length === 0 && args.classSchedule.meetings.length > 0) {
-    // Gate: require assignments for the all-meetings fallback.
-    // Courses with meetings but no assignments are likely irregular seminars
-    // (biweekly discussions, independent study) — not suited for weekly scaffold.
-    const hasDatedAssignments = args.assignments.some((a) => a.dueDate);
-    if (hasDatedAssignments) {
-      instructionalCalendar = buildCalendarFromAllMeetings(
-        args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
-      );
-      calendarSource = "term-start";
-    }
+    instructionalCalendar = buildCalendarFromAllMeetings(
+      args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
+    );
+    calendarSource = "term-start";
   }
 
   if (instructionalCalendar.length === 0) return [];
