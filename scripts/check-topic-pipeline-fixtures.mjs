@@ -111,10 +111,11 @@ function runWeekScaffoldFixture(fixture) {
 
   // Build scaffold
   const scaffold = buildWeekScaffold(fixture.input.scaffoldArgs);
-  assert(scaffold.length > 0, `${fixture.name}: scaffold is empty`);
 
   if (fixture.expect.scaffoldWeeks != null) {
     assert(scaffold.length === fixture.expect.scaffoldWeeks, `${fixture.name}: expected ${fixture.expect.scaffoldWeeks} scaffold weeks, got ${scaffold.length}`);
+  } else {
+    assert(scaffold.length > 0, `${fixture.name}: scaffold is empty`);
   }
 
   // Pre-AI checks

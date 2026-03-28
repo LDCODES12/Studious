@@ -1623,6 +1623,19 @@ function clampTermStart(termStartDate: string, assignments: AssignmentDateInfo[]
       adjusted.setDate(adjusted.getDate() - 7);
       return adjusted.toISOString().slice(0, 10);
     }
+  } else {
+    // No assignments — Canvas enrollment_term.start_at often lands in December
+    // (winter break). Clamp December starts to the second Monday of January,
+    // a reasonable default for US spring semesters.
+    const termStart = new Date(termStartDate + "T12:00:00");
+    if (termStart.getMonth() === 11) { // December
+      const jan1 = new Date(termStart.getFullYear() + 1, 0, 1, 12);
+      const dow = jan1.getDay();
+      const daysToMonday = dow === 0 ? 1 : dow === 1 ? 0 : 8 - dow;
+      const secondMonday = new Date(jan1);
+      secondMonday.setDate(jan1.getDate() + daysToMonday + 7);
+      return secondMonday.toISOString().slice(0, 10);
+    }
   }
   return termStartDate;
 }
@@ -1715,10 +1728,16 @@ function buildWeekScaffold(args: {
   let calendarSource = args.lectureCalendarSource;
 
   if (instructionalCalendar.length === 0 && args.classSchedule.meetings.length > 0) {
-    instructionalCalendar = buildCalendarFromAllMeetings(
-      args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
-    );
-    calendarSource = "term-start";
+    // Gate: require assignments for the all-meetings fallback.
+    // Courses with meetings but no assignments are likely irregular seminars
+    // (biweekly discussions, independent study) — not suited for weekly scaffold.
+    const hasDatedAssignments = args.assignments.some((a) => a.dueDate);
+    if (hasDatedAssignments) {
+      instructionalCalendar = buildCalendarFromAllMeetings(
+        args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
+      );
+      calendarSource = "term-start";
+    }
   }
 
   if (instructionalCalendar.length === 0) return [];
@@ -2996,13 +3015,26 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   }
 
   // ── STAGE 3c: SCAFFOLD reclassify + map, OR legacy GROUP ──
+  // Scaffold eligibility is determined by deterministic schedule evidence
+  // (Stage 2c gates), NOT by AI content density. Sparse AI extraction is
+  // logged but does not veto the scaffold — modules fill in during Stage 4.
   let usedWeekScaffold = false;
   if (weekScaffold && weekScaffold.length > 0) {
-    // Save original AI topics for potential bail-out to legacy path
-    const preScaffoldAiTopics = [...aiTopics];
-
     // Post-AI: reclassify scaffold weeks from AI evidence
     classifyAnchorsFromAI(weekScaffold, aiTopics);
+
+    // Log warning if AI extraction looks sparse (diagnostic only, not a veto)
+    const contentTopicCount = aiTopics.filter(
+      (t) => !isBreakTopic(t) && (t.topics?.length > 0 || t.readings?.length > 0),
+    ).length;
+    if (contentTopicCount < weekScaffold.length * 0.4) {
+      console.warn(
+        `[pipeline] ${input.courseName}: Stage 3c WARNING — AI extraction sparse ` +
+        `(${contentTopicCount} content topics for ${weekScaffold.length}-week scaffold). ` +
+        `Modules may fill in during Stage 4.`,
+      );
+      debug.aiSparseAgainstWeeklyScaffold = true;
+    }
 
     console.log(
       `[pipeline] ${input.courseName}: Stage 3c scaffold post-AI — ` +
@@ -3011,33 +3043,10 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       `(${weekScaffold.filter((w) => w.evidence === "explicit_noninstructional").length} from explicit evidence)`,
     );
 
-    const scaffoldTopics = mapContentOntoScaffold(weekScaffold, aiTopics, input.courseName);
-
-    // Check content density — bail if scaffold is too sparse (biweekly seminars, etc.)
-    const nonEmptyCount = (scaffoldTopics as ScaffoldAnnotatedTopic[]).filter(
-      (t) => t._scaffoldRole !== "empty",
-    ).length;
-    const contentRatio = nonEmptyCount / scaffoldTopics.length;
-
-    if (contentRatio >= 0.4) {
-      aiTopics = scaffoldTopics;
-      usedWeekScaffold = true;
-      debug.usedWeekScaffold = true;
-      debug.scaffoldWeeks = weekScaffold.length;
-    } else {
-      // Scaffold too sparse — bail to legacy path
-      console.warn(
-        `[pipeline] ${input.courseName}: Stage 3c scaffold bail — ` +
-        `${nonEmptyCount}/${scaffoldTopics.length} non-empty (${(contentRatio * 100).toFixed(0)}%), ` +
-        `falling back to legacy path`,
-      );
-      weekScaffold = null;
-      aiTopics = preScaffoldAiTopics;
-      debug.aiSparseAgainstWeeklyScaffold = true;
-
-      const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
-      if (grouped) aiTopics = grouped;
-    }
+    aiTopics = mapContentOntoScaffold(weekScaffold, aiTopics, input.courseName);
+    usedWeekScaffold = true;
+    debug.usedWeekScaffold = true;
+    debug.scaffoldWeeks = weekScaffold.length;
   } else {
     const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName);
     if (grouped) {
