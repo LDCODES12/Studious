@@ -1270,7 +1270,7 @@ function buildLectureCalendar(
   }
 
   // Clamp term start if it's too early (includes winter break)
-  termStartDate = clampTermStart(termStartDate, assignments);
+  termStartDate = clampTermStart(termStartDate, assignments, termEndDate);
 
   // Find lecture meetings (not labs, discussions, etc.)
   // Labels may be freeform from AI extraction (e.g. "Lecture (Section 1)"),
@@ -1605,11 +1605,15 @@ interface ScaffoldWeek {
 }
 
 /**
- * Clamp term start date if it's >21 days before the first assignment
- * (Canvas termStartAt often includes winter break).
+ * Clamp term start date if it's suspiciously early.
+ * Canvas enrollment_term.start_at often includes winter break.
  * Shared by buildLectureCalendar and buildCalendarFromAllMeetings.
  */
-function clampTermStart(termStartDate: string, assignments: AssignmentDateInfo[]): string {
+function clampTermStart(
+  termStartDate: string,
+  assignments: AssignmentDateInfo[],
+  termEndDate?: string | null,
+): string {
   const datedAssignments = assignments
     .filter((a) => a.dueDate)
     .map((a) => a.dueDate!.slice(0, 10))
@@ -1623,11 +1627,21 @@ function clampTermStart(termStartDate: string, assignments: AssignmentDateInfo[]
       adjusted.setDate(adjusted.getDate() - 7);
       return adjusted.toISOString().slice(0, 10);
     }
+  } else if (termEndDate) {
+    // No assignments — use term length to detect administrative start dates.
+    // A typical US semester is 15-17 weeks. If start-to-end exceeds 19 weeks,
+    // the start is likely an enrollment_term boundary, not instruction start.
+    // Shrink from the front to target ~17 weeks.
+    const termStart = new Date(termStartDate + "T12:00:00");
+    const termEnd = new Date(termEndDate + "T12:00:00");
+    const termWeeks = (termEnd.getTime() - termStart.getTime()) / (7 * 24 * 60 * 60 * 1000);
+    if (termWeeks > 19) {
+      const excessWeeks = Math.ceil(termWeeks - 17);
+      const adjusted = new Date(termStart);
+      adjusted.setDate(adjusted.getDate() + excessWeeks * 7);
+      return adjusted.toISOString().slice(0, 10);
+    }
   }
-  // No assignments or gap within 21 days — use raw termStartDate.
-  // Scaffold-level assignment gate (buildWeekScaffold) prevents no-assignment
-  // courses from reaching the scaffold, so the no-assignment case here only
-  // affects lecture calendar hints and legacy grouping.
   return termStartDate;
 }
 
@@ -1642,7 +1656,7 @@ function buildCalendarFromAllMeetings(
   termEndDate: string | null,
   assignments: AssignmentDateInfo[],
 ): WeekDateRange[] {
-  const clamped = clampTermStart(termStartDate, assignments);
+  const clamped = clampTermStart(termStartDate, assignments, termEndDate);
   const allDayCodes = new Set<number>();
   for (const m of classSchedule.meetings) {
     for (const d of m.days) {
@@ -1714,17 +1728,22 @@ function buildWeekScaffold(args: {
   finalExamDate: string | null;
   assignments: AssignmentDateInfo[];
 }): ScaffoldWeek[] {
-  // Structural eligibility: require dated assignments to build a scaffold.
-  // Without assignment evidence, a course with meetings could be irregular
-  // (biweekly seminar, independent study) regardless of meeting labels.
-  // This is the primary gate — not label-sensitive, not AI-dependent.
-  if (!args.assignments.some((a) => a.dueDate)) return [];
-
-  // Resolve instructional calendar (fallback to all meetings if lecture-only is empty)
+  // Resolve instructional calendar — two tiers of structural evidence:
+  //
+  // Tier 1: Lecture calendar exists (from buildLectureCalendar).
+  //   This IS evidence of weekly regularity — the calendar was built from
+  //   lecture-labeled or anchored meetings. Scaffold always eligible.
+  //
+  // Tier 2: Lecture calendar empty, fall back to all meetings.
+  //   Non-lecture meetings (labs, studios, discussions) need corroboration
+  //   from dated assignments — without them, the course could be irregular
+  //   (biweekly seminar, independent study).
   let instructionalCalendar = args.lectureCalendar;
   let calendarSource = args.lectureCalendarSource;
 
   if (instructionalCalendar.length === 0 && args.classSchedule.meetings.length > 0) {
+    // All-meetings fallback requires assignment corroboration
+    if (!args.assignments.some((a) => a.dueDate)) return [];
     instructionalCalendar = buildCalendarFromAllMeetings(
       args.classSchedule, args.termStartDate, args.termEndDate, args.assignments,
     );

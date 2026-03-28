@@ -1,7 +1,7 @@
 {
   "kind": "week-scaffold",
   "name": "week-scaffold-blank-label-no-assignments",
-  "description": "Course with blank-labeled meetings (treated as lectures by buildLectureCalendar) but no assignments — scaffold gate rejects based on structural evidence, not meeting labels",
+  "description": "Course with blank-labeled meetings (lecture calendar exists as Tier 1 evidence) and no assignments — scaffold IS built because lecture calendar is structural evidence of weekly regularity. 3 weeks from lecture calendar, capped by termEndDate.",
   "input": {
     "scaffoldArgs": {
       "lectureCalendar": [
@@ -19,10 +19,10 @@
       "classSchedule": {
         "meetings": [{"label": "", "days": ["MO"], "startTime": "15:00", "endTime": "16:00"}],
         "semesterStart": "2025-12-26",
-        "semesterEnd": "2026-05-15"
+        "semesterEnd": "2026-02-06"
       },
       "termStartDate": "2025-12-26",
-      "termEndDate": "2026-05-15",
+      "termEndDate": "2026-02-06",
       "syllabusEvents": [],
       "finalExamDate": null,
       "assignments": []
@@ -30,6 +30,9 @@
     "aiTopics": null
   },
   "expect": {
-    "scaffoldWeeks": 0
+    "scaffoldWeeks": 4,
+    "preAI": {
+      "instructionalCount": 4
+    }
   }
 }
