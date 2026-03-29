@@ -1,0 +1,44 @@
+{
+  "kind": "lecture-calendar",
+  "name": "lecture-calendar-bloated-term-end",
+  "description": "Term-start MWF course where termEndDate is bloated (admin enrollment_term end). Recurring assignments provide the real instructional end bound — calendar should stop near the last assignment, not extend to admin end.",
+  "input": {
+    "classSchedule": {
+      "meetings": [
+        {
+          "days": ["MO", "WE", "FR"],
+          "label": "Lecture",
+          "startTime": "10:00",
+          "endTime": "10:50",
+          "location": ""
+        }
+      ],
+      "semesterStart": "2026-01-12",
+      "semesterEnd": "2026-06-30"
+    },
+    "termStartDate": "2026-01-12",
+    "termEndDate": "2026-06-30",
+    "assignments": [
+      {"title": "Homework 1", "dueDate": "2026-01-19"},
+      {"title": "Homework 2", "dueDate": "2026-01-26"},
+      {"title": "Homework 3", "dueDate": "2026-02-02"},
+      {"title": "Homework 4", "dueDate": "2026-02-09"},
+      {"title": "Homework 5", "dueDate": "2026-02-16"},
+      {"title": "Homework 6", "dueDate": "2026-02-23"},
+      {"title": "Homework 7", "dueDate": "2026-03-02"},
+      {"title": "Homework 8", "dueDate": "2026-03-09"},
+      {"title": "Homework 9", "dueDate": "2026-03-16"},
+      {"title": "Homework 10", "dueDate": "2026-03-23"},
+      {"title": "Homework 11", "dueDate": "2026-03-30"},
+      {"title": "Homework 12", "dueDate": "2026-04-06"},
+      {"title": "Homework 13", "dueDate": "2026-04-13"},
+      {"title": "Homework 14", "dueDate": "2026-04-17"}
+    ],
+    "syllabusEvents": []
+  },
+  "expect": {
+    "source": "term-start",
+    "firstWeekStart": "2026-01-12",
+    "lastWeekStart": "2026-04-13"
+  }
+}

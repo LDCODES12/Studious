@@ -917,6 +917,7 @@ function extractScheduleEvidence(
       hasStructuredScheduleText = true;
     }
 
+    const assessmentTable = isAssessmentTable(candidate.text);
     const lines = candidate.text
       .split("\n")
       .map((line) => line.trim())
@@ -925,7 +926,7 @@ function extractScheduleEvidence(
     for (const line of lines) {
       if (!DATE_SIGNAL_RX.test(line)) continue;
 
-      const looksLikeScheduleRow = isExplicitScheduleRow(line, structuredSource, candidate.label);
+      const looksLikeScheduleRow = isExplicitScheduleRow(line, structuredSource, assessmentTable);
 
       if (!looksLikeScheduleRow) continue;
 
@@ -954,8 +955,23 @@ const CONTAINER_EVIDENCE_RX =
   /\b(week|module|unit)\b/i;
 const ASSESSMENT_EVIDENCE_RX =
   /\b(quiz|exam|midterm|final|homework|assignment|problem\s*set|pset|worksheet|project|paper|report|deadline|due|points?|score|autograder|submission|scope)\b/i;
-const ASSESSMENT_SOURCE_RX =
-  /\b(quiz|exam|midterm|final|problem[_\s-]*set|pset|worksheet|report|instructions?|autograder|outline)\b/i;
+
+/**
+ * Detect whether a candidate text block is an assessment/grading table
+ * by inspecting its first non-empty line for column headers that only
+ * appear in grading contexts (Max, Points, Score, Grade, Weight, Rubric).
+ *
+ * This is a content-structural check — it does NOT depend on the source
+ * filename, so it works regardless of how the PDF is named.
+ */
+const ASSESSMENT_HEADER_RX =
+  /\b(max|points?|score|grade|weight|rubric)\b/i;
+
+function isAssessmentTable(text: string): boolean {
+  const firstLine = text.split("\n").map((l) => l.trim()).find(Boolean);
+  if (!firstLine) return false;
+  return ASSESSMENT_HEADER_RX.test(firstLine);
+}
 
 function residualInstructionalText(line: string): string {
   return line
@@ -970,8 +986,8 @@ function residualInstructionalText(line: string): string {
     .trim();
 }
 
-function isExplicitScheduleRow(line: string, structuredSource: boolean, sourceLabel = ""): boolean {
-  const assessmentBiasedSource = ASSESSMENT_SOURCE_RX.test(sourceLabel);
+function isExplicitScheduleRow(line: string, structuredSource: boolean, assessmentTable = false): boolean {
+  // Break and day-name signals are always strong evidence, even in assessment tables
   if (FULL_BREAK_RX.test(line)) return true;
   if (DAY_NAME_SIGNAL_RX.test(line)) return true;
 
@@ -979,7 +995,10 @@ function isExplicitScheduleRow(line: string, structuredSource: boolean, sourceLa
   const hasResidualInstructionalText = /[a-z]{3,}/.test(residual);
   if (CONTAINER_EVIDENCE_RX.test(line) && hasResidualInstructionalText) return true;
 
-  if (assessmentBiasedSource) return false;
+  // Assessment tables (detected by header columns like "Max", "Points", "Score"):
+  // session keywords (e.g. "lab" in "Lab Safety") and structured-source fallback
+  // are unreliable — the topic text is about content, not sessions.
+  if (assessmentTable) return false;
 
   if (SESSION_EVIDENCE_RX.test(line)) return true;
 
@@ -1480,6 +1499,7 @@ function buildLectureCalendar(
   }
 
   const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  const assignmentBounds = recurringAssignmentDateBounds(assignments);
   const instructionWindow = deriveInstructionWindow({
     termStartDate,
     termEndDate,
@@ -1487,6 +1507,7 @@ function buildLectureCalendar(
     lectureAnchors,
     explicitScheduleDates: resolvedScheduleEvidence.explicitScheduleDates,
     sortedDays,
+    assignmentEndDate: assignmentBounds?.latest ?? null,
   });
   const instructionStart = parseISO(`${instructionWindow.startDate}T12:00:00Z`);
   const instructionEnd = parseISO(`${instructionWindow.endDate}T12:00:00Z`);
@@ -1790,6 +1811,7 @@ function deriveInstructionWindow(args: {
   lectureAnchors: LectureAnchor[];
   explicitScheduleDates: string[];
   sortedDays: number[];
+  assignmentEndDate?: string | null;
 }): { startDate: string; endDate: string } {
   let startDate = args.termStartDate;
 
@@ -1810,6 +1832,7 @@ function deriveInstructionWindow(args: {
     args.finalExamDate,
     args.explicitScheduleDates[args.explicitScheduleDates.length - 1] ?? null,
     args.lectureAnchors[args.lectureAnchors.length - 1]?.dueDate ?? null,
+    args.assignmentEndDate ?? null,
   ].filter((date): date is string => Boolean(date));
 
   const endDate = instructionalEndCandidates.length > 0
@@ -1862,6 +1885,7 @@ function buildCalendarFromAllMeetings(
   if (sortedDays.length === 0) return [];
 
   const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  const assignmentBounds = recurringAssignmentDateBounds(assignments);
   const instructionWindow = deriveInstructionWindow({
     termStartDate,
     termEndDate,
@@ -1869,6 +1893,7 @@ function buildCalendarFromAllMeetings(
     lectureAnchors: [],
     explicitScheduleDates: resolvedScheduleEvidence.explicitScheduleDates,
     sortedDays,
+    assignmentEndDate: assignmentBounds?.latest ?? null,
   });
   const instructionStart = parseISO(`${instructionWindow.startDate}T12:00:00Z`);
   const instructionEnd = parseISO(`${instructionWindow.endDate}T12:00:00Z`);
