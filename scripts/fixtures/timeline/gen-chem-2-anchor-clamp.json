@@ -41,6 +41,7 @@
   },
   "expect": {
     "source": "lecture-anchors",
-    "firstWeekStart": "2026-01-12"
+    "firstWeekStart": "2026-01-12",
+    "lastWeekStart": "2026-03-16"
   }
 }

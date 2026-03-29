@@ -1,0 +1,87 @@
+{
+  "kind": "merge-spine",
+  "name": "merge-spine-recomputes-scaffold-role",
+  "input": {
+    "spineArgs": {
+      "topics": [
+        {
+          "weekNumber": 1,
+          "weekLabel": "Week 1",
+          "startDate": "2026-01-12",
+          "topics": ["Module topic added later"],
+          "readings": [],
+          "notes": null,
+          "courseName": "TEST 300",
+          "_scaffoldRole": "empty"
+        },
+        {
+          "weekNumber": 2,
+          "weekLabel": "Spring Break — No class",
+          "startDate": "2026-01-19",
+          "topics": [],
+          "readings": [],
+          "notes": "No class",
+          "courseName": "TEST 300",
+          "_scaffoldRole": "break"
+        }
+      ],
+      "hasTimelineAuthority": true,
+      "usedModuleScaffold": false,
+      "lectureCalendarSource": "lecture-anchors",
+      "sourceRefs": [],
+      "usedWeekScaffold": true,
+      "weekScaffold": [
+        {
+          "sequenceNumber": 1,
+          "weekStartDate": "2026-01-12",
+          "isInstructional": true,
+          "evidence": "explicit_instructional",
+          "lectureSlots": [],
+          "hasFinalExam": false,
+          "hasAssignmentGap": false
+        },
+        {
+          "sequenceNumber": 2,
+          "weekStartDate": "2026-01-19",
+          "isInstructional": false,
+          "evidence": "explicit_noninstructional",
+          "label": "Spring Break — No class",
+          "lectureSlots": [],
+          "hasFinalExam": false,
+          "hasAssignmentGap": false
+        }
+      ]
+    },
+    "topics": [
+      {
+        "weekNumber": 1,
+        "weekLabel": "Week 1",
+        "startDate": "2026-01-12",
+        "topics": ["Module topic added later"],
+        "readings": [],
+        "notes": null,
+        "courseName": "TEST 300",
+        "_scaffoldRole": "empty"
+      },
+      {
+        "weekNumber": 2,
+        "weekLabel": "Spring Break — No class",
+        "startDate": "2026-01-19",
+        "topics": [],
+        "readings": [],
+        "notes": "No class",
+        "courseName": "TEST 300",
+        "_scaffoldRole": "break"
+      }
+    ],
+    "timelineSource": "syllabus",
+    "contentSource": "modules",
+    "lectureCalendarSource": "lecture-anchors",
+    "usedModuleScaffold": true,
+    "usedWeekScaffold": true
+  },
+  "expect": {
+    "scaffoldRoles": ["content", "break"],
+    "contentConfidences": ["high", "high"]
+  }
+}

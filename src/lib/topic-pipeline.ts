@@ -925,7 +925,7 @@ function extractScheduleEvidence(
     for (const line of lines) {
       if (!DATE_SIGNAL_RX.test(line)) continue;
 
-      const looksLikeScheduleRow = isExplicitScheduleRow(line, structuredSource);
+      const looksLikeScheduleRow = isExplicitScheduleRow(line, structuredSource, candidate.label);
 
       if (!looksLikeScheduleRow) continue;
 
@@ -953,7 +953,9 @@ const SESSION_EVIDENCE_RX =
 const CONTAINER_EVIDENCE_RX =
   /\b(week|module|unit)\b/i;
 const ASSESSMENT_EVIDENCE_RX =
-  /\b(quiz|exam|midterm|final|homework|assignment|project|paper|report|deadline|due)\b/i;
+  /\b(quiz|exam|midterm|final|homework|assignment|problem\s*set|pset|worksheet|project|paper|report|deadline|due|points?|score|autograder|submission|scope)\b/i;
+const ASSESSMENT_SOURCE_RX =
+  /\b(quiz|exam|midterm|final|problem[_\s-]*set|pset|worksheet|report|instructions?|autograder|outline)\b/i;
 
 function residualInstructionalText(line: string): string {
   return line
@@ -968,16 +970,24 @@ function residualInstructionalText(line: string): string {
     .trim();
 }
 
-function isExplicitScheduleRow(line: string, structuredSource: boolean): boolean {
+function isExplicitScheduleRow(line: string, structuredSource: boolean, sourceLabel = ""): boolean {
+  const assessmentBiasedSource = ASSESSMENT_SOURCE_RX.test(sourceLabel);
   if (FULL_BREAK_RX.test(line)) return true;
   if (DAY_NAME_SIGNAL_RX.test(line)) return true;
-  if (SESSION_EVIDENCE_RX.test(line)) return true;
 
   const residual = residualInstructionalText(line);
   const hasResidualInstructionalText = /[a-z]{3,}/.test(residual);
   if (CONTAINER_EVIDENCE_RX.test(line) && hasResidualInstructionalText) return true;
 
-  if (structuredSource && hasResidualInstructionalText && !ASSESSMENT_EVIDENCE_RX.test(line)) {
+  if (assessmentBiasedSource) return false;
+
+  if (SESSION_EVIDENCE_RX.test(line)) return true;
+
+  if (
+    structuredSource &&
+    hasResidualInstructionalText &&
+    !ASSESSMENT_EVIDENCE_RX.test(line)
+  ) {
     return true;
   }
 
@@ -1349,10 +1359,16 @@ function mergeContentOntoSpine(args: {
       notes: topic.notes ?? null,
     };
 
-    // Scaffold role from pipeline-local annotation
-    const scaffoldRole = (topic as ScaffoldAnnotatedTopic)._scaffoldRole;
-
     const hasContent = (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
+    const annotatedScaffoldRole = (topic as ScaffoldAnnotatedTopic)._scaffoldRole;
+    const scaffoldRole =
+      args.usedWeekScaffold
+        ? anchor.anchorType === "break" || annotatedScaffoldRole === "break"
+          ? "break"
+          : hasContent
+            ? "content"
+            : "empty"
+        : annotatedScaffoldRole;
     let contentConfidence: ConfidenceLevel =
       !hasContent
         ? "low"
@@ -1725,16 +1741,36 @@ function explicitScheduleDatesAlignToMeetings(
 function assignmentsCorroborateRecurringPattern(
   assignments: AssignmentDateInfo[],
 ): boolean {
+  return recurringAssignmentDateBounds(assignments) !== null;
+}
+
+function recurringAssignmentDateBounds(
+  assignments: AssignmentDateInfo[],
+): { earliest: string; latest: string } | null {
   const weeksBySeries = new Map<string, Set<string>>();
+  const datesBySeries = new Map<string, string[]>();
   for (const assignment of assignments) {
     if (!assignment.dueDate) continue;
     const seriesKey = assignmentSeriesKey(assignment.title);
     if (!seriesKey) continue;
     const weekStart = mondayOfWeek(assignment.dueDate.slice(0, 10));
     if (!weeksBySeries.has(seriesKey)) weeksBySeries.set(seriesKey, new Set());
+    if (!datesBySeries.has(seriesKey)) datesBySeries.set(seriesKey, []);
     weeksBySeries.get(seriesKey)!.add(weekStart);
+    datesBySeries.get(seriesKey)!.push(assignment.dueDate.slice(0, 10));
   }
-  return [...weeksBySeries.values()].some((weeks) => weeks.size > 1);
+
+  const corroboratingDates = [...weeksBySeries.entries()]
+    .filter(([, weeks]) => weeks.size > 1)
+    .flatMap(([seriesKey]) => datesBySeries.get(seriesKey) ?? [])
+    .sort();
+
+  if (corroboratingDates.length === 0) return null;
+
+  return {
+    earliest: corroboratingDates[0],
+    latest: corroboratingDates[corroboratingDates.length - 1],
+  };
 }
 
 function assignmentSeriesKey(title: string): string {
@@ -1770,16 +1806,18 @@ function deriveInstructionWindow(args: {
     startDate = mondayOfWeek(args.explicitScheduleDates[0]);
   }
 
-  const endDate = [
-    args.termEndDate,
+  const instructionalEndCandidates = [
     args.finalExamDate,
     args.explicitScheduleDates[args.explicitScheduleDates.length - 1] ?? null,
     args.lectureAnchors[args.lectureAnchors.length - 1]?.dueDate ?? null,
-  ]
-    .filter((date): date is string => Boolean(date))
-    .map((date) => date.slice(0, 10))
-    .sort()
-    .pop() ?? startDate;
+  ].filter((date): date is string => Boolean(date));
+
+  const endDate = instructionalEndCandidates.length > 0
+    ? instructionalEndCandidates
+      .map((date) => date.slice(0, 10))
+      .sort()
+      .pop()!
+    : (args.termEndDate?.slice(0, 10) ?? startDate);
 
   return {
     startDate,
@@ -1816,6 +1854,7 @@ function buildCalendarFromAllMeetings(
   classSchedule: ClassScheduleInfo,
   termStartDate: string,
   termEndDate: string | null,
+  assignments: AssignmentDateInfo[],
   scheduleEvidence: ScheduleEvidence = EMPTY_SCHEDULE_EVIDENCE,
 ): WeekDateRange[] {
   const resolvedScheduleEvidence = scheduleEvidence;
@@ -1896,6 +1935,7 @@ function buildWeekScaffold(args: {
       args.classSchedule,
       args.termStartDate,
       args.termEndDate,
+      args.assignments,
       scheduleEvidence,
     );
     calendarSource = "term-start";
@@ -1908,18 +1948,18 @@ function buildWeekScaffold(args: {
   let firstMonday = calendarMondays[0];
   let lastMonday = calendarMondays[calendarMondays.length - 1];
 
-  // Determine authoritative end bound from term dates.
-  // Lecture calendar can overshoot (generateLectureSeries adds a 28-day buffer),
-  // so use termEndDate/finalExamDate as the authoritative ceiling.
-  const endBounds = [args.termEndDate, args.finalExamDate, scheduleEvidence.latestExplicitDate]
+  // Extend past the lecture calendar only when explicit later instructional
+  // evidence exists. Administrative term end alone should not create tail weeks.
+  const endBounds = [args.finalExamDate, scheduleEvidence.latestExplicitDate]
     .filter((d): d is string => !!d)
     .map((d) => mondayOfWeek(d));
   if (endBounds.length > 0) {
-    // Use the latest end bound — finals may be after last class day.
-    // This both caps overshoot AND extends if lectures end before term does.
-    lastMonday = endBounds.sort().pop()!;
+    const latestEvidenceMonday = endBounds.sort().pop()!;
+    if (latestEvidenceMonday > lastMonday) {
+      lastMonday = latestEvidenceMonday;
+    }
   }
-  // If no end bounds available, lastMonday stays as lecture calendar's last entry
+  // If no later evidence exists, lastMonday stays anchored to the instructional calendar.
 
   // Generate every Monday from first to last
   const scaffold: ScaffoldWeek[] = [];

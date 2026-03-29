@@ -117,6 +117,12 @@ function runWeekScaffoldFixture(fixture) {
   } else {
     assert(scaffold.length > 0, `${fixture.name}: scaffold is empty`);
   }
+  if (fixture.expect.firstWeekStart) {
+    assert(scaffold[0]?.weekStartDate === fixture.expect.firstWeekStart, `${fixture.name}: expected first scaffold week ${fixture.expect.firstWeekStart}, got ${scaffold[0]?.weekStartDate}`);
+  }
+  if (fixture.expect.lastWeekStart) {
+    assert(scaffold[scaffold.length - 1]?.weekStartDate === fixture.expect.lastWeekStart, `${fixture.name}: expected last scaffold week ${fixture.expect.lastWeekStart}, got ${scaffold[scaffold.length - 1]?.weekStartDate}`);
+  }
 
   // Pre-AI checks
   if (fixture.expect.preAI) {
@@ -361,11 +367,45 @@ function runLectureCalendarFixture(fixture) {
   if (fixture.expect.firstWeekStart) {
     assert(result.weeks[0]?.startDate === fixture.expect.firstWeekStart, `${fixture.name}: expected first week ${fixture.expect.firstWeekStart}, got ${result.weeks[0]?.startDate}`);
   }
+  if (fixture.expect.lastWeekStart) {
+    assert(result.weeks[result.weeks.length - 1]?.startDate === fixture.expect.lastWeekStart, `${fixture.name}: expected last week ${fixture.expect.lastWeekStart}, got ${result.weeks[result.weeks.length - 1]?.startDate}`);
+  }
   if (fixture.expect.weeksInclude) {
     const starts = result.weeks.map((week) => week.startDate);
     for (const date of fixture.expect.weeksInclude) {
       assert(starts.includes(date), `${fixture.name}: missing lecture-calendar week ${date}`);
     }
+  }
+}
+
+function runMergeSpineFixture(fixture) {
+  const { buildTimelineSpine, mergeContentOntoSpine } = timelinePipelineInternals;
+  const spine = buildTimelineSpine(fixture.input.spineArgs);
+  const synthesized = mergeContentOntoSpine({
+    spine,
+    topics: fixture.input.topics,
+    timelineSource: fixture.input.timelineSource ?? "syllabus",
+    contentSource: fixture.input.contentSource ?? "syllabus",
+    lectureCalendarSource: fixture.input.lectureCalendarSource ?? "none",
+    sourceRefs: fixture.input.sourceRefs ?? [],
+    usedModuleScaffold: fixture.input.usedModuleScaffold ?? false,
+    usedWeekScaffold: fixture.input.usedWeekScaffold ?? false,
+    validationWarnings: fixture.input.validationWarnings ?? [],
+  });
+
+  if (fixture.expect.scaffoldRoles) {
+    const actual = synthesized.map((topic) => topic.provenance?.scaffoldRole ?? null);
+    assert(
+      JSON.stringify(actual) === JSON.stringify(fixture.expect.scaffoldRoles),
+      `${fixture.name}: expected scaffold roles ${JSON.stringify(fixture.expect.scaffoldRoles)}, got ${JSON.stringify(actual)}`,
+    );
+  }
+  if (fixture.expect.contentConfidences) {
+    const actual = synthesized.map((topic) => topic.contentConfidence);
+    assert(
+      JSON.stringify(actual) === JSON.stringify(fixture.expect.contentConfidences),
+      `${fixture.name}: expected content confidences ${JSON.stringify(fixture.expect.contentConfidences)}, got ${JSON.stringify(actual)}`,
+    );
   }
 }
 
@@ -400,6 +440,8 @@ async function main() {
       runLectureCalendarFixture(fixture);
     } else if (fixture.kind === "normalize-numbering") {
       runNormalizeNumberingFixture(fixture);
+    } else if (fixture.kind === "merge-spine") {
+      runMergeSpineFixture(fixture);
     } else if (fixture.kind === "week-scaffold") {
       runWeekScaffoldFixture(fixture);
     } else if (fixture.kind === "scaffold-e2e") {
