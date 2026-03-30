@@ -14,10 +14,7 @@ import {
   type ParsedTopic,
   type ExtractedClassSchedule,
 } from "@/lib/parse-syllabus";
-import { runTopicPipeline, type PipelineInput, type PipelineResult } from "@/lib/topic-pipeline";
-import { runTopicPipelineV2, runCrossCourseConsistencyCheck, reReconcileWithInstitutionalContext, type V2PipelineResult } from "@/lib/reconciliation/pipeline-v2";
-import { buildInstitutionalContext } from "@/lib/reconciliation/cross-course-pass";
-import type { ReconciliationResult } from "@/lib/reconciliation/types";
+import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
 import { addDays, addYears, parseISO, subDays } from "date-fns";
 import { generateTasksForUser } from "@/lib/tasks";
@@ -677,17 +674,6 @@ export async function POST(request: NextRequest) {
   const allCourseDebug: CourseDebug[] = [];
   const scheduleRows: string[] = [];
 
-  // V2 pipeline: collect reconciliation results for cross-course pass
-  const useV2 = true;
-  const v2CourseResults: {
-    courseId: string;
-    courseName: string;
-    result: ReconciliationResult;
-    pipelineInput: PipelineInput;
-    announcements?: { title: string; body: string; postedAt: string }[];
-    calendarEvents?: { title: string; startAt: string; endAt: string }[];
-  }[] = [];
-
   await Promise.all(
     courses.map(async (c) => {
       try {
@@ -1194,59 +1180,7 @@ export async function POST(request: NextRequest) {
             : [],
         };
 
-        // Fetch announcements for V2 evidence bundle
-        const courseAnnouncements = useV2
-          ? await db.announcement.findMany({
-              where: { courseId: scCourseId },
-              select: { title: true, body: true, postedAt: true },
-              orderBy: { postedAt: "desc" },
-              take: 20,
-            })
-          : [];
-
-        let pipelineResult: PipelineResult;
-        if (useV2) {
-          const v2Result = await runTopicPipelineV2(pipelineInput, {
-            announcements: courseAnnouncements.map((a) => ({
-              title: a.title,
-              body: a.body ?? "",
-              postedAt: a.postedAt ?? "",
-            })),
-            calendarEvents: c.calendarEvents?.map((e) => ({
-              title: e.title,
-              startAt: e.startAt,
-              endAt: e.endAt,
-            })),
-          });
-
-          if (v2Result.v2Failed) {
-            // V2 validation failed — fall back to V1 to preserve existing timeline
-            console.log(`[sync] ${c.name}: V2 validation failed, falling back to V1`);
-            pipelineResult = await runTopicPipeline(pipelineInput);
-          } else {
-            pipelineResult = v2Result;
-            // Stash full reconciliation result for cross-course pass
-            v2CourseResults.push({
-              courseId: scCourseId,
-              courseName: c.name,
-              result: v2Result.reconciliationResult,
-              pipelineInput,
-              announcements: courseAnnouncements.map((a) => ({
-                title: a.title,
-                body: a.body ?? "",
-                postedAt: a.postedAt ?? "",
-              })),
-              calendarEvents: c.calendarEvents?.map((e) => ({
-                title: e.title,
-                startAt: e.startAt,
-                endAt: e.endAt,
-              })),
-            });
-          }
-        } else {
-          pipelineResult = await runTopicPipeline(pipelineInput);
-        }
-
+        const pipelineResult = await runTopicPipeline(pipelineInput);
         const topics = pipelineResult.topics;
         const anchors = pipelineResult.anchors;
 
@@ -1355,95 +1289,6 @@ export async function POST(request: NextRequest) {
 
   if (scheduleRows.length > 0) {
     console.log("[sync] classSchedule:\n" + scheduleRows.join("\n"));
-  }
-
-  // ── V2 Cross-Course Consistency Pass ────────────────────────────────────────
-  if (useV2 && v2CourseResults.length >= 2) {
-    try {
-      console.log(`[sync] V2 cross-course pass: analyzing ${v2CourseResults.length} courses`);
-      const crossCourseResult = await runCrossCourseConsistencyCheck(
-        v2CourseResults.map((cr) => ({ courseId: cr.courseId, courseName: cr.courseName, result: cr.result })),
-      );
-
-      const institutionalContext = buildInstitutionalContext(crossCourseResult);
-      const affectedCourses = crossCourseResult.institutionalBreaks
-        .filter((b) => b.confidence === "high" || b.confidence === "medium")
-        .flatMap((b) => b.missingFromCourses);
-      const uniqueAffected = [...new Set(affectedCourses)];
-
-      console.log(`[sync] V2 cross-course: ${crossCourseResult.institutionalBreaks.length} breaks detected, ${uniqueAffected.length} courses need re-reconciliation`);
-
-      // Re-reconcile affected courses with institutional context
-      for (const courseName of uniqueAffected) {
-        const cr = v2CourseResults.find((c) => c.courseName === courseName);
-        if (!cr) continue;
-
-        try {
-          const reResult = await reReconcileWithInstitutionalContext(cr.pipelineInput, institutionalContext, {
-            announcements: cr.announcements,
-            calendarEvents: cr.calendarEvents,
-          });
-          const topics = reResult.topics;
-          const anchors = reResult.anchors;
-
-          // Rewrite DB for this course
-          await db.courseTopic.deleteMany({ where: { courseId: cr.courseId, canvasModuleId: null } });
-          await db.courseTimelineAnchor.deleteMany({ where: { courseId: cr.courseId } });
-
-          await db.course.update({
-            where: { id: cr.courseId },
-            data: {
-              timelineMode: reResult.timelineMode,
-              timelineDiagnostics: {
-                ...(reResult.timelineDiagnostics as Record<string, unknown>),
-                crossCourseReReconciled: true,
-                crossCourseSummary: crossCourseResult.summary,
-              },
-            },
-          });
-
-          if (anchors.length > 0) {
-            await db.courseTimelineAnchor.createMany({
-              data: anchors.map((anchor) => ({
-                courseId: cr.courseId,
-                sequenceNumber: anchor.sequenceNumber,
-                anchorDate: anchor.anchorDate,
-                anchorType: anchor.anchorType,
-                isInstructional: anchor.isInstructional,
-                calendarConfidence: anchor.calendarConfidence,
-                sourceRefs: anchor.sourceRefs as object[],
-                notes: anchor.notes ?? null,
-              })),
-            });
-          }
-
-          if (topics.length > 0) {
-            await db.courseTopic.createMany({
-              data: topics.map((t, i) => ({
-                courseId: cr.courseId,
-                weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
-                weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
-                startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
-                topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
-                readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
-                notes: typeof t.notes === "string" ? t.notes : null,
-                dateConfidence: t.dateConfidence,
-                contentConfidence: t.contentConfidence,
-                scheduleMode: t.scheduleMode,
-                provenance: t.provenance as object,
-                canvasModuleId: null,
-              })),
-            });
-          }
-
-          console.log(`[sync] V2 cross-course re-reconciled "${courseName}": ${topics.length} weeks`);
-        } catch (reErr) {
-          console.error(`[sync] V2 cross-course re-reconciliation failed for "${courseName}":`, reErr);
-        }
-      }
-    } catch (crossErr) {
-      console.error("[sync] V2 cross-course pass failed:", crossErr);
-    }
   }
 
   bgLog.info("background AI processing complete", {
