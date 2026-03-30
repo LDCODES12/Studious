@@ -11,7 +11,6 @@
     "copy-grid": "esbuild src/lib/pdf-calendar-grid.ts --bundle --format=esm --outfile=extension/pdf-calendar-grid.js",
     "prep-extension": "npm run copy-pdfjs && npm run copy-grid",
     "check:timelines": "node scripts/check-timeline-regressions.js",
-    "check:timeline-fixtures": "node --experimental-strip-types scripts/check-topic-pipeline-fixtures.mjs",
     "check:pdf-grid": "node --experimental-strip-types scripts/check-pdf-grid-fixtures.mjs"
   },
   "dependencies": {
