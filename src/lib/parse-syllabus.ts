@@ -208,6 +208,13 @@ const TABULAR_FINALS_ROW_RX = /^\s*finals?\b/i;
 const DATE_RANGE_PREFIX_RX = /^((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*\d{1,2}(?:\s*[–-]\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*)?\d{1,2})?)(.*)$/i;
 const SECTION_LIST_AT_END_RX = /^(.*?)(\d{1,2}\.\d{1,2}(?:\s*,\s*\d{1,2}\.\d{1,2})*)$/;
 const TABULAR_ROW_SCORE_RX = /^\s*\d+\t(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)/gim;
+const COURSE_OUTLINE_HEADING_RX = /\bcourse outline\b/i;
+const LECTURE_OUTLINE_SECTION_RX = /([A-Z][A-Za-z0-9/&'()\-– ]{3,}?):\s*(?:\([^)]{0,180}\)\s*)?[–-]\s*(\d+)\s*lectures?\b/gi;
+const LECTURE_OUTLINE_BULLET_RX = /(?:^|[•\n\r])\s*lecture\s+(\d+)\s*:\s*([\s\S]*?)(?=(?:[•\n\r]\s*lecture\s+\d+\s*:)|$)/gi;
+const LECTURE_OUTLINE_BULLET_START_RX = /(?:^|[•\n\r])\s*lecture\s+(\d+)\s*:/gi;
+const INLINE_SINGLE_LECTURE_RX = /\(\s*lecture\s+(\d+)\s*\)\s*([\s\S]*?)$/i;
+const INLINE_SINGLE_LECTURE_GLOBAL_RX = /\(\s*lecture\s+(\d+)\s*\)\s*([\s\S]*?)(?=(?:[A-Z][A-Za-z0-9/&'()\-– ]{3,}:\s*(?:\([^)]{0,180}\)\s*)?[–-]\s*\d+\s*lectures?\b)|$)/gi;
+const LECTURE_OUTLINE_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bno classes?\b|\bno lecture\b|\bholiday\b/i;
 
 function inferCourseNameFromText(text: string): string {
   const firstContentLine = text
@@ -259,6 +266,189 @@ function parseSectionReadings(sectionField: string, text: string): string[] {
     .map((part) => normalizeInlineWhitespace(part))
     .filter(Boolean)
     .map((part) => /^\d{1,2}\.\d{1,2}$/.test(part) ? `${prefix}${part}` : part);
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    const normalized = normalizeInlineWhitespace(value ?? "");
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
+function cleanLectureOutlineSectionTitle(title: string): string {
+  const normalized = normalizeInlineWhitespace(title)
+    .replace(/^.*?\bcourse outline\b\s*/i, "")
+    .replace(/\s*-\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s*[—-]\s*$/, "")
+    .trim();
+
+  const trailingTitleMatch = normalized.match(
+    /([A-Z][A-Za-z0-9&'()\-–]+(?:\s+(?:[A-Z][A-Za-z0-9&'()\-–]+|of|and|the|for|to|in|on|Base)){0,7})$/,
+  );
+  const candidate = (trailingTitleMatch?.[1] ?? normalized).trim();
+
+  if (!candidate || /^lecture\s+\d+\b/i.test(candidate)) {
+    return "";
+  }
+
+  return candidate;
+}
+
+function cleanLectureOutlineBody(body: string): string {
+  return normalizeInlineWhitespace(
+    body
+      .replace(/^[•\s]+/, "")
+      .replace(/\s+/g, " "),
+  );
+}
+
+function stripTrailingLectureOutlinePrelude(body: string): string {
+  return body.replace(
+    /^([\s\S]*?\S)\s{2,}[A-Z][A-Za-z0-9/&'()\-– ]{3,}:\s*(?:\([^)]{0,180}\)\s*)?[–-]\s*\d+\s*lectures?\b[\s\S]*$/i,
+    "$1",
+  );
+}
+
+function buildLectureOutlineWeekLabel(sectionTitle: string | null, lectureBody: string): string {
+  const normalizedBody = cleanLectureOutlineBody(lectureBody);
+  const firstSentence = normalizeInlineWhitespace(normalizedBody.split(/(?<=[.?!])\s+/)[0] ?? normalizedBody);
+  const firstClause = normalizeInlineWhitespace(firstSentence.split(/\s*;\s*/)[0] ?? firstSentence);
+  const condensed = normalizeInlineWhitespace(firstClause.split(/\s*,\s*/).slice(0, 2).join(", "));
+  const preferred = condensed || sectionTitle || normalizedBody || "Lecture";
+  return preferred.length > 110 ? `${preferred.slice(0, 107).trimEnd()}...` : preferred;
+}
+
+function buildLectureOutlineTopics(sectionTitle: string | null, lectureBody: string): string[] {
+  const normalizedBody = cleanLectureOutlineBody(lectureBody);
+  const primarySnippet = normalizeInlineWhitespace(normalizedBody.split(/(?<=[.?!])\s+/)[0] ?? normalizedBody);
+  return uniqueStrings([sectionTitle, primarySnippet || normalizedBody]);
+}
+
+function tryParseLectureOutlineSchedule(text: string): ParsedSchedule | null {
+  const lectureBulletHits = (text.match(/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/gi) ?? []).length;
+  const sectionMatches = [...text.matchAll(LECTURE_OUTLINE_SECTION_RX)]
+    .map((match) => ({
+      index: match.index ?? 0,
+      bodyStart: (match.index ?? 0) + match[0].length,
+      lectureCount: Number.parseInt(match[2] ?? "0", 10),
+      title: cleanLectureOutlineSectionTitle(match[1] ?? ""),
+    }))
+    .filter((section) =>
+      section.title.length > 0 &&
+      section.title.length <= 140 &&
+      !/\blecture\s+\d+\b/i.test(section.title),
+    );
+  const looksLikeLectureOutline =
+    COURSE_OUTLINE_HEADING_RX.test(text) ||
+    lectureBulletHits >= 4 ||
+    sectionMatches.length >= 2;
+  if (!looksLikeLectureOutline) return null;
+
+  const courseName = inferCourseNameFromText(text);
+  const year = inferAcademicYear(text);
+  const weeks: ParsedTopic[] = [];
+  const seenLectures = new Set<number>();
+
+  const pushLecture = (
+    weekNumberRaw: string | number,
+    lectureBodyRaw: string,
+    sectionTitle: string | null,
+  ) => {
+    const weekNumber = typeof weekNumberRaw === "number"
+      ? weekNumberRaw
+      : Number.parseInt(String(weekNumberRaw), 10);
+    if (!Number.isFinite(weekNumber) || weekNumber <= 0 || seenLectures.has(weekNumber)) return;
+
+    const lectureBody = cleanLectureOutlineBody(lectureBodyRaw);
+    if (!lectureBody) return;
+
+    seenLectures.add(weekNumber);
+    weeks.push({
+      weekNumber,
+      weekLabel: buildLectureOutlineWeekLabel(sectionTitle, lectureBody),
+      startDate: parseIsoDateFromScheduleField(lectureBody, year),
+      topics: buildLectureOutlineTopics(sectionTitle, lectureBody),
+      readings: [],
+      notes: sectionTitle ? `Outline section: ${sectionTitle}` : null,
+      courseName,
+    });
+  };
+
+  const sectionForIndex = (index: number): { title: string; lectureCount: number; bodyStart: number } | null => {
+    let bestSection: { title: string; lectureCount: number; bodyStart: number } | null = null;
+    for (const section of sectionMatches) {
+      if (section.bodyStart <= index) {
+        bestSection = { title: section.title, lectureCount: section.lectureCount, bodyStart: section.bodyStart };
+      } else {
+        break;
+      }
+    }
+    return bestSection;
+  };
+
+  const nextSectionIndexAfter = (index: number): number => {
+    for (const section of sectionMatches) {
+      if (section.index > index) return section.index;
+    }
+    return text.length;
+  };
+
+  const lectureBullets = [...text.matchAll(LECTURE_OUTLINE_BULLET_START_RX)].map((match) => ({
+    index: match.index ?? 0,
+    bodyStart: (match.index ?? 0) + match[0].length,
+    lectureNumber: match[1] ?? "",
+  }));
+
+  for (let i = 0; i < lectureBullets.length; i++) {
+    const bullet = lectureBullets[i];
+    const nextBulletIndex = lectureBullets[i + 1]?.index ?? text.length;
+    const bodyEnd = Math.min(nextBulletIndex, text.length);
+    const lectureBody = stripTrailingLectureOutlinePrelude(text.slice(bullet.bodyStart, bodyEnd));
+    const section = sectionForIndex(bullet.index);
+    pushLecture(bullet.lectureNumber, lectureBody, section?.title || null);
+  }
+
+  for (let i = 0; i < sectionMatches.length; i++) {
+    const section = sectionMatches[i];
+    if (section.lectureCount !== 1) continue;
+
+    const sectionEnd = sectionMatches[i + 1]?.index ?? text.length;
+    const sectionBody = text.slice(section.bodyStart, sectionEnd);
+    if (/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/i.test(sectionBody)) continue;
+
+    const inlineMatch = sectionBody.match(INLINE_SINGLE_LECTURE_RX);
+    if (inlineMatch) {
+      pushLecture(inlineMatch[1] ?? "", inlineMatch[2] ?? "", section.title || null);
+    }
+  }
+
+  for (const inlineMatch of text.matchAll(INLINE_SINGLE_LECTURE_GLOBAL_RX)) {
+    const lectureIndex = inlineMatch.index ?? 0;
+    const section = sectionForIndex(lectureIndex);
+    pushLecture(inlineMatch[1] ?? "", inlineMatch[2] ?? "", section?.title || null);
+  }
+
+  if (weeks.length < 4) return null;
+
+  weeks.sort((a, b) => a.weekNumber - b.weekNumber);
+
+  return {
+    weeks,
+    shape: "lecture",
+    rowSemantics: "lecture_number",
+    hasExplicitDates: weeks.some((week) => Boolean(week.startDate)),
+    hasExplicitBreakRows: weeks.some((week) => LECTURE_OUTLINE_BREAK_RX.test(`${week.weekLabel} ${week.notes ?? ""}`)),
+  };
 }
 
 function tryParseTabularSchedule(text: string): ParsedSchedule | null {
@@ -900,6 +1090,11 @@ export async function parseSyllabusSchedule(
     return tabularSchedule;
   }
 
+  const lectureOutlineSchedule = tryParseLectureOutlineSchedule(text);
+  if (lectureOutlineSchedule) {
+    return lectureOutlineSchedule;
+  }
+
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
 
   // If structure hint is provided, prepend it so the AI sees deterministic facts first
@@ -1043,11 +1238,26 @@ export function scheduleScore(text: string): number {
   const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
   const topicHits  = (t.match(/\b(introduction|overview|chapter|ch\.\s*\d|topic[s]?:|reading[s]?:)/g) ?? []).length;
   const rowHits = (text.match(TABULAR_ROW_SCORE_RX) ?? []).length;
+  const outlineHits = (t.match(/\bcourse outline\b/g) ?? []).length;
+  const lectureSectionHits = (text.match(LECTURE_OUTLINE_SECTION_RX) ?? []).length;
+  const lectureBulletHits = (text.match(/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/gim) ?? []).length;
   const hasExplicitScheduleTable = TABULAR_SCHEDULE_HEADER_RX.test(text) && rowHits >= 4;
   const tableHits  = rowHits + (TABULAR_SCHEDULE_HEADER_RX.test(text) ? 3 : 0);
   const breakHits  = (t.match(/\bspring break|holiday|no class\b/g) ?? []).length;
   const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
-  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 + tableHits * 5 + breakHits * 2 + (hasExplicitScheduleTable ? 320 : 0) - policyHits * 1;
+  const hasLectureOutline = lectureSectionHits >= 2 && lectureBulletHits >= 4;
+  const raw =
+    weekHits * 4 +
+    dateHits * 2 +
+    topicHits * 2 +
+    tableHits * 5 +
+    breakHits * 2 +
+    outlineHits * 30 +
+    lectureSectionHits * 14 +
+    lectureBulletHits * 6 +
+    (hasExplicitScheduleTable ? 320 : 0) +
+    (hasLectureOutline ? 220 : 0) -
+    policyHits * 1;
   return raw / (text.length / 500);
 }
 
@@ -1070,6 +1280,17 @@ export function bestWindow(text: string, maxLen = 12_000): string {
     }
   }
 
+  const courseOutlineIndex = text.search(COURSE_OUTLINE_HEADING_RX);
+  if (courseOutlineIndex >= 0) {
+    const directStart = Math.max(0, courseOutlineIndex - 800);
+    const directSlice = text.slice(directStart, Math.min(text.length, directStart + maxLen));
+    const lectureSectionCount = (directSlice.match(LECTURE_OUTLINE_SECTION_RX) ?? []).length;
+    const lectureBulletCount = (directSlice.match(/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/gim) ?? []).length;
+    if (lectureSectionCount >= 2 || lectureBulletCount >= 4) {
+      return directSlice;
+    }
+  }
+
   const end = text.length - maxLen;
   const offsets = [0, Math.floor(end / 3), Math.floor(end * 2 / 3), end];
   let best = "";
@@ -1082,6 +1303,13 @@ export function bestWindow(text: string, maxLen = 12_000): string {
   if (rowMatch?.index !== undefined) {
     extraOffsets.push(Math.max(0, rowMatch.index - Math.floor(maxLen * 0.15)));
     TABULAR_ROW_SCORE_RX.lastIndex = 0;
+  }
+  if (courseOutlineIndex >= 0) {
+    extraOffsets.push(Math.max(0, courseOutlineIndex - Math.floor(maxLen * 0.1)));
+  }
+  const lectureBulletMatch = text.match(/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/im);
+  if (lectureBulletMatch?.index !== undefined) {
+    extraOffsets.push(Math.max(0, lectureBulletMatch.index - Math.floor(maxLen * 0.15)));
   }
   const uniqueOffsets = [...new Set([...offsets, ...extraOffsets])].sort((a, b) => a - b);
   for (const offset of uniqueOffsets) {
@@ -1103,7 +1331,12 @@ export function detectSourceFormat(text: string): string {
   ) ?? []).length;
   const tabLines = lines.filter((l) => l.includes("\t")).length;
   const hasTabStructure = lines.length > 0 && tabLines / lines.length > 0.15;
+  const lectureBulletHits = (text.match(/(?:^|[•\n\r])\s*lecture\s+\d+\s*:/gim) ?? []).length;
+  const lectureSectionHits = (text.match(LECTURE_OUTLINE_SECTION_RX) ?? []).length;
   if (dayNameHits >= 5 && hasTabStructure) return "weekly calendar grid (7-column Sun-Sat; each row = one week; cells contain date + optional event text)";
+  if ((COURSE_OUTLINE_HEADING_RX.test(text) || lectureSectionHits >= 2) && lectureBulletHits >= 4) {
+    return "lecture outline with repeated Lecture N rows";
+  }
   if (tabLines / lines.length > 0.25) return "tab-separated table";
   const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
   const shortLineRatio = lines.filter((l) => l.length < 120).length / lines.length;

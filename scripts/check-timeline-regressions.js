@@ -136,8 +136,14 @@ async function main() {
   if (genChem.topics.some((topic) => !allowedSourceBlocks.has(topic.sourceBlock))) {
     fail("Gen Chem 2 has an invalid sourceBlock");
   }
-  if (!genChem.topics.some((topic) => topic.startDate === "2026-03-09" && /break/i.test(topic.weekLabel))) {
-    fail("Gen Chem 2 is missing the 2026-03-09 break week");
+  if (genChem.topics.length > 20) {
+    fail(`Gen Chem 2 regressed into an over-granular timeline (${genChem.topics.length} rows)`);
+  }
+  if (countDuplicateDates(genChem.topics).length > 0) {
+    fail("Gen Chem 2 still has duplicate dated weeks");
+  }
+  if (genChem.topics.some((topic) => topic.sourceBlock === "schedule_table" && !topic.startDate)) {
+    fail("Gen Chem 2 is still committing undated lecture-outline rows as canonical timeline");
   }
   const examStudyOutline = genChem.materials.find((material) => /Exam 1 Study Outline/i.test(material.fileName));
   if (!examStudyOutline || examStudyOutline.sourceRole !== "content") {

@@ -473,6 +473,168 @@ function summarizeAssignmentFallbackWeek(rawTitles: string[]): {
   };
 }
 
+interface OutlineFallbackHint {
+  weekNumber: number;
+  weekLabel: string | null;
+  topicHints: string[];
+}
+
+function extractLectureNumbersFromAssignmentTitles(rawTitles: string[]): number[] {
+  const numbers = new Set<number>();
+
+  for (const rawTitle of rawTitles) {
+    for (const match of rawTitle.matchAll(/lecture\s+review\s+questions?\s*-\s*lecture\s*#?\s*(\d+)/gi)) {
+      const lectureNumber = Number.parseInt(match[1] ?? "", 10);
+      if (Number.isFinite(lectureNumber) && lectureNumber > 0) {
+        numbers.add(lectureNumber);
+      }
+    }
+  }
+
+  return [...numbers].sort((a, b) => a - b);
+}
+
+function sanitizeOutlineSectionTitle(rawTitle: string | null | undefined): string | null {
+  const normalized = (rawTitle ?? "").trim();
+  if (!normalized) return null;
+
+  const trailingTitleMatch = normalized.match(
+    /([A-Z][A-Za-z0-9&'()\-–]+(?:\s+(?:[A-Z][A-Za-z0-9&'()\-–]+|of|and|the|for|to|in|on|Base)){0,7})$/,
+  );
+  const candidate = (trailingTitleMatch?.[1] ?? normalized).trim();
+
+  return /^[A-Z][A-Za-z0-9&'()\-–]+(?:\s+(?:[A-Z][A-Za-z0-9&'()\-–]+|of|and|the|for|to|in|on|Base)){0,7}$/.test(candidate)
+    ? candidate
+    : null;
+}
+
+function stripLeadingOutlinePrefix(sectionTitle: string, prefix: string): string | null {
+  const normalizedPrefix = normalizeForDedup(prefix);
+  const normalizedTitle = normalizeForDedup(sectionTitle);
+  if (!normalizedPrefix || !normalizedTitle.startsWith(normalizedPrefix)) return null;
+
+  const titleWords = sectionTitle.trim().split(/\s+/);
+  const prefixWords = prefix.trim().split(/\s+/);
+  if (titleWords.length <= prefixWords.length) return null;
+
+  return sanitizeOutlineSectionTitle(titleWords.slice(prefixWords.length).join(" "));
+}
+
+function getOutlineSectionTitle(topic: ParsedTopic): string | null {
+  const noteMatch = typeof topic.notes === "string"
+    ? topic.notes.match(/^outline section:\s*(.+)$/i)
+    : null;
+  if (noteMatch?.[1]) {
+    return sanitizeOutlineSectionTitle(noteMatch[1]);
+  }
+
+  return null;
+}
+
+function getOutlineLectureHint(topic: ParsedTopic): string | null {
+  const sectionTitle = getOutlineSectionTitle(topic);
+  const sectionKey = normalizeForDedup(sectionTitle ?? "");
+
+  for (const entry of topic.topics ?? []) {
+    if (normalizeForDedup(entry) !== sectionKey) {
+      return entry;
+    }
+  }
+
+  return topic.weekLabel?.trim() || null;
+}
+
+function buildOutlineFallbackHints(
+  outlineTopics: ParsedTopic[],
+  assignmentFallbackTopics: ParsedTopic[],
+): OutlineFallbackHint[] {
+  if (outlineTopics.length === 0 || assignmentFallbackTopics.length === 0) return [];
+
+  const outlineByLecture = new Map<number, ParsedTopic>();
+  for (const topic of outlineTopics) {
+    outlineByLecture.set(topic.weekNumber, topic);
+  }
+
+  return assignmentFallbackTopics.flatMap((fallbackWeek) => {
+    const lectureNumbers = extractLectureNumbersFromAssignmentTitles(fallbackWeek.topics ?? []);
+    if (lectureNumbers.length === 0) return [];
+
+    const matchedTopics = lectureNumbers
+      .map((lectureNumber) => outlineByLecture.get(lectureNumber))
+      .filter((topic): topic is ParsedTopic => Boolean(topic));
+    if (matchedTopics.length === 0) return [];
+
+    const seen = new Set<string>();
+    const topicHints: string[] = [];
+    const sectionTitles: string[] = [];
+    const lectureTopicHints: string[] = [];
+    const previousLectureTopic = outlineByLecture.get(Math.min(...lectureNumbers) - 1);
+    const previousLectureHint = previousLectureTopic
+      ? getOutlineLectureHint(previousLectureTopic) ?? previousLectureTopic.weekLabel ?? ""
+      : "";
+    const previousLecturePrefix = normalizeForDedup(previousLectureHint).split(" ")[0] ?? "";
+
+    const pushHint = (value: string | null | undefined) => {
+      const normalized = normalizeForDedup(value ?? "");
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      topicHints.push((value ?? "").trim());
+    };
+
+    for (const matchedTopic of matchedTopics) {
+      const sectionTitle = getOutlineSectionTitle(matchedTopic);
+      if (sectionTitle) {
+        sectionTitles.push(sectionTitle);
+      }
+      const lectureHint = getOutlineLectureHint(matchedTopic);
+      if (lectureHint) {
+        lectureTopicHints.push(lectureHint);
+      }
+    }
+
+    const normalizedSectionTitles = sectionTitles
+      .map((sectionTitle) => {
+        const normalized = normalizeForDedup(sectionTitle);
+        if (!normalized) return null;
+        if (previousLecturePrefix && normalized.startsWith(previousLecturePrefix)) {
+          return stripLeadingOutlinePrefix(sectionTitle, previousLectureHint);
+        }
+        return sectionTitle;
+      })
+      .filter((sectionTitle): sectionTitle is string => Boolean(sectionTitle));
+    const sectionTitleCounts = new Map<string, number>();
+    for (const sectionTitle of normalizedSectionTitles) {
+      sectionTitleCounts.set(sectionTitle, (sectionTitleCounts.get(sectionTitle) ?? 0) + 1);
+    }
+    const rankedSectionTitles = [...sectionTitleCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    let uniqueSectionTitles: string[];
+    if (rankedSectionTitles.length > 1 && (rankedSectionTitles[0]?.[1] ?? 0) >= 2 && (rankedSectionTitles[0]?.[1] ?? 0) > (rankedSectionTitles[1]?.[1] ?? 0)) {
+      uniqueSectionTitles = [rankedSectionTitles[0]![0]];
+    } else {
+      uniqueSectionTitles = [...new Set(normalizedSectionTitles)];
+    }
+    for (const sectionTitle of uniqueSectionTitles) {
+      pushHint(sectionTitle);
+    }
+    for (const lectureHint of lectureTopicHints) {
+      pushHint(lectureHint);
+    }
+    const lectureRange = formatLectureRange(lectureNumbers);
+    const weekLabel = uniqueSectionTitles.length === 1 && lectureRange
+      ? `${uniqueSectionTitles[0]}: ${lectureRange}`
+      : uniqueSectionTitles.length === 1
+        ? uniqueSectionTitles[0]!
+        : lectureRange;
+
+    return [{
+      weekNumber: fallbackWeek.weekNumber,
+      weekLabel,
+      topicHints: topicHints.slice(0, 4),
+    }];
+  });
+}
+
 function stripBreakSegments(notes?: unknown): string | null {
   const normalized = normalizeNotesValue(notes);
   if (!normalized) return null;
@@ -1255,6 +1417,7 @@ function refineAssignmentFallbackPresentation(
   assignmentFallbackTopics: ParsedTopic[],
   moduleDeltas: ModuleDelta[],
   weekLabelHints: WeekLabelHint[],
+  outlineHints: OutlineFallbackHint[],
 ): ReconciledTopic[] {
   if (assignmentFallbackTopics.length === 0 || topics.length === 0) return topics;
 
@@ -1279,6 +1442,11 @@ function refineAssignmentFallbackPresentation(
     }
   }
 
+  const outlineHintByWeek = new Map<number, OutlineFallbackHint>();
+  for (const hint of outlineHints) {
+    outlineHintByWeek.set(hint.weekNumber, hint);
+  }
+
   return topics.map((week) => {
     if (week.sourceBlock !== "canvas_assignments") return week;
 
@@ -1292,15 +1460,38 @@ function refineAssignmentFallbackPresentation(
     const assignmentSummary = summarizeAssignmentFallbackWeek(rawAssignmentTitles);
     const moduleSignal = moduleSignalByWeek.get(week.weekNumber);
     const hint = weekLabelHintByWeek.get(week.weekNumber);
+    const outlineHint = outlineHintByWeek.get(week.weekNumber);
     const hasModuleEvidence = Boolean(hint) || Boolean(moduleSignal && (moduleSignal.topicAdds > 0 || moduleSignal.readingAdds > 0));
+    const hasOutlineEvidence = Boolean(outlineHint && (outlineHint.weekLabel || outlineHint.topicHints.length > 0));
 
-    const nextTopics = hasModuleEvidence
-      ? nonAssignmentTopics
+    const mergedTopicHints: string[] = [];
+    const mergedTopicHintKeys = new Set<string>();
+    const pushVisibleTopic = (value: string | null | undefined) => {
+      const normalized = normalizeForDedup(value ?? "");
+      if (!normalized || mergedTopicHintKeys.has(normalized)) return;
+      mergedTopicHintKeys.add(normalized);
+      mergedTopicHints.push((value ?? "").trim());
+    };
+
+    if (hasOutlineEvidence) {
+      for (const topicHint of outlineHint?.topicHints ?? []) {
+        pushVisibleTopic(topicHint);
+      }
+    }
+    if (hasModuleEvidence) {
+      for (const topicHint of nonAssignmentTopics) {
+        pushVisibleTopic(topicHint);
+      }
+    }
+
+    const nextTopics = mergedTopicHints.length > 0
+      ? mergedTopicHints.slice(0, 4)
       : assignmentSummary.topicHints.length > 0
         ? assignmentSummary.topicHints
         : rawAssignmentTitles.slice(0, 3);
 
-    const nextWeekLabel = hint?.weekLabel
+    const nextWeekLabel = outlineHint?.weekLabel
+      ?? hint?.weekLabel
       ?? (isAssignmentFallbackLabel(week.weekLabel) && assignmentSummary.weekLabelHint
         ? assignmentSummary.weekLabelHint
         : week.weekLabel);
@@ -1724,6 +1915,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   let usedModuleScaffold = false;
   let sourceBlock = "schedule_table";
   let assignmentFallbackTopics: ParsedTopic[] = [];
+  let lectureOutlineFallbackHints: OutlineFallbackHint[] = [];
 
   // Determine source block from extraction shape
   if (extraction.scheduleShape === "none") {
@@ -1753,10 +1945,14 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
         topics: [...(week.topics ?? [])],
         readings: [...(week.readings ?? [])],
       }));
+      lectureOutlineFallbackHints = extraction.rowSemantics === "lecture_number"
+        ? buildOutlineFallbackHints(extraction.topics, assignmentFallbackTopics)
+        : [];
       sourceBlock = "canvas_assignments";
       debug.fallbackUsed = true;
       console.log(
-        `[pipeline] ${input.courseName}: Step 2 fallback → ${assignmentTimeline.length} assignment-timeline entries`,
+        `[pipeline] ${input.courseName}: Step 2 fallback → ${assignmentTimeline.length} assignment-timeline entries` +
+        (lectureOutlineFallbackHints.length > 0 ? ` + ${lectureOutlineFallbackHints.length} outline hint week(s)` : ""),
       );
     }
   }
@@ -1835,6 +2031,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       assignmentFallbackTopics,
       moduleDeltas,
       weekLabelHints,
+      lectureOutlineFallbackHints,
     );
 
     moduleIdsToDelete = input.modules.map((m) => m.id);
@@ -1871,6 +2068,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       assignmentFallbackTopics,
       moduleDeltas,
       weekLabelHints,
+      lectureOutlineFallbackHints,
     );
 
     moduleIdsToDelete = input.modules.map((m) => m.id);
