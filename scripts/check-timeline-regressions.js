@@ -62,6 +62,7 @@ async function main() {
           weekLabel: true,
           startDate: true,
           topics: true,
+          readings: true,
           dateConfidence: true,
           scheduleMode: true,
           verificationStatus: true,
@@ -92,11 +93,33 @@ async function main() {
   if (anthropology.topics.some((topic) => !allowedVerificationStatuses.has(topic.verificationStatus))) {
     fail("Anthropology has an invalid verificationStatus");
   }
+  if (anthropology.timelineMode !== "weekly") {
+    fail(`Anthropology timelineMode regressed to ${anthropology.timelineMode}`);
+  }
+  if (anthropology.topics.length !== 15) {
+    fail(`Anthropology should have 15 timeline weeks, found ${anthropology.topics.length}`);
+  }
   if (anthropology.topics.some((topic) => topic.startDate === "2026-01-01")) {
     fail("Anthropology still has a bogus 2026-01-01 row");
   }
   if (countDuplicateDates(anthropology.topics).length > 0) {
     fail("Anthropology still has duplicate dated weeks");
+  }
+  const anthroWeek1 = anthropology.topics.find((topic) => topic.weekNumber === 1);
+  if (!anthroWeek1 || anthroWeek1.startDate !== "2026-01-12" || !anthroWeek1.readings.includes("Boas")) {
+    fail("Anthropology week 1 lost its expected Jan 12 / Boas grounding");
+  }
+  const anthroSpringBreak = anthropology.topics.find((topic) => topic.startDate === "2026-03-09");
+  if (!anthroSpringBreak || !/spring break/i.test(anthroSpringBreak.weekLabel)) {
+    fail("Anthropology is missing the explicit spring break week");
+  }
+  const anthroWeek12 = anthropology.topics.find((topic) => topic.weekNumber === 12);
+  if (
+    !anthroWeek12 ||
+    !anthroWeek12.topics.some((entry) => /exam 3/i.test(entry)) ||
+    !anthroWeek12.readings.includes("Latour")
+  ) {
+    fail("Anthropology week 12 lost its Exam 3 / Latour structure");
   }
 
   const pcs = byName.get("Physiological Control Systems");

@@ -306,6 +306,7 @@ Rules:
 const FULL_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes\b/i;
 const PARTIAL_NO_CLASS_RX = /\bno class(?:es)?\s+(?:on|for)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|\d{1,2}\/\d{1,2})/i;
 const GENERIC_WEEK_LABEL_RX = /^(lectures?|course resources|report discussions|midterm exam prep materials|review materials|assignment descriptions)$/i;
+const ASSIGNMENT_FALLBACK_LABEL_RX = /^assignments?(?:\s+due)?\s+week\s+of\s+\d{4}-\d{2}-\d{2}$/i;
 const ADMIN_ENTRY_RX = /^(syllabus|course schedule|office hours?|course information|course resources|exam resources)$/i;
 const BREAK_SEGMENT_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes?\b|\bno lecture\b|\bno lab\b/i;
 
@@ -349,6 +350,127 @@ function isAdministrativeEntry(entry: string): boolean {
 function isAdministrativeOnlyTopic(topic: ParsedTopic): boolean {
   const entries = [...(topic.topics ?? []), ...(topic.readings ?? [])].map((entry) => entry.trim()).filter(Boolean);
   return entries.length > 0 && entries.every(isAdministrativeEntry);
+}
+
+function isAssignmentFallbackLabel(label?: string | null): boolean {
+  return Boolean(label && ASSIGNMENT_FALLBACK_LABEL_RX.test(label.trim()));
+}
+
+function cleanModuleWeekLabel(label: string): string {
+  let cleanLabel = label
+    .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
+    .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
+    .trim();
+
+  const unitMatch = cleanLabel.match(/\b(?:unit|module|week)\s*(\d+)/i);
+  if (/^unit\s+\d+$/i.test(cleanLabel) && unitMatch) {
+    cleanLabel = `Unit ${unitMatch[1]}`;
+  }
+
+  return cleanLabel;
+}
+
+function formatLectureRange(lectureNumbers: number[]): string | null {
+  if (lectureNumbers.length === 0) return null;
+  const ordered = [...new Set(lectureNumbers)].sort((a, b) => a - b);
+  return ordered.length === 1
+    ? `Lecture ${ordered[0]}`
+    : `Lectures ${ordered[0]}-${ordered[ordered.length - 1]}`;
+}
+
+function summarizeAssignmentFallbackWeek(rawTitles: string[]): {
+  weekLabelHint: string | null;
+  topicHints: string[];
+} {
+  const units = new Set<string>();
+  const lectureNumbers: number[] = [];
+  const topicHints: string[] = [];
+  const seen = new Set<string>();
+
+  function pushHint(value: string) {
+    const normalized = normalizeForDedup(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    topicHints.push(value);
+  }
+
+  for (const rawTitle of rawTitles) {
+    const title = rawTitle.trim();
+    if (!title) continue;
+
+    const isPracticeQuiz = /\bpractice quiz\b/i.test(title);
+    const unitMatch = title.match(/\bunit\s+(\d+[a-z]?)/i);
+    if (unitMatch) {
+      const unitNumber = unitMatch[1].replace(/[a-z]$/i, "").toUpperCase();
+      if (!(unitNumber === "0" && isPracticeQuiz)) {
+        units.add(`Unit ${unitNumber}`);
+      }
+    }
+
+    const lectureMatch = title.match(/lecture\s+review\s+questions?\s*-\s*lecture\s*#?\s*(\d+)/i);
+    if (lectureMatch) {
+      lectureNumbers.push(Number.parseInt(lectureMatch[1], 10));
+      continue;
+    }
+
+    const examMatch = title.match(/\bexam\s+(\d+)\b/i);
+    if (examMatch) {
+      pushHint(`Exam ${examMatch[1]}`);
+      continue;
+    }
+
+    if (/\bfinal exam\b/i.test(title)) {
+      pushHint("Final exam");
+      continue;
+    }
+
+    if (/\bmidterm\b/i.test(title)) {
+      pushHint("Midterm");
+      continue;
+    }
+
+    if (/\bsyllabus quiz\b/i.test(title)) {
+      pushHint("Syllabus quiz");
+      continue;
+    }
+
+    if (/\bpractice quiz\b/i.test(title)) {
+      pushHint("Practice quiz");
+      continue;
+    }
+  }
+
+  if (units.size === 1) {
+    pushHint([...units][0]!);
+  }
+
+  const lectureRange = formatLectureRange(lectureNumbers);
+  if (lectureRange) {
+    pushHint(`${lectureRange} review`);
+  }
+
+  let weekLabelHint: string | null = null;
+  const primaryUnit = units.size === 1 ? [...units][0]! : null;
+  const primaryAssessment = topicHints.find((hint) => /^exam\b|^final exam$|^midterm$/i.test(hint))
+    ?? topicHints.find((hint) => /quiz/i.test(hint))
+    ?? null;
+
+  if (primaryUnit && lectureRange) {
+    weekLabelHint = `${primaryUnit}: ${lectureRange}`;
+  } else if (primaryAssessment && primaryUnit && !/syllabus quiz|practice quiz/i.test(primaryAssessment)) {
+    weekLabelHint = `${primaryUnit} + ${primaryAssessment}`;
+  } else if (primaryUnit) {
+    weekLabelHint = `${primaryUnit} deadlines`;
+  } else if (lectureRange) {
+    weekLabelHint = `${lectureRange} deadlines`;
+  } else if (primaryAssessment) {
+    weekLabelHint = primaryAssessment;
+  }
+
+  return {
+    weekLabelHint,
+    topicHints: topicHints.slice(0, 3),
+  };
 }
 
 function stripBreakSegments(notes?: unknown): string | null {
@@ -817,7 +939,7 @@ function organizeAssignmentsAsTimeline(
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([monday, titles], index) => ({
       weekNumber: index + 1,
-      weekLabel: `Assignments week of ${monday}`,
+      weekLabel: `Assignments due week of ${monday}`,
       startDate: monday,
       topics: titles,
       readings: [],
@@ -852,14 +974,7 @@ function organizeModulesAsTimeline(
     const lecStart = lecMatch ? parseInt(lecMatch[1], 10) : null;
     const lecEnd = lecMatch ? parseInt(lecMatch[2], 10) : null;
 
-    let cleanLabel = label
-      .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
-      .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
-      .trim();
-
-    if (/^unit\s+\d+$/i.test(cleanLabel)) {
-      cleanLabel = `Unit ${unitNum}`;
-    }
+    const cleanLabel = cleanModuleWeekLabel(label);
 
     return { module: m, unitNum, lecStart, lecEnd, cleanLabel };
   });
@@ -920,9 +1035,16 @@ interface ModuleDelta {
   sourceModule: string;
 }
 
+interface WeekLabelHint {
+  weekNumber: number;
+  weekLabel: string;
+  sourceModule: string;
+}
+
 interface NormalizerResult {
   deltas: ModuleDelta[];
   coveredWeeks: number[];
+  weekLabelHints: WeekLabelHint[];
 }
 
 const moduleDeltaSchema = z.object({
@@ -933,6 +1055,11 @@ const moduleDeltaSchema = z.object({
     sourceModule: z.string(),
   })),
   coveredWeeks: z.array(z.number()),
+  weekLabelHints: z.array(z.object({
+    weekNumber: z.number(),
+    weekLabel: z.string(),
+    sourceModule: z.string(),
+  })).default([]),
 });
 
 async function normalizeModules(
@@ -940,7 +1067,9 @@ async function normalizeModules(
   spine: { weekNumber: number; weekLabel: string; startDate: string | null; topics: string[]; readings: string[] }[],
   courseName: string,
 ): Promise<NormalizerResult> {
-  if (modules.length === 0 || spine.length === 0) return { deltas: [], coveredWeeks: [] };
+  if (modules.length === 0 || spine.length === 0) {
+    return { deltas: [], coveredWeeks: [], weekLabelHints: [] };
+  }
 
   const t0 = Date.now();
   try {
@@ -965,7 +1094,14 @@ For each module:
 - Do NOT output items that are already present in a week's existing topics or readings
 - If a module cannot be confidently matched to any week, skip it entirely
 
-Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at least one module, even if you classified all items as resource/assessment and added nothing to addTopics/addReadings. This distinguishes "no modules matched this week" from "modules matched but nothing was worth adding."`,
+Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at least one module, even if you classified all items as resource/assessment and added nothing to addTopics/addReadings. This distinguishes "no modules matched this week" from "modules matched but nothing was worth adding."
+
+Also return weekLabelHints when helpful:
+- If a matched module gives a cleaner student-facing summary for a week than the current spine weekLabel, emit a short replacement label for that week
+- This is especially useful when the spine weekLabel is generic or assignment-based, such as "Assignments due week of 2026-03-30"
+- Base the label on the module name and module content only. Keep it concise and grounded, like "Unit 9", "Buffers", or "Unit 9: Buffers"
+- Do NOT copy raw assignment titles into weekLabelHints
+- Do NOT emit a label hint unless the module evidence is strong and specific`,
       prompt: JSON.stringify({
         spine: spine.map((w) => ({
           weekNumber: w.weekNumber,
@@ -987,15 +1123,23 @@ Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at l
     const validWeeks = new Set(spine.map((w) => w.weekNumber));
     const valid = deltas.filter((d) => validWeeks.has(d.weekNumber));
     const validCovered = [...new Set(object.coveredWeeks ?? [])].filter((w) => validWeeks.has(w));
+    const validWeekLabelHints = (object.weekLabelHints ?? [])
+      .filter((hint) => validWeeks.has(hint.weekNumber))
+      .map((hint) => ({
+        weekNumber: hint.weekNumber,
+        weekLabel: cleanModuleWeekLabel(hint.weekLabel),
+        sourceModule: hint.sourceModule,
+      }))
+      .filter((hint) => hint.weekLabel.length > 0);
 
     console.log(
       `[pipeline] ${courseName}: normalizeModules done in ${Date.now() - t0}ms — ` +
-      `${valid.length} deltas, ${validCovered.length} covered from ${modules.length} modules`,
+      `${valid.length} deltas, ${validCovered.length} covered, ${validWeekLabelHints.length} label hints from ${modules.length} modules`,
     );
-    return { deltas: valid, coveredWeeks: validCovered };
+    return { deltas: valid, coveredWeeks: validCovered, weekLabelHints: validWeekLabelHints };
   } catch (err) {
     console.warn(`[pipeline] ${courseName}: normalizeModules FAILED after ${Date.now() - t0}ms:`, err);
-    return { deltas: [], coveredWeeks: [] };
+    return { deltas: [], coveredWeeks: [], weekLabelHints: [] };
   }
 }
 
@@ -1106,6 +1250,69 @@ function applyPerWeekFallback(
   });
 }
 
+function refineAssignmentFallbackPresentation(
+  topics: ReconciledTopic[],
+  assignmentFallbackTopics: ParsedTopic[],
+  moduleDeltas: ModuleDelta[],
+  weekLabelHints: WeekLabelHint[],
+): ReconciledTopic[] {
+  if (assignmentFallbackTopics.length === 0 || topics.length === 0) return topics;
+
+  const assignmentTitlesByWeek = new Map<number, string[]>();
+  for (const week of assignmentFallbackTopics) {
+    assignmentTitlesByWeek.set(week.weekNumber, [...(week.topics ?? [])]);
+  }
+
+  const moduleSignalByWeek = new Map<number, { topicAdds: number; readingAdds: number }>();
+  for (const delta of moduleDeltas) {
+    const existing = moduleSignalByWeek.get(delta.weekNumber) ?? { topicAdds: 0, readingAdds: 0 };
+    existing.topicAdds += delta.addTopics.length;
+    existing.readingAdds += delta.addReadings.length;
+    moduleSignalByWeek.set(delta.weekNumber, existing);
+  }
+
+  const weekLabelHintByWeek = new Map<number, WeekLabelHint>();
+  for (const hint of weekLabelHints) {
+    const existing = weekLabelHintByWeek.get(hint.weekNumber);
+    if (!existing || hint.weekLabel.length > existing.weekLabel.length) {
+      weekLabelHintByWeek.set(hint.weekNumber, hint);
+    }
+  }
+
+  return topics.map((week) => {
+    if (week.sourceBlock !== "canvas_assignments") return week;
+
+    const rawAssignmentTitles = assignmentTitlesByWeek.get(week.weekNumber) ?? [];
+    if (rawAssignmentTitles.length === 0) return week;
+
+    const assignmentNorms = new Set(rawAssignmentTitles.map(normalizeForDedup));
+    const nonAssignmentTopics = (week.topics ?? []).filter(
+      (topic) => !assignmentNorms.has(normalizeForDedup(topic)),
+    );
+    const assignmentSummary = summarizeAssignmentFallbackWeek(rawAssignmentTitles);
+    const moduleSignal = moduleSignalByWeek.get(week.weekNumber);
+    const hint = weekLabelHintByWeek.get(week.weekNumber);
+    const hasModuleEvidence = Boolean(hint) || Boolean(moduleSignal && (moduleSignal.topicAdds > 0 || moduleSignal.readingAdds > 0));
+
+    const nextTopics = hasModuleEvidence
+      ? nonAssignmentTopics
+      : assignmentSummary.topicHints.length > 0
+        ? assignmentSummary.topicHints
+        : rawAssignmentTitles.slice(0, 3);
+
+    const nextWeekLabel = hint?.weekLabel
+      ?? (isAssignmentFallbackLabel(week.weekLabel) && assignmentSummary.weekLabelHint
+        ? assignmentSummary.weekLabelHint
+        : week.weekLabel);
+
+    return {
+      ...week,
+      weekLabel: nextWeekLabel,
+      topics: nextTopics,
+    };
+  });
+}
+
 // ─── Validate ────────────────────────────────────────────────────────────────
 
 function validateTimeline(
@@ -1182,7 +1389,9 @@ function pickPreferredWeekLabel(a: ParsedTopic, b: ParsedTopic): string {
   const score = (topic: ParsedTopic) => {
     let value = hasInstructionalContent(topic) ? 4 : 0;
     if (!isBreakTopic(topic)) value += 2;
-    if (topic.weekLabel && !GENERIC_WEEK_LABEL_RX.test(topic.weekLabel)) value += 2;
+    if (topic.weekLabel && !GENERIC_WEEK_LABEL_RX.test(topic.weekLabel) && !isAssignmentFallbackLabel(topic.weekLabel)) {
+      value += 2;
+    }
     value += Math.min(2, (topic.topics?.length ?? 0));
     return value;
   };
@@ -1514,6 +1723,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
   let aiTopics = canonicalExtraction ? extraction.topics : [];
   let usedModuleScaffold = false;
   let sourceBlock = "schedule_table";
+  let assignmentFallbackTopics: ParsedTopic[] = [];
 
   // Determine source block from extraction shape
   if (extraction.scheduleShape === "none") {
@@ -1538,6 +1748,11 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     const assignmentTimeline = organizeAssignmentsAsTimeline(input.assignments, input.courseName);
     if (assignmentTimeline.length > 0) {
       aiTopics = assignmentTimeline;
+      assignmentFallbackTopics = assignmentTimeline.map((week) => ({
+        ...week,
+        topics: [...(week.topics ?? [])],
+        readings: [...(week.readings ?? [])],
+      }));
       sourceBlock = "canvas_assignments";
       debug.fallbackUsed = true;
       console.log(
@@ -1601,7 +1816,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       readings: t.readings ?? [],
     }));
 
-    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
+    const { deltas: moduleDeltas, coveredWeeks, weekLabelHints } = await normalizeModules(
       contentModules, spineForNormalizer, input.courseName,
     );
 
@@ -1615,6 +1830,12 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
       matchedAssignment: finalTopics[i]?.matchedAssignment,
     }));
+    finalTopics = refineAssignmentFallbackPresentation(
+      finalTopics,
+      assignmentFallbackTopics,
+      moduleDeltas,
+      weekLabelHints,
+    );
 
     moduleIdsToDelete = input.modules.map((m) => m.id);
     console.log(
@@ -1632,7 +1853,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       readings: t.readings ?? [],
     }));
 
-    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
+    const { deltas: moduleDeltas, coveredWeeks, weekLabelHints } = await normalizeModules(
       contentModules, spineForNormalizer, input.courseName,
     );
 
@@ -1645,6 +1866,12 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
       matchedAssignment: finalTopics[i]?.matchedAssignment,
     }));
+    finalTopics = refineAssignmentFallbackPresentation(
+      finalTopics,
+      assignmentFallbackTopics,
+      moduleDeltas,
+      weekLabelHints,
+    );
 
     moduleIdsToDelete = input.modules.map((m) => m.id);
     console.log(

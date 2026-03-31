@@ -174,6 +174,190 @@ const parsedScheduleSchema = z.object({
   hasExplicitBreakRows: z.boolean(),
 });
 
+const MONTHS: Record<string, string> = {
+  jan: "01",
+  january: "01",
+  feb: "02",
+  february: "02",
+  mar: "03",
+  march: "03",
+  apr: "04",
+  april: "04",
+  may: "05",
+  jun: "06",
+  june: "06",
+  jul: "07",
+  july: "07",
+  aug: "08",
+  august: "08",
+  sep: "09",
+  sept: "09",
+  september: "09",
+  oct: "10",
+  october: "10",
+  nov: "11",
+  november: "11",
+  dec: "12",
+  december: "12",
+};
+
+const SCHEDULE_STOP_HEADING_RX = /^(exams?|grading|weekly routine|how can i get help|office hours|additional course policies|communication|textbook and materials|learning objectives)\b/i;
+const TABULAR_SCHEDULE_HEADER_RX = /week\s*dates?\s*\t?\s*topics(?:\s*\t?\s*sections?)?/i;
+const TABULAR_WEEK_ROW_RX = /^\s*(\d+)\t/;
+const TABULAR_FINALS_ROW_RX = /^\s*finals?\b/i;
+const DATE_RANGE_PREFIX_RX = /^((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*\d{1,2}(?:\s*[–-]\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*)?\d{1,2})?)(.*)$/i;
+const SECTION_LIST_AT_END_RX = /^(.*?)(\d{1,2}\.\d{1,2}(?:\s*,\s*\d{1,2}\.\d{1,2})*)$/;
+const TABULAR_ROW_SCORE_RX = /^\s*\d+\t(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)/gim;
+
+function inferCourseNameFromText(text: string): string {
+  const firstContentLine = text
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .find(Boolean);
+  return firstContentLine ?? "Course";
+}
+
+function inferAcademicYear(text: string): string | null {
+  const termMatch = text.match(/\b(?:spring|summer|fall|winter)\s+(20\d{2})\b/i);
+  if (termMatch) return termMatch[1];
+  const anyYearMatch = text.match(/\b(20\d{2})\b/);
+  return anyYearMatch ? anyYearMatch[1] : null;
+}
+
+function normalizeInlineWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function parseIsoDateFromScheduleField(dateField: string, year: string | null): string | null {
+  if (!year) return null;
+  const match = dateField.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*(\d{1,2})/i);
+  if (!match) return null;
+  const month = MONTHS[match[1].toLowerCase()];
+  if (!month) return null;
+  const day = match[2].padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function splitDateAndTopicField(value: string): { dateField: string; topicField: string } {
+  const normalized = normalizeInlineWhitespace(value);
+  const match = normalized.match(DATE_RANGE_PREFIX_RX);
+  if (!match) {
+    return { dateField: normalized, topicField: "" };
+  }
+  return {
+    dateField: normalizeInlineWhitespace(match[1]),
+    topicField: normalizeInlineWhitespace(match[2]),
+  };
+}
+
+function parseSectionReadings(sectionField: string, text: string): string[] {
+  const normalized = normalizeInlineWhitespace(sectionField);
+  if (!normalized) return [];
+  const prefix = /\bstewart\b/i.test(text) ? "Stewart " : "";
+  return normalized
+    .split(",")
+    .map((part) => normalizeInlineWhitespace(part))
+    .filter(Boolean)
+    .map((part) => /^\d{1,2}\.\d{1,2}$/.test(part) ? `${prefix}${part}` : part);
+}
+
+function tryParseTabularSchedule(text: string): ParsedSchedule | null {
+  if (!TABULAR_SCHEDULE_HEADER_RX.test(text)) return null;
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/\u00a0/g, " ").replace(/\r/g, ""));
+
+  const courseName = inferCourseNameFromText(text);
+  const year = inferAcademicYear(text);
+  const headerIndex = lines.findIndex((line) => TABULAR_SCHEDULE_HEADER_RX.test(line));
+  if (headerIndex === -1) return null;
+
+  const weeks: ParsedTopic[] = [];
+
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      if (weeks.length > 0) break;
+      continue;
+    }
+    if (SCHEDULE_STOP_HEADING_RX.test(trimmed) || TABULAR_FINALS_ROW_RX.test(trimmed)) {
+      break;
+    }
+
+    const weekMatch = rawLine.match(TABULAR_WEEK_ROW_RX);
+    if (!weekMatch) {
+      if (weeks.length > 0 && /^[A-Z][A-Za-z ]+:?$/.test(trimmed)) break;
+      continue;
+    }
+
+    const weekNumber = Number.parseInt(weekMatch[1], 10);
+    const fields = rawLine
+      .replace(TABULAR_WEEK_ROW_RX, "")
+      .split("\t")
+      .map((field) => normalizeInlineWhitespace(field))
+      .filter(Boolean);
+    if (fields.length === 0) continue;
+
+    let dateField = fields[0] ?? "";
+    let topicField = fields[1] ?? "";
+    let sectionField = fields.slice(2).join(", ");
+
+    if (!topicField) {
+      const split = splitDateAndTopicField(dateField);
+      dateField = split.dateField;
+      topicField = split.topicField;
+    } else if (!parseIsoDateFromScheduleField(dateField, year)) {
+      const split = splitDateAndTopicField(dateField);
+      if (split.topicField) {
+        dateField = split.dateField;
+        topicField = normalizeInlineWhitespace([split.topicField, topicField].filter(Boolean).join(" "));
+      }
+    }
+
+    if (topicField && !sectionField) {
+      const sectionMatch = topicField.match(SECTION_LIST_AT_END_RX);
+      if (sectionMatch) {
+        topicField = normalizeInlineWhitespace(sectionMatch[1]);
+        sectionField = normalizeInlineWhitespace(sectionMatch[2]);
+      }
+    }
+
+    const readings = parseSectionReadings(sectionField, text);
+    const normalizedTopic = normalizeInlineWhitespace(topicField);
+    const isBreak = /\bspring break|holiday|no class/i.test(normalizedTopic || dateField);
+    const weekLabel = isBreak
+      ? "Spring Break"
+      : normalizedTopic || `Week ${weekNumber}`;
+    const topics = isBreak
+      ? ["Spring Break"]
+      : normalizedTopic
+        ? normalizedTopic.split(/\s*,\s*/).map((part) => normalizeInlineWhitespace(part)).filter(Boolean)
+        : [];
+
+    weeks.push({
+      weekNumber,
+      weekLabel,
+      startDate: parseIsoDateFromScheduleField(dateField, year),
+      topics,
+      readings,
+      notes: isBreak ? "Spring Break" : null,
+      courseName,
+    });
+  }
+
+  if (weeks.length < 4) return null;
+
+  return {
+    weeks,
+    shape: "week",
+    rowSemantics: "sequence_number",
+    hasExplicitDates: weeks.some((week) => Boolean(week.startDate)),
+    hasExplicitBreakRows: weeks.some((week) => /\bspring break|holiday|no class/i.test(week.weekLabel)),
+  };
+}
+
 export function renumberSequentialWeeks(weeks: ParsedTopic[]): ParsedTopic[] {
   return [...weeks]
     .sort((a, b) => a.weekNumber - b.weekNumber)
@@ -711,6 +895,11 @@ export async function parseSyllabusSchedule(
   reasoningTier?: ReasoningTier,
   structureHint?: string,
 ): Promise<ParsedSchedule> {
+  const tabularSchedule = tryParseTabularSchedule(text);
+  if (tabularSchedule) {
+    return tabularSchedule;
+  }
+
   const userContent = hint ? `[Source: ${hint}]\n\n${text}` : text;
 
   // If structure hint is provided, prepend it so the AI sees deterministic facts first
@@ -849,11 +1038,16 @@ export async function parseSyllabusTopics(
 export function scheduleScore(text: string): number {
   if (!text || text.length < 50) return 0;
   const t = text.toLowerCase();
+  TABULAR_ROW_SCORE_RX.lastIndex = 0;
   const weekHits   = (t.match(/\b(week|lecture|class|session|module|experiment|lab|unit)\s*\d+/g) ?? []).length;
   const dateHits   = (t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}|\b\d{1,2}\/\d{1,2}\b/g) ?? []).length;
   const topicHits  = (t.match(/\b(introduction|overview|chapter|ch\.\s*\d|topic[s]?:|reading[s]?:)/g) ?? []).length;
+  const rowHits = (text.match(TABULAR_ROW_SCORE_RX) ?? []).length;
+  const hasExplicitScheduleTable = TABULAR_SCHEDULE_HEADER_RX.test(text) && rowHits >= 4;
+  const tableHits  = rowHits + (TABULAR_SCHEDULE_HEADER_RX.test(text) ? 3 : 0);
+  const breakHits  = (t.match(/\bspring break|holiday|no class\b/g) ?? []).length;
   const policyHits = (t.match(/\b(attendance|grading|plagiarism|academic\s+integrity|office\s+hours|late\s+(work|penalty)|point[s]?\s+possible)/g) ?? []).length;
-  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 - policyHits * 1;
+  const raw = weekHits * 4 + dateHits * 2 + topicHits * 2 + tableHits * 5 + breakHits * 2 + (hasExplicitScheduleTable ? 320 : 0) - policyHits * 1;
   return raw / (text.length / 500);
 }
 
@@ -863,11 +1057,34 @@ export function scheduleScore(text: string): number {
  */
 export function bestWindow(text: string, maxLen = 12_000): string {
   if (text.length <= maxLen) return text;
+  const headerIndex = text.search(TABULAR_SCHEDULE_HEADER_RX);
+  if (headerIndex >= 0) {
+    const directStart = Math.max(0, headerIndex - 800);
+    const directSlice = text.slice(directStart, Math.min(text.length, directStart + maxLen));
+    const rowCount = directSlice
+      .split("\n")
+      .filter((line) => TABULAR_WEEK_ROW_RX.test(line))
+      .length;
+    if (rowCount >= 4) {
+      return directSlice;
+    }
+  }
+
   const end = text.length - maxLen;
   const offsets = [0, Math.floor(end / 3), Math.floor(end * 2 / 3), end];
   let best = "";
   let bestScore = -Infinity;
-  for (const offset of offsets) {
+  const extraOffsets = headerIndex >= 0
+    ? [Math.max(0, headerIndex - Math.floor(maxLen * 0.15))]
+    : [];
+  TABULAR_ROW_SCORE_RX.lastIndex = 0;
+  const rowMatch = TABULAR_ROW_SCORE_RX.exec(text);
+  if (rowMatch?.index !== undefined) {
+    extraOffsets.push(Math.max(0, rowMatch.index - Math.floor(maxLen * 0.15)));
+    TABULAR_ROW_SCORE_RX.lastIndex = 0;
+  }
+  const uniqueOffsets = [...new Set([...offsets, ...extraOffsets])].sort((a, b) => a - b);
+  for (const offset of uniqueOffsets) {
     const slice = text.slice(offset, offset + maxLen);
     const s = scheduleScore(slice);
     if (s > bestScore) { bestScore = s; best = slice; }
