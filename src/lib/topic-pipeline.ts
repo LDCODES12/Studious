@@ -649,6 +649,19 @@ interface ExtractionResult {
   hasExplicitBreakRows: boolean;
 }
 
+function isCanonicalTimelineExtraction(extraction: ExtractionResult): boolean {
+  if (extraction.scheduleShape === "none") return false;
+
+  // A lecture-by-lecture outline without explicit dates is useful content,
+  // but it is not a canonical week timeline. Per the redesign, we fail
+  // closed here and let assignment-based fallback provide dated structure.
+  if (extraction.rowSemantics === "lecture_number" && !extraction.hasExplicitDates) {
+    return false;
+  }
+
+  return true;
+}
+
 /**
  * Extracts topics from all syllabus candidates. Single-pass per block —
  * no timeline/content role split. Iterates candidates, picks best result,
@@ -1492,12 +1505,13 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
 
   // ── STEP 2: EXTRACT — single-pass per block ──
   const extraction = await extractFromBlocks(input.candidates, input.courseName);
+  const canonicalExtraction = isCanonicalTimelineExtraction(extraction);
 
   debug.stage2Weeks = extraction.topics.length;
   debug.extractedScheduleShape = extraction.scheduleShape;
   debug.extractedRowSemantics = extraction.rowSemantics;
 
-  let aiTopics = extraction.topics;
+  let aiTopics = canonicalExtraction ? extraction.topics : [];
   let usedModuleScaffold = false;
   let sourceBlock = "schedule_table";
 
@@ -1510,6 +1524,13 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     `[pipeline] ${input.courseName}: Step 2 extracted ${aiTopics.length} entries` +
     ` | source=${extraction.usedLabel} | shape=${extraction.scheduleShape}`,
   );
+
+  if (!canonicalExtraction && extraction.rowSemantics === "lecture_number" && !extraction.hasExplicitDates) {
+    console.log(
+      `[pipeline] ${input.courseName}: Step 2 ignored undated lecture-number outline ` +
+      `(${extraction.topics.length} lecture rows) → not a canonical weekly timeline`,
+    );
+  }
 
   // Assignment fallback: if there is no usable syllabus schedule, prefer
   // Canvas due dates over module ordering because due dates are ground truth.

@@ -291,7 +291,7 @@ Your job is to fix the extracted schedule:
 - ${numberingRule}
 - Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
 - Do NOT invent topics that aren't in the source. Only fix, never fabricate.
-- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks — that is handled by a downstream stage.`,
+- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks in the audit stage — the pipeline decides later whether that outline is usable as a canonical timeline.`,
       prompt: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE:\n${sourceText.slice(0, 12000)}`,
       abortSignal: AbortSignal.timeout(60_000),
       maxRetries: 1,
@@ -756,7 +756,7 @@ SOURCE FORMAT HINTS: The input may begin with a [Source: ...] line describing th
 
 IMPORTANT: Syllabi organize content in many different ways. Handle all of them:
 - Week-based: "Week 1: Introduction, Week 2: ..." → use directly, one entry per week
-- Lecture-based: "Lecture 1, Lecture 2, ..." → extract EACH LECTURE as its own entry (weekNumber = lecture number). Do NOT group or collapse lectures together — output every single lecture separately so downstream processing can group them accurately using the class schedule.
+- Lecture-based: "Lecture 1, Lecture 2, ..." → extract EACH LECTURE as its own entry (weekNumber = lecture number). Do NOT group or collapse lectures together in this step. The pipeline will later decide whether an undated lecture outline is usable as a canonical schedule.
 - Date-based: Individual class session dates → one entry per session, weekNumber = sequential
 - Module/unit-based: One entry per module/unit, weekNumber = sequential
 - Table format: Many syllabi use schedule tables — read every row, one entry per row
