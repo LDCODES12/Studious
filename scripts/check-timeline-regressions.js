@@ -17,6 +17,29 @@ function countDuplicateDates(topics) {
 }
 
 async function main() {
+  const allowedVerificationStatuses = new Set([
+    "verified",
+    "corroborated",
+    "unverified",
+    "conflicted",
+    "gap",
+  ]);
+  const allowedSourceBlocks = new Set([
+    "schedule_table",
+    "syllabus_body",
+    "canvas_assignments",
+    "canvas_modules",
+    null,
+  ]);
+  const allowedAnchorTypes = new Set([
+    "syllabus_verified",
+    "syllabus_corroborated",
+    "syllabus_unverified",
+    "canvas_only",
+    "break",
+    "conflicted",
+  ]);
+
   const courses = await prisma.course.findMany({
     where: {
       name: {
@@ -41,6 +64,8 @@ async function main() {
           topics: true,
           dateConfidence: true,
           scheduleMode: true,
+          verificationStatus: true,
+          sourceBlock: true,
         },
       },
       timelineAnchors: {
@@ -64,6 +89,9 @@ async function main() {
 
   const anthropology = byName.get("Anthropology");
   if (!anthropology) fail("Missing Anthropology");
+  if (anthropology.topics.some((topic) => !allowedVerificationStatuses.has(topic.verificationStatus))) {
+    fail("Anthropology has an invalid verificationStatus");
+  }
   if (anthropology.topics.some((topic) => topic.startDate === "2026-01-01")) {
     fail("Anthropology still has a bogus 2026-01-01 row");
   }
@@ -82,6 +110,9 @@ async function main() {
 
   const genChem = byName.get("Gen Chem 2");
   if (!genChem) fail("Missing Gen Chem 2");
+  if (genChem.topics.some((topic) => !allowedSourceBlocks.has(topic.sourceBlock))) {
+    fail("Gen Chem 2 has an invalid sourceBlock");
+  }
   if (!genChem.topics.some((topic) => topic.startDate === "2026-03-09" && /break/i.test(topic.weekLabel))) {
     fail("Gen Chem 2 is missing the 2026-03-09 break week");
   }
@@ -101,9 +132,8 @@ async function main() {
 
   const neuro = byName.get("Neuroscience Futures");
   if (!neuro) fail("Missing Neuroscience Futures");
-  const sparseMeetings = neuro.timelineAnchors.filter((anchor) => anchor.anchorType === "sparse_meeting");
-  if (sparseMeetings.some((anchor) => !anchor.isInstructional)) {
-    fail("Neuroscience Futures still has non-instructional sparse anchors");
+  if (neuro.timelineAnchors.some((anchor) => !allowedAnchorTypes.has(anchor.anchorType))) {
+    fail("Neuroscience Futures has an invalid anchorType");
   }
 
   console.log("Timeline regression checks passed.");

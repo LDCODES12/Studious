@@ -1184,19 +1184,6 @@ export async function POST(request: NextRequest) {
         const topics = pipelineResult.topics;
         const anchors = pipelineResult.anchors;
 
-        if (pipelineResult.materialSourceRoles.length > 0) {
-          await Promise.all(
-            pipelineResult.materialSourceRoles.map(async ({ label, role }) => {
-              const fileName = label.replace(/^stored:/, "");
-              if (fileName === "html-body") return;
-              await db.courseMaterial.updateMany({
-                where: { courseId: scCourseId, fileName },
-                data: { sourceRole: role },
-              });
-            }),
-          );
-        }
-
         // Delete identified module topics
         if (pipelineResult.moduleIdsToDelete.length > 0) {
           await db.courseTopic.deleteMany({
@@ -1223,7 +1210,8 @@ export async function POST(request: NextRequest) {
               candidateSources: dbg.candidates,
               classScheduleSource: dbg.classScheduleSource,
               importedMaterials: dbg.materials,
-            },
+              pipelineDebug: pipelineResult.debug as unknown as Prisma.InputJsonValue,
+            } as Prisma.InputJsonValue,
           },
         });
 
@@ -1236,7 +1224,7 @@ export async function POST(request: NextRequest) {
               anchorType: anchor.anchorType,
               isInstructional: anchor.isInstructional,
               calendarConfidence: anchor.calendarConfidence,
-              sourceRefs: anchor.sourceRefs as object[],
+              sourceRefs: anchor.sourceRefs as Prisma.InputJsonValue,
               notes: anchor.notes ?? null,
             })),
           });
@@ -1255,7 +1243,9 @@ export async function POST(request: NextRequest) {
               dateConfidence: t.dateConfidence,
               contentConfidence: t.contentConfidence,
               scheduleMode: t.scheduleMode,
-              provenance: t.provenance as object,
+              provenance: t.provenance as Prisma.InputJsonValue,
+              verificationStatus: t.verificationStatus,
+              sourceBlock: t.sourceBlock,
               canvasModuleId: null,
             })),
           });
@@ -1269,11 +1259,12 @@ export async function POST(request: NextRequest) {
         console.log(
           `[sync] ${c.name}: pipeline → ${topics.length} weeks` +
           ` | deleted ${pipelineResult.moduleIdsToDelete.length} module topics` +
-          ` | stage2=${pipelineResult.debug.stage2Classifications.length} modules classified` +
-          ` | stage3=${pipelineResult.debug.stage3Weeks} ai weeks` +
+          ` | stage1=${pipelineResult.debug.stage1Classifications.length} modules classified` +
+          ` | stage2=${pipelineResult.debug.stage2Weeks} extracted entries` +
+          ` | stage3=v${pipelineResult.debug.stage3Reconciliation.verified}/c${pipelineResult.debug.stage3Reconciliation.corroborated}/u${pipelineResult.debug.stage3Reconciliation.unverified}/x${pipelineResult.debug.stage3Reconciliation.conflicted}/g${pipelineResult.debug.stage3Reconciliation.gaps}` +
           ` | stage4=${pipelineResult.debug.stage4OutputWeeks} fused weeks` +
           (pipelineResult.debug.fallbackUsed ? " | FALLBACK" : "") +
-          (pipelineResult.debug.stage5Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage5Warnings.length}` : "")
+          (pipelineResult.debug.stage4Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage4Warnings.length}` : "")
         );
       } catch (err) {
         dbg.status = "error";

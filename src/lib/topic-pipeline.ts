@@ -1,18 +1,15 @@
 /**
- * Topic Pipeline — "One fact, one gate, one owner."
+ * Topic Pipeline v2 — SEGMENT → EXTRACT → RECONCILE → COMMIT
  *
- * Each data source enters through exactly one stage. AI returns patches
- * (deltas), not full rewritten timelines.
+ * The professor already solved the alignment problem in the syllabus.
+ * The system's job is to read what's there, verify it against Canvas
+ * ground truth, and be honest about what it couldn't determine.
  *
- * Stages:
- *   1. COLLECT    — gather inputs (done by caller)
- *   2. CLASSIFY   — AI classifies Canvas modules as content/assessment/admin
- *   2b. SPINE     — deterministic: lecture calendar + structure hint
- *   3. EXTRACT    — AI extracts topics/readings from syllabus only (no modules)
- *   3c. GROUP     — algorithmic: group per-lecture entries into calendar weeks
- *   4. NORMALIZE  — AI classifies module items into typed per-week deltas
- *   5. FUSE       — deterministic: apply syllabus facts + module deltas onto spine
- *   6. FINALIZE   — algorithmic sanity checks + validation
+ * Steps:
+ *   1. SEGMENT   — classify Canvas modules, prepare candidates
+ *   2. EXTRACT   — AI extracts topics/readings from syllabus (single-pass per block)
+ *   3. RECONCILE — deterministic: verify extracted dates against Canvas assignments
+ *   4. COMMIT    — normalize modules, fuse, finalize, synthesize with verification states
  */
 
 import { generateObject } from "ai";
@@ -33,6 +30,12 @@ import {
   type RowSemantics,
   type ScheduleShape,
 } from "./parse-syllabus.ts";
+import {
+  reconcileAgainstCanvas,
+  type ReconciledTopic,
+  type VerificationStatus,
+  type ReconciliationDiagnostics,
+} from "./reconcile-canvas.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,10 +43,7 @@ export interface ScoredSource {
   text: string;
   score: number;
   label: string;
-  role?: CandidateRole;
 }
-
-type CandidateRole = "timeline" | "content" | "mixed";
 
 export interface CanvasModuleInfo {
   id: string;
@@ -87,12 +87,12 @@ export type ConfidenceLevel = "high" | "medium" | "low" | "unknown";
 export type ScheduleMode = "weekly" | "sparse" | "inferred" | "unknown";
 export type TimelineQuality = "strong" | "usable" | "weak";
 export type TimelineAnchorType =
-  | "explicit_date"
-  | "inferred_week"
-  | "sparse_meeting"
+  | "syllabus_verified"
+  | "syllabus_corroborated"
+  | "syllabus_unverified"
+  | "canvas_only"
   | "break"
-  | "module_scaffold"
-  | "lecture_group";
+  | "conflicted";
 
 export interface TimelineAnchorRecord {
   sequenceNumber: number;
@@ -100,7 +100,7 @@ export interface TimelineAnchorRecord {
   anchorType: TimelineAnchorType;
   isInstructional: boolean;
   calendarConfidence: ConfidenceLevel;
-  sourceRefs: { label: string; role: CandidateRole }[];
+  sourceRefs: Record<string, unknown>;
   notes?: string | null;
 }
 
@@ -109,32 +109,27 @@ export interface SynthesizedTopic extends ParsedTopic {
   contentConfidence: ConfidenceLevel;
   scheduleMode: ScheduleMode;
   provenance: Record<string, unknown>;
+  verificationStatus: VerificationStatus;
+  sourceBlock: string;
 }
 
 export interface PipelineResult {
   topics: SynthesizedTopic[];
   anchors: TimelineAnchorRecord[];
   timelineMode: ScheduleMode;
-  materialSourceRoles: { label: string; role: CandidateRole }[];
   timelineDiagnostics: Record<string, unknown>;
   moduleIdsToDelete: string[];
   debug: PipelineDebug;
 }
 
 export interface PipelineDebug {
-  stage2Classifications: { name: string; category: string }[];
-  stage3Sources: number;
-  stage3Weeks: number;
-  moduleNormalizerDeltas: number;
-  singlePassExtraction: boolean;
-  lectureCalendarDates: number;
+  stage1Classifications: { name: string; category: string }[];
+  stage2Sources: number;
+  stage2Weeks: number;
+  stage3Reconciliation: ReconciliationDiagnostics;
   stage4OutputWeeks: number;
-  stage5Warnings: string[];
+  stage4Warnings: string[];
   fallbackUsed: boolean;
-  sourceRoles?: { label: string; role: CandidateRole }[];
-  timelineSource?: string;
-  contentSource?: string;
-  lectureCalendarSource?: string;
   extractedScheduleShape?: ScheduleShape;
   extractedRowSemantics?: RowSemantics;
 }
@@ -145,6 +140,8 @@ export interface FinalizeTimelineResult {
   repairActionsApplied: string[];
   timelineQuality: TimelineQuality;
 }
+
+// ─── Shared Helpers ─────────────────────────────────────────────────────────
 
 function shiftIsoDateYears(dateStr: string, years: number): string | null {
   const parsed = parseISO(`${dateStr}T12:00:00Z`);
@@ -256,7 +253,7 @@ function realignTopicDatesToTerm(
   return { topics: shiftedTopics, shiftYears: bestShift };
 }
 
-// ─── Stage 2: CLASSIFY ──────────────────────────────────────────────────────
+// ─── Step 1: SEGMENT — Classify Canvas Modules ─────────────────────────────
 
 type ModuleCategory = "content" | "assessment" | "administrative";
 
@@ -304,328 +301,31 @@ Rules:
   }
 }
 
-const TIMELINE_LABEL_RX = /\b(syllab|schedul|course[\s._-]?(guide|outline|info|overview)|calendar)\b/i;
-const CONTENT_LABEL_RX = /\b(lecture|delivered|study\s+outline|review\s+questions|quiz\s+topics?|exam\s+\d|midterm|slides?)\b/i;
-const DATE_TOKEN_RX = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z.]*\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/gi;
-const EXPLICIT_SCHEDULE_RX = /\b(schedule|weekly\s+schedule|course\s+schedule|we(?:'?| )ll\s+meet|meeting\s+dates?)\b/i;
-const BREAK_RX = /\bspring break|no class|holiday\b/i;
+// ─── Regex Constants ────────────────────────────────────────────────────────
+
 const FULL_BREAK_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes\b/i;
 const PARTIAL_NO_CLASS_RX = /\bno class(?:es)?\s+(?:on|for)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|\d{1,2}\/\d{1,2})/i;
-const SLIDE_DECK_RX = /\b(on the agenda|learning objectives|discussion questions|delivered|slide|today we(?:'| )ll|what is|who is this)\b/i;
 const GENERIC_WEEK_LABEL_RX = /^(lectures?|course resources|report discussions|midterm exam prep materials|review materials|assignment descriptions)$/i;
 const ADMIN_ENTRY_RX = /^(syllabus|course schedule|office hours?|course information|course resources|exam resources)$/i;
 const BREAK_SEGMENT_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes?\b|\bno lecture\b|\bno lab\b/i;
-const MONTH_TO_INDEX: Record<string, number> = {
-  jan: 0, january: 0,
-  feb: 1, february: 1,
-  mar: 2, march: 2,
-  apr: 3, april: 3,
-  may: 4,
-  jun: 5, june: 5,
-  jul: 6, july: 6,
-  aug: 7, august: 7,
-  sep: 8, sept: 8, september: 8,
-  oct: 9, october: 9,
-  nov: 10, november: 10,
-  dec: 11, december: 11,
-};
 
-function countMatches(text: string, rx: RegExp): number {
-  return text.match(rx)?.length ?? 0;
-}
-
-function classifyCandidateRole(src: ScoredSource): CandidateRole {
-  if (src.role) return src.role;
-
-  const label = src.label.toLowerCase();
-  const text = src.text.toLowerCase();
-  const format = detectSourceFormat(src.text);
-  const isHtmlBody = label === "html-body";
-
-  const labelTimeline = TIMELINE_LABEL_RX.test(label) ? 3 : 0;
-  const labelContent = CONTENT_LABEL_RX.test(label) ? 3 : 0;
-  const explicitSchedule = EXPLICIT_SCHEDULE_RX.test(text) ? 4 : 0;
-  const breakMentions = BREAK_RX.test(text) ? 2 : 0;
-  const dateMentions = Math.min(isHtmlBody ? 2 : 5, countMatches(src.text, DATE_TOKEN_RX));
-  const weekMentions = Math.min(5, countMatches(text, /\bweek\s+\d+\b/g));
-  const lectureMentions = Math.min(5, countMatches(text, /\blecture\s+\d+\b/g));
-  const slideSignals = SLIDE_DECK_RX.test(text) ? 3 : 0;
-  const calendarFormat = format.includes("calendar") ? 3 : 0;
-  const structuredSchedule = format.includes("structured schedule") || format.includes("tab-separated") ? 2 : 0;
-
-  const timelineScore =
-    labelTimeline +
-    explicitSchedule +
-    breakMentions +
-    dateMentions +
-    Math.min(3, weekMentions) +
-    calendarFormat +
-    structuredSchedule;
-  const contentScore =
-    labelContent +
-    slideSignals +
-    lectureMentions +
-    (src.score > 1.5 ? 1 : 0);
-
-  if (isHtmlBody && explicitSchedule === 0 && calendarFormat === 0 && structuredSchedule === 0) {
-    if (lectureMentions > 0 || slideSignals > 0 || contentScore >= timelineScore) return "content";
-    if (timelineScore >= 6) return "mixed";
-    return "content";
-  }
-
-  if (timelineScore >= 6 && contentScore >= 4) return "mixed";
-  if (timelineScore >= contentScore + 2 && timelineScore >= 5) return "timeline";
-  if (contentScore >= timelineScore + 2 && contentScore >= 4) return "content";
-  if (timelineScore >= 4 && contentScore >= 3) return "mixed";
-  return timelineScore >= contentScore ? "timeline" : "content";
-}
-
-function splitCandidatesByAuthority(candidates: ScoredSource[]) {
-  const classified = candidates.map((src) => ({ ...src, role: classifyCandidateRole(src) }));
-  const timelineCandidates = classified.filter((src) => src.role === "timeline" || src.role === "mixed");
-  const contentCandidates = classified.filter((src) => src.role === "content" || src.role === "mixed");
-  return {
-    classified,
-    timelineCandidates: timelineCandidates.length > 0 ? timelineCandidates : classified,
-    contentCandidates: contentCandidates.length > 0 ? contentCandidates : classified,
-  };
-}
-
-/**
- * Detect when the timeline and content candidate sets share >50% of sources.
- * When they overlap, running two extraction passes is wasteful and produces
- * near-duplicate outputs that cause downstream duplication.
- */
-function candidateSetsOverlap(
-  timelineCandidates: ScoredSource[],
-  contentCandidates: ScoredSource[],
-): boolean {
-  const tLabels = new Set(timelineCandidates.map((c) => c.label));
-  const cLabels = new Set(contentCandidates.map((c) => c.label));
-  const overlap = [...tLabels].filter((l) => cLabels.has(l)).length;
-  return overlap / Math.max(tLabels.size, cLabels.size) > 0.5;
-}
-
-function summarizeAuthorityCandidates(
-  candidates: Array<ScoredSource & { role?: CandidateRole }>,
-  usedLabel: string,
-) {
-  const ranked = [...candidates]
-    .sort((a, b) => b.score !== a.score ? b.score - a.score : b.text.length - a.text.length)
-    .slice(0, 3)
-    .map((candidate) => ({
-      label: candidate.label,
-      role: candidate.role ?? classifyCandidateRole(candidate),
-      score: Number(candidate.score.toFixed(3)),
-      chars: candidate.text.length,
-    }));
-
-  return {
-    winner: usedLabel,
-    runnerUp: ranked.find((candidate) => candidate.label !== usedLabel)?.label ?? null,
-    ranked,
-  };
-}
-
-// ─── Stage 3: EXTRACT ───────────────────────────────────────────────────────
-
-interface ExtractionResult {
-  topics: ParsedTopic[];
-  usedLabel: string;
-  usedWindow: string;
-  scheduleShape: ScheduleShape;
-  rowSemantics: RowSemantics;
-  hasExplicitDates: boolean;
-  hasExplicitBreakRows: boolean;
-}
-
-/**
- * Builds a deterministic structure hint from Canvas assignment data.
- * Only fires when assignments contain numbered lecture references (e.g. "Lecture #5").
- * The hint tells the AI exactly how many lectures exist so it doesn't collapse
- * to coarse unit-level entries when module context is present.
- */
-function buildStructureHint(
-  assignments: AssignmentDateInfo[],
-  lectureCalendar: WeekDateRange[],
-): string {
-  // Extract lecture numbers from assignment titles
-  const lectureNums = new Set<number>();
-  for (const a of assignments) {
-    if (!a.dueDate) continue;
-    const m = a.title.match(/\blecture\s*#?\s*(\d+)\b/i);
-    if (m) lectureNums.add(Number.parseInt(m[1], 10));
-    const range = a.title.match(/\blectures?\s*(\d+)\s*[-–]\s*(\d+)\b/i);
-    if (range) {
-      const lo = Number.parseInt(range[1], 10);
-      const hi = Number.parseInt(range[2], 10);
-      for (let n = lo; n <= hi; n++) lectureNums.add(n);
-    }
-  }
-
-  if (lectureNums.size < 5) return "";
-
-  const sorted = [...lectureNums].sort((a, b) => a - b);
-  const min = sorted[0];
-  const max = sorted[sorted.length - 1];
-
-  // Get date range from dated assignments
-  const dated = assignments
-    .filter((a) => a.dueDate)
-    .map((a) => a.dueDate!.slice(0, 10))
-    .sort();
-  const firstDate = dated[0] ?? "";
-  const lastDate = dated[dated.length - 1] ?? "";
-
-  const weekCount = lectureCalendar.length;
-  const lecturesPerWeek = weekCount > 0
-    ? Math.round(lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0) / weekCount)
-    : 0;
-
-  const lines: string[] = [
-    "--- COURSE STRUCTURE (from Canvas assignment data — ground truth) ---",
-    `Assignment data shows ${max} individually-numbered lectures (Lecture ${min} – Lecture ${max}).`,
-  ];
-
-  if (firstDate && lastDate) {
-    lines.push(`Course spans ${firstDate} to ${lastDate} (~${weekCount || "unknown"} weeks).`);
-  }
-
-  if (lecturesPerWeek > 0) {
-    lines.push(`Lecture calendar: ${weekCount} weeks, ~${lecturesPerWeek} lectures per week.`);
-  }
-
-  lines.push("→ Extract ONE entry per individual lecture. Do NOT collapse lectures into units or modules.");
-  lines.push("---");
-
-  return lines.join("\n");
-}
-
-async function extractTopicsExpanded(
-  candidates: ScoredSource[],
-  courseName: string,
-  structureHint?: string,
-): Promise<ExtractionResult> {
-  const FULL_TEXT_THRESHOLD = 40_000;
-  const LARGE_WINDOW_SIZE = 30_000;
-
-  const allGoodResults: Array<{
-    result: ParsedTopic[];
-    label: string;
-    fmt: string;
-    win: string;
-    parsedSchedule: ParsedSchedule;
-  }> = [];
-
-  for (let ci = 0; ci < candidates.length; ci++) {
-    const src = candidates[ci];
-
-    // Expanded windowing: send full text for PDFs under 30k chars
-    const win = src.text.length <= FULL_TEXT_THRESHOLD
-      ? src.text
-      : bestWindow(src.text, LARGE_WINDOW_SIZE);
-
-    const fmt = detectSourceFormat(src.text);
-    const hint = `${src.label}, format: ${fmt}`;
-    const parsedSchedule = await parseSyllabusSchedule(win, hint, "high", structureHint || undefined);
-    const result = sanitizeSchedule(parsedSchedule.weeks).filter(isContentfulTopic);
-
-    const richWeeks = result.filter(
-      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
-    ).length;
-    const datedWeeks = result.filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)).length;
-    const noteWeeks = result.filter((t) => typeof t.notes === "string" && t.notes.trim().length > 0).length;
-    const dateDenseSchedule =
-      result.length > 0 &&
-      result.length <= 8 &&
-      (datedWeeks / result.length >= 0.8 || (datedWeeks + noteWeeks) / result.length >= 0.8);
-    const isGoodResult =
-      result.length > 0 &&
-      (result.length < 4 || richWeeks / result.length >= 0.4 || dateDenseSchedule);
-
-    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich, ${datedWeeks} dated → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
-
-    if (isGoodResult) {
-      allGoodResults.push({ result, label: src.label, fmt, win, parsedSchedule });
-    }
-  }
-
-  if (allGoodResults.length === 0) {
-    return {
-      topics: [], usedLabel: "none", usedWindow: "",
-      scheduleShape: "none", rowSemantics: "unknown",
-      hasExplicitDates: false, hasExplicitBreakRows: false,
-    };
-  }
-
-  // Merge: start with highest-coverage source, fill gaps from others
-  allGoodResults.sort((a, b) => b.result.length - a.result.length);
-  const merged = new Map<number, ParsedTopic>();
-  const sourceLabels: string[] = [];
-  let usedWindow = allGoodResults[0].win;
-  const mergedScheduleShape = allGoodResults[0].parsedSchedule.shape;
-  const mergedRowSemantics = allGoodResults[0].parsedSchedule.rowSemantics;
-  const mergedHasExplicitDates = allGoodResults.some((item) => item.parsedSchedule.hasExplicitDates);
-  const mergedHasExplicitBreakRows = allGoodResults.some((item) => item.parsedSchedule.hasExplicitBreakRows);
-
-  for (const { result, label } of allGoodResults) {
-    let contributed = false;
-    for (const week of result) {
-      const existing = merged.get(week.weekNumber);
-      if (!existing) {
-        merged.set(week.weekNumber, week);
-        contributed = true;
-      } else {
-        const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
-        const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
-        if (newRich > existingRich) {
-          merged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
-          contributed = true;
-        } else if (!existing.startDate && week.startDate) {
-          existing.startDate = week.startDate;
-          contributed = true;
-        }
-      }
-    }
-    if (contributed) sourceLabels.push(label);
-  }
-
-  let topics = [...merged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
-  const usedLabel = sourceLabels.length > 1
-    ? `merged(${sourceLabels.join("+")})`
-    : sourceLabels[0] ?? "none";
-
-  // Audit pass (same as before — fires when result looks partial/messy)
-  // Skip audit entirely for lecture-number rows — audit would renumber lecture IDs
-  if (mergedRowSemantics !== "lecture_number" && needsAudit(topics)) {
-    const audited = await auditSchedule(topics, usedWindow, mergedRowSemantics);
-    if (audited.length > 0) {
-      topics = audited;
-    }
-  }
-
-  topics = normalizeExtractedTopicNumbers(topics, mergedRowSemantics);
-
-  return {
-    topics, usedLabel, usedWindow,
-    scheduleShape: mergedScheduleShape,
-    rowSemantics: mergedRowSemantics,
-    hasExplicitDates: mergedHasExplicitDates,
-    hasExplicitBreakRows: mergedHasExplicitBreakRows,
-  };
-}
-
-function normalizeExtractedTopicNumbers(
-  topics: ParsedTopic[],
-  rowSemantics: RowSemantics,
-): ParsedTopic[] {
-  return rowSemantics === "lecture_number"
-    ? [...topics].sort((a, b) => a.weekNumber - b.weekNumber)
-    : renumberSequentialWeeks(topics);
-}
+// ─── Break & Content Helpers ────────────────────────────────────────────────
 
 function hasInstructionalContent(topic: ParsedTopic): boolean {
   return (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
+}
+
+function normalizeNotesValue(notes: unknown): string | null {
+  if (typeof notes === "string") {
+    return notes.trim() ? notes : null;
+  }
+  if (Array.isArray(notes)) {
+    const flattened = notes
+      .flatMap((item) => typeof item === "string" ? [item.trim()] : [])
+      .filter(Boolean);
+    return flattened.length > 0 ? flattened.join("; ") : null;
+  }
+  return null;
 }
 
 function isBreakTopic(topic: ParsedTopic): boolean {
@@ -642,10 +342,6 @@ function isBreakTopic(topic: ParsedTopic): boolean {
   return !hasInstructionalContent(topic);
 }
 
-function tokenizeWeekText(topic: ParsedTopic): Set<string> {
-  return tokenize([topic.weekLabel, ...(topic.topics ?? []), ...(topic.readings ?? [])].join(" "));
-}
-
 function isAdministrativeEntry(entry: string): boolean {
   return ADMIN_ENTRY_RX.test(entry.trim());
 }
@@ -655,114 +351,56 @@ function isAdministrativeOnlyTopic(topic: ParsedTopic): boolean {
   return entries.length > 0 && entries.every(isAdministrativeEntry);
 }
 
-function mergeContentOntoTimeline(
-  timelineTopics: ParsedTopic[],
-  contentTopics: ParsedTopic[],
-  courseName: string,
-): ParsedTopic[] {
-  if (timelineTopics.length === 0) return contentTopics;
-  if (contentTopics.length === 0) return timelineTopics;
-
-  const merged = timelineTopics.map((topic) => ({
-    ...topic,
-    topics: [...(topic.topics ?? [])],
-    readings: [...(topic.readings ?? [])],
-  }));
-
-  const contentByWeek = new Map<number, ParsedTopic>();
-  for (const topic of contentTopics) {
-    if (!contentByWeek.has(topic.weekNumber)) {
-      contentByWeek.set(topic.weekNumber, topic);
-    }
-  }
-
-  const timelineKeywords = merged.map((topic) => tokenizeWeekText(topic));
-
-  for (let i = 0; i < merged.length; i++) {
-    const spine = merged[i];
-    if (isBreakTopic(spine)) continue;
-
-    let content = contentByWeek.get(spine.weekNumber) ?? null;
-    if (!content) {
-      const spineKeywords = timelineKeywords[i];
-      let bestMatch: ParsedTopic | null = null;
-      let bestOverlap = 0;
-      for (const candidate of contentTopics) {
-        const candidateKeywords = tokenizeWeekText(candidate);
-        let overlap = 0;
-        for (const token of spineKeywords) {
-          if (candidateKeywords.has(token)) overlap++;
-        }
-        if (overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestMatch = candidate;
-        }
-      }
-      if (bestOverlap >= 2) {
-        content = bestMatch;
-      } else if (contentTopics.length === timelineTopics.length) {
-        content = contentTopics[i] ?? null;
-      } else {
-        const mappedIndex = timelineTopics.length === 1
-          ? 0
-          : Math.round(i * (contentTopics.length - 1) / Math.max(1, timelineTopics.length - 1));
-        content = contentTopics[mappedIndex] ?? null;
-      }
-    }
-
-    if (!content) continue;
-
-    const mergedTopics = new Set<string>(spine.topics ?? []);
-    for (const topic of content.topics ?? []) {
-      if (!mergedTopics.has(topic)) {
-        mergedTopics.add(topic);
-      }
-    }
-
-    const mergedReadings = new Set<string>(spine.readings ?? []);
-    for (const reading of content.readings ?? []) {
-      if (!mergedReadings.has(reading)) {
-        mergedReadings.add(reading);
-      }
-    }
-
-    merged[i] = {
-      ...spine,
-      weekLabel:
-        /^week\s+\d+$/i.test(spine.weekLabel) && content.weekLabel
-          ? content.weekLabel
-          : spine.weekLabel,
-      topics: [...mergedTopics],
-      readings: [...mergedReadings],
-      notes: spine.notes ?? content.notes,
-      courseName: content.courseName ?? spine.courseName,
-    };
-  }
-
-  console.log(
-    `[pipeline] ${courseName}: merged ${contentTopics.length} content week(s) onto ${timelineTopics.length} timeline week(s)`,
-  );
-
-  return merged;
+function stripBreakSegments(notes?: unknown): string | null {
+  const normalized = normalizeNotesValue(notes);
+  if (!normalized) return null;
+  const cleaned = normalized
+    .split(/[;\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && !BREAK_SEGMENT_RX.test(segment));
+  return cleaned.length > 0 ? cleaned.join("; ") : null;
 }
 
-function isSparseTimeline(topics: ParsedTopic[]): boolean {
-  if (topics.length < 2 || topics.length > 8) return false;
-  const dated = topics.filter((topic) => topic.startDate && /^\d{4}-\d{2}-\d{2}$/.test(topic.startDate));
-  if (dated.length < 2) return false;
-
-  const gaps: number[] = [];
-  for (let i = 1; i < dated.length; i++) {
-    const previous = parseISO(`${dated[i - 1].startDate}T12:00:00Z`);
-    const current = parseISO(`${dated[i].startDate}T12:00:00Z`);
-    if (Number.isNaN(previous.getTime()) || Number.isNaN(current.getTime())) continue;
-    gaps.push((current.getTime() - previous.getTime()) / 86400_000);
-  }
-
-  if (gaps.length === 0) return false;
-  const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
-  return averageGap > 10;
+function cleanBreakLabel(label: string): string {
+  return label
+    .replace(/\s*(?:and|\/)\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
+    .replace(/\s*[—-]\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
+    .trim();
 }
+
+function summarizeBreakSegments(notes?: unknown): string | null {
+  const normalized = normalizeNotesValue(notes);
+  if (!normalized) return null;
+  const segments = normalized
+    .split(/[;\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
+  return segments.length > 0 ? segments.join("; ") : null;
+}
+
+function inferBreakLabel(topic: ParsedTopic): string {
+  const text = `${topic.weekLabel ?? ""} ${normalizeNotesValue(topic.notes) ?? ""}`;
+  if (/\bspring break\b/i.test(text)) return "Spring Break — No Class";
+  if (/\bread(?:ing)? days?\b/i.test(text)) return "Reading Days";
+  if (/\bbye week\b/i.test(text)) return "Bye Week — No Class";
+  if (/\bholiday\b/i.test(text)) return "Holiday — No Class";
+  return "No Class / Academic Break";
+}
+
+const MONTH_TO_INDEX: Record<string, number> = {
+  jan: 0, january: 0,
+  feb: 1, february: 1,
+  mar: 2, march: 2,
+  apr: 3, april: 3,
+  may: 4,
+  jun: 5, june: 5,
+  jul: 6, july: 6,
+  aug: 7, august: 7,
+  sep: 8, sept: 8, september: 8,
+  oct: 9, october: 9,
+  nov: 10, november: 10,
+  dec: 11, december: 11,
+};
 
 function normalizeCalendarYear(yearRaw: string): number {
   const year = Number.parseInt(yearRaw, 10);
@@ -841,46 +479,6 @@ function inferIsoDateFromText(
   return [...candidates].sort()[0];
 }
 
-function normalizeNotesValue(notes: unknown): string | null {
-  if (typeof notes === "string") {
-    return notes.trim() ? notes : null;
-  }
-  if (Array.isArray(notes)) {
-    const flattened = notes
-      .flatMap((item) => typeof item === "string" ? [item.trim()] : [])
-      .filter(Boolean);
-    return flattened.length > 0 ? flattened.join("; ") : null;
-  }
-  return null;
-}
-
-function stripBreakSegments(notes?: unknown): string | null {
-  const normalized = normalizeNotesValue(notes);
-  if (!normalized) return null;
-  const cleaned = normalized
-    .split(/[;\n]+/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0 && !BREAK_SEGMENT_RX.test(segment));
-  return cleaned.length > 0 ? cleaned.join("; ") : null;
-}
-
-function cleanBreakLabel(label: string): string {
-  return label
-    .replace(/\s*(?:and|\/)\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
-    .replace(/\s*[—-]\s*(spring break|academic break|reading days?|bye week|no classes?|no class|no lab|no lecture)\b.*$/i, "")
-    .trim();
-}
-
-function summarizeBreakSegments(notes?: unknown): string | null {
-  const normalized = normalizeNotesValue(notes);
-  if (!normalized) return null;
-  const segments = normalized
-    .split(/[;\n]+/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0 && BREAK_SEGMENT_RX.test(segment));
-  return segments.length > 0 ? segments.join("; ") : null;
-}
-
 function inferBreakStartDate(
   topic: ParsedTopic,
   termStartDate: string | null,
@@ -924,15 +522,6 @@ function inferBreakStartDate(
   }
 
   return null;
-}
-
-function inferBreakLabel(topic: ParsedTopic): string {
-  const text = `${topic.weekLabel ?? ""} ${normalizeNotesValue(topic.notes) ?? ""}`;
-  if (/\bspring break\b/i.test(text)) return "Spring Break — No Class";
-  if (/\bread(?:ing)? days?\b/i.test(text)) return "Reading Days";
-  if (/\bbye week\b/i.test(text)) return "Bye Week — No Class";
-  if (/\bholiday\b/i.test(text)) return "Holiday — No Class";
-  return "No Class / Academic Break";
 }
 
 function splitMixedBreakWeeks(
@@ -984,65 +573,6 @@ function splitMixedBreakWeeks(
   return result;
 }
 
-function insertBreakWeeksFromDateGaps(
-  topics: ParsedTopic[],
-  courseName: string,
-): ParsedTopic[] {
-  if (topics.length < 2 || isSparseTimeline(topics)) return topics;
-
-  const ordered = [...topics].sort((a, b) => {
-    if (a.startDate && b.startDate && a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
-    if (a.startDate && !b.startDate) return -1;
-    if (!a.startDate && b.startDate) return 1;
-    return a.weekNumber - b.weekNumber;
-  });
-
-  const existingBreakStarts = new Set(
-    ordered
-      .filter((topic) => topic.startDate && isBreakTopic(topic))
-      .map((topic) => topic.startDate as string),
-  );
-
-  const result: ParsedTopic[] = [];
-  let inserted = 0;
-
-  for (let i = 0; i < ordered.length; i++) {
-    const current = ordered[i];
-    result.push(current);
-
-    const next = ordered[i + 1];
-    if (!current.startDate || !next?.startDate) continue;
-    if (isBreakTopic(current) || isBreakTopic(next)) continue;
-
-    let cursor = addDays(parseISO(`${current.startDate}T12:00:00Z`), 7);
-    const nextStart = parseISO(`${next.startDate}T12:00:00Z`);
-
-    while (differenceInCalendarDays(nextStart, cursor) >= 7) {
-      const breakStart = cursor.toISOString().slice(0, 10);
-      if (!existingBreakStarts.has(breakStart)) {
-        existingBreakStarts.add(breakStart);
-        inserted += 1;
-        result.push({
-          weekNumber: current.weekNumber + inserted * 0.1,
-          weekLabel: "No Class / Academic Break",
-          startDate: breakStart,
-          topics: [],
-          readings: [],
-          notes: "Inferred no-class week from lecture schedule gap",
-          courseName,
-        });
-      }
-      cursor = addDays(cursor, 7);
-    }
-  }
-
-  if (inserted > 0) {
-    console.log(`[pipeline] ${courseName}: inserted ${inserted} break week(s) from dated gaps`);
-  }
-
-  return result;
-}
-
 function stripCarriedBreakNotes(
   topics: ParsedTopic[],
   termStartDate: string | null,
@@ -1089,627 +619,283 @@ function stripCarriedBreakNotes(
   return cleaned;
 }
 
-interface TimelineSpine {
+function isSparseTimeline(topics: ParsedTopic[]): boolean {
+  if (topics.length < 2 || topics.length > 8) return false;
+  const dated = topics.filter((topic) => topic.startDate && /^\d{4}-\d{2}-\d{2}$/.test(topic.startDate));
+  if (dated.length < 2) return false;
+
+  const gaps: number[] = [];
+  for (let i = 1; i < dated.length; i++) {
+    const previous = parseISO(`${dated[i - 1].startDate}T12:00:00Z`);
+    const current = parseISO(`${dated[i].startDate}T12:00:00Z`);
+    if (Number.isNaN(previous.getTime()) || Number.isNaN(current.getTime())) continue;
+    gaps.push((current.getTime() - previous.getTime()) / 86400_000);
+  }
+
+  if (gaps.length === 0) return false;
+  const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+  return averageGap > 10;
+}
+
+// ─── Step 2: EXTRACT (single-pass per block) ───────────────────────────────
+
+interface ExtractionResult {
   topics: ParsedTopic[];
-  anchors: TimelineAnchorRecord[];
-  scheduleMode: ScheduleMode;
-}
-
-function buildTimelineSpine(args: {
-  topics: ParsedTopic[];
-  hasTimelineAuthority: boolean;
-  usedModuleScaffold: boolean;
-  lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
-  sourceRefs: { label: string; role: CandidateRole }[];
-}): TimelineSpine {
-  const scheduleMode: ScheduleMode = isSparseTimeline(args.topics)
-    ? "sparse"
-    : args.topics.some((topic) => Boolean(topic.startDate))
-      ? "weekly"
-      : args.usedModuleScaffold || !args.hasTimelineAuthority
-        ? "inferred"
-        : "unknown";
-
-  const anchors: TimelineAnchorRecord[] = args.topics.map((topic, index) => {
-    let anchorType: TimelineAnchorType = "inferred_week";
-    let calendarConfidence: ConfidenceLevel = "low";
-
-    if (isBreakTopic(topic)) {
-      anchorType = "break";
-      calendarConfidence = topic.startDate ? "medium" : "low";
-    } else if (scheduleMode === "sparse" && topic.startDate) {
-      anchorType = "sparse_meeting";
-      calendarConfidence = args.hasTimelineAuthority ? "high" : "medium";
-    } else if (args.hasTimelineAuthority && topic.startDate) {
-      anchorType = "explicit_date";
-      calendarConfidence = "high";
-    } else if (args.usedModuleScaffold) {
-      anchorType = "module_scaffold";
-      calendarConfidence = topic.startDate ? "medium" : "low";
-    } else if (topic.startDate && args.lectureCalendarSource === "lecture-anchors") {
-      anchorType = "lecture_group";
-      calendarConfidence = "medium";
-    } else if (topic.startDate) {
-      anchorType = "inferred_week";
-      calendarConfidence = "medium";
-    }
-
-    return {
-      sequenceNumber: index + 1,
-      anchorDate: topic.startDate ?? null,
-      anchorType,
-      isInstructional:
-        !isBreakTopic(topic) &&
-        (args.topics.length <= 8 && args.topics.some((t) => Boolean(t.startDate))
-          ? Boolean(topic.startDate) || hasInstructionalContent(topic)
-          : hasInstructionalContent(topic)),
-      calendarConfidence,
-      sourceRefs: args.sourceRefs,
-      notes: topic.notes ?? null,
-    };
-  });
-
-  return { topics: args.topics, anchors, scheduleMode };
-}
-
-function mergeContentOntoSpine(args: {
-  spine: TimelineSpine;
-  topics: ParsedTopic[];
-  timelineSource: string;
-  contentSource: string;
-  lectureCalendarSource: PipelineDebug["lectureCalendarSource"];
-  sourceRefs: { label: string; role: CandidateRole }[];
-  usedModuleScaffold: boolean;
-  validationWarnings: string[];
-}): SynthesizedTopic[] {
-  return args.topics.map((topic, index) => {
-    const anchor = args.spine.anchors[index] ?? {
-      sequenceNumber: index + 1,
-      anchorDate: topic.startDate ?? null,
-      anchorType: "inferred_week" as const,
-      isInstructional: true,
-      calendarConfidence: "unknown" as const,
-      sourceRefs: args.sourceRefs,
-      notes: topic.notes ?? null,
-    };
-
-    const hasContent = (topic.topics?.length ?? 0) > 0 || (topic.readings?.length ?? 0) > 0;
-    const contentConfidence: ConfidenceLevel =
-      !hasContent
-        ? "low"
-        : args.contentSource !== "none"
-          ? "high"
-          : args.usedModuleScaffold
-            ? "medium"
-            : "low";
-
-    return {
-      ...topic,
-      dateConfidence: anchor.calendarConfidence,
-      contentConfidence,
-      scheduleMode: args.spine.scheduleMode,
-      provenance: {
-        anchorSequenceNumber: anchor.sequenceNumber,
-        anchorType: anchor.anchorType,
-        timelineSource: args.timelineSource,
-        contentSource: args.contentSource,
-        lectureCalendarSource: args.lectureCalendarSource ?? "none",
-        sourceRefs: anchor.sourceRefs,
-        usedModuleScaffold: args.usedModuleScaffold,
-        validationWarnings: args.validationWarnings,
-      },
-    };
-  });
-}
-
-// ─── Stage 3b: LECTURE CALENDAR (algorithmic) ────────────────────────────────
-
-interface LectureDate {
-  lectureNumber: number;
-  date: string; // YYYY-MM-DD
-  dayOfWeek: string; // "MO", "TU", etc.
-}
-
-interface WeekDateRange {
-  weekNumber: number;
-  startDate: string; // YYYY-MM-DD (Monday of week)
-  lectures: LectureDate[];
-}
-
-interface LectureAnchor {
-  lectureNumber: number;
-  dueDate: string;
-  title: string;
-  source: "assignment" | "syllabus-event";
-}
-
-interface LectureCalendarBuild {
-  weeks: WeekDateRange[];
-  source: "none" | "term-start" | "lecture-anchors";
-}
-
-const DAY_CODES: Record<string, number> = {
-  SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6,
-};
-
-/**
- * Extract a canonical series key from an assignment title by stripping
- * trailing numbers/punctuation. Assignments like "Homework 1", "Homework 2"
- * share the key "homework".
- */
-function assignmentSeriesKey(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/\s*[#:—–-]?\s*\d+\s*$/g, "")
-    .replace(/[^a-z\s]/g, "")
-    .trim();
+  usedLabel: string;
+  usedWindow: string;
+  scheduleShape: ScheduleShape;
+  rowSemantics: RowSemantics;
+  hasExplicitDates: boolean;
+  hasExplicitBreakRows: boolean;
 }
 
 /**
- * Find the earliest and latest dates from recurring assignment series.
- * A "recurring" series is 3+ assignments sharing the same series key.
- * Returns null if no recurring series found.
+ * Extracts topics from all syllabus candidates. Single-pass per block —
+ * no timeline/content role split. Iterates candidates, picks best result,
+ * merges complementary sources by weekNumber.
  */
-function recurringAssignmentDateBounds(
-  assignments: AssignmentDateInfo[],
-): { earliest: string; latest: string } | null {
-  const seriesDates = new Map<string, string[]>();
-  for (const a of assignments) {
-    if (!a.dueDate) continue;
-    const key = assignmentSeriesKey(a.title);
-    if (!key) continue;
-    const dateStr = a.dueDate.slice(0, 10);
-    if (!seriesDates.has(key)) seriesDates.set(key, []);
-    seriesDates.get(key)!.push(dateStr);
-  }
+async function extractFromBlocks(
+  candidates: ScoredSource[],
+  courseName: string,
+): Promise<ExtractionResult> {
+  const FULL_TEXT_THRESHOLD = 40_000;
+  const LARGE_WINDOW_SIZE = 30_000;
 
-  let earliest: string | null = null;
-  let latest: string | null = null;
-  for (const dates of seriesDates.values()) {
-    if (dates.length < 3) continue; // not a recurring series
-    dates.sort();
-    const seriesEarliest = dates[0];
-    const seriesLatest = dates[dates.length - 1];
-    if (!earliest || seriesEarliest < earliest) earliest = seriesEarliest;
-    if (!latest || seriesLatest > latest) latest = seriesLatest;
-  }
+  const allGoodResults: Array<{
+    result: ParsedTopic[];
+    label: string;
+    fmt: string;
+    win: string;
+    parsedSchedule: ParsedSchedule;
+  }> = [];
 
-  return earliest && latest ? { earliest, latest } : null;
-}
+  for (let ci = 0; ci < candidates.length; ci++) {
+    const src = candidates[ci];
 
-function buildLectureCalendar(
-  classSchedule: ClassScheduleInfo | null,
-  termStartDate: string | null,
-  termEndDate: string | null,
-  assignments: AssignmentDateInfo[],
-  syllabusEvents: SyllabusEventInfo[],
-): LectureCalendarBuild {
-  if (!classSchedule || !termStartDate) {
-    return { weeks: [], source: "none" };
-  }
+    const win = src.text.length <= FULL_TEXT_THRESHOLD
+      ? src.text
+      : bestWindow(src.text, LARGE_WINDOW_SIZE);
 
-  // Canvas termStartAt is often the academic period boundary (e.g. winter break),
-  // not the first day of classes. Use the earliest assignment date to clamp:
-  // if termStart is >21 days before the first assignment, use the assignment date.
-  const datedAssignments = assignments
-    .filter((a) => a.dueDate)
-    .map((a) => a.dueDate!.slice(0, 10))
-    .sort();
-  if (datedAssignments.length > 0) {
-    const firstAssignment = new Date(datedAssignments[0] + "T12:00:00");
-    const termStart = new Date(termStartDate + "T12:00:00");
-    const gapDays = (firstAssignment.getTime() - termStart.getTime()) / (1000 * 60 * 60 * 24);
-    if (gapDays > 21) {
-      // Term start is too early (likely includes break) — use 1 week before first assignment
-      const adjusted = new Date(firstAssignment);
-      adjusted.setDate(adjusted.getDate() - 7);
-      termStartDate = adjusted.toISOString().slice(0, 10);
+    const fmt = detectSourceFormat(src.text);
+    const hint = `${src.label}, format: ${fmt}`;
+    const parsedSchedule = await parseSyllabusSchedule(win, hint, "high");
+    const result = sanitizeSchedule(parsedSchedule.weeks).filter(isContentfulTopic);
+
+    const richWeeks = result.filter(
+      (t) => (t.topics ?? []).length > 0 || (t.readings ?? []).length > 0,
+    ).length;
+    const datedWeeks = result.filter((t) => typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)).length;
+    const noteWeeks = result.filter((t) => typeof t.notes === "string" && t.notes.trim().length > 0).length;
+    const dateDenseSchedule =
+      result.length > 0 &&
+      result.length <= 8 &&
+      (datedWeeks / result.length >= 0.8 || (datedWeeks + noteWeeks) / result.length >= 0.8);
+    const isGoodResult =
+      result.length > 0 &&
+      (result.length < 4 || richWeeks / result.length >= 0.4 || dateDenseSchedule);
+
+    console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich, ${datedWeeks} dated → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
+
+    if (isGoodResult) {
+      allGoodResults.push({ result, label: src.label, fmt, win, parsedSchedule });
     }
   }
 
-  // Find lecture meetings (not labs, discussions, etc.)
-  // Explicit "lecture*" labels are strong evidence.
-  // Blank labels are ambiguous — could be lectures, discussions, or labs.
-  // Only treat blank labels as lecture evidence when corroborated by
-  // lecture anchors (e.g. assignments referencing "Lecture #N").
-  const lectureAnchors = extractLectureAnchors(assignments, syllabusEvents);
-  const explicitLectureMeetings = classSchedule.meetings.filter((m) =>
-    m.label.toLowerCase().trim().startsWith("lecture"),
-  );
-  const unlabeledMeetings = classSchedule.meetings.filter((m) =>
-    m.label.toLowerCase().trim() === "",
-  );
-  const lectureMeetings = explicitLectureMeetings.length > 0
-    ? explicitLectureMeetings
-    : lectureAnchors.length > 0
-      ? unlabeledMeetings
-      : [];
-  if (lectureMeetings.length === 0) {
-    return { weeks: [], source: "none" };
+  if (allGoodResults.length === 0) {
+    return {
+      topics: [], usedLabel: "none", usedWindow: "",
+      scheduleShape: "none", rowSemantics: "unknown",
+      hasExplicitDates: false, hasExplicitBreakRows: false,
+    };
   }
 
-  // Get unique lecture days (e.g., [1, 3, 5] for MWF)
-  const lectureDayCodes = new Set<number>();
-  for (const m of lectureMeetings) {
-    for (const d of m.days) {
-      const code = DAY_CODES[d.toUpperCase()];
-      if (code !== undefined) lectureDayCodes.add(code);
-    }
-  }
-  const sortedDays = [...lectureDayCodes].sort((a, b) => a - b);
-  if (sortedDays.length === 0) {
-    return { weeks: [], source: "none" };
-  }
+  // Merge: start with highest-coverage source, fill gaps from others
+  allGoodResults.sort((a, b) => b.result.length - a.result.length);
+  const merged = new Map<number, ParsedTopic>();
+  const sourceLabels: string[] = [];
+  let usedWindow = allGoodResults[0].win;
+  const mergedScheduleShape = allGoodResults[0].parsedSchedule.shape;
+  const mergedRowSemantics = allGoodResults[0].parsedSchedule.rowSemantics;
+  const mergedHasExplicitDates = allGoodResults.some((item) => item.parsedSchedule.hasExplicitDates);
+  const mergedHasExplicitBreakRows = allGoodResults.some((item) => item.parsedSchedule.hasExplicitBreakRows);
 
-  const DAY_NAMES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-  const parsedTermStart = new Date(termStartDate + "T12:00:00");
-  let end = termEndDate ? new Date(termEndDate + "T12:00:00") : new Date(parsedTermStart);
-  if (!termEndDate) end.setDate(end.getDate() + 16 * 7); // default 16 weeks
-
-  // Clamp end date using the best available evidence — Canvas termEndDate
-  // can be months past actual instruction end (e.g. June 30 for a spring course).
-  // Lecture anchors are the tightest bound; recurring assignments are a fallback.
-  if (lectureAnchors.length > 0) {
-    // Clamp to the last anchor's due date — the anchored series already
-    // generates all lectures up to this point
-    const lastAnchorDate = new Date(lectureAnchors[lectureAnchors.length - 1].dueDate.slice(0, 10) + "T12:00:00");
-    if (lastAnchorDate < end) {
-      end = lastAnchorDate;
-    }
-  } else {
-    const assignmentBounds = recurringAssignmentDateBounds(assignments);
-    if (assignmentBounds) {
-      const assignmentEnd = new Date(assignmentBounds.latest + "T12:00:00");
-      if (assignmentEnd < end) {
-        end = assignmentEnd;
+  for (const { result, label } of allGoodResults) {
+    let contributed = false;
+    for (const week of result) {
+      const existing = merged.get(week.weekNumber);
+      if (!existing) {
+        merged.set(week.weekNumber, week);
+        contributed = true;
+      } else {
+        const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
+        const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
+        if (newRich > existingRich) {
+          merged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
+          contributed = true;
+        } else if (!existing.startDate && week.startDate) {
+          existing.startDate = week.startDate;
+          contributed = true;
+        }
       }
     }
+    if (contributed) sourceLabels.push(label);
   }
 
-  const firstLectureDate = firstLectureOnOrAfter(parsedTermStart, sortedDays);
-  if (firstLectureDate > end) {
-    return { weeks: [], source: "none" };
+  let topics = [...merged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
+  const usedLabel = sourceLabels.length > 1
+    ? `merged(${sourceLabels.join("+")})`
+    : sourceLabels[0] ?? "none";
+
+  // Audit pass — fires when result looks partial/messy
+  if (needsAudit(topics)) {
+    const audited = await auditSchedule(topics, usedWindow, mergedRowSemantics);
+    if (audited.length > 0) {
+      topics = audited;
+    }
   }
 
-  const allLectures =
-    lectureAnchors.length > 0
-      ? buildBestAnchoredLectureSeries(lectureAnchors, sortedDays, parsedTermStart, end, DAY_NAMES)
-      : generateLectureSeries(firstLectureDate, sortedDays, end, DAY_NAMES);
-
-  if (allLectures.length === 0) {
-    return { weeks: [], source: "none" };
-  }
-
-  // Group lectures into calendar weeks (Mon-Sun)
-  const weekMap = new Map<string, LectureDate[]>();
-  for (const lec of allLectures) {
-    const lecDate = new Date(lec.date + "T12:00:00");
-    const dayOfWeek = lecDate.getDay();
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const monday = new Date(lecDate);
-    monday.setDate(monday.getDate() + mondayOffset);
-    const mondayStr = monday.toISOString().slice(0, 10);
-
-    if (!weekMap.has(mondayStr)) weekMap.set(mondayStr, []);
-    weekMap.get(mondayStr)!.push(lec);
-  }
-
-  const weeks: WeekDateRange[] = [];
-  const sortedMondays = [...weekMap.keys()].sort();
-  for (let i = 0; i < sortedMondays.length; i++) {
-    weeks.push({
-      weekNumber: i + 1,
-      startDate: sortedMondays[i],
-      lectures: weekMap.get(sortedMondays[i])!,
-    });
-  }
+  // Normalize week numbers to sequential 1..N
+  topics = renumberSequentialWeeks(topics);
 
   return {
-    weeks,
-    source: lectureAnchors.length > 0 ? "lecture-anchors" : "term-start",
+    topics, usedLabel, usedWindow,
+    scheduleShape: mergedScheduleShape,
+    rowSemantics: mergedRowSemantics,
+    hasExplicitDates: mergedHasExplicitDates,
+    hasExplicitBreakRows: mergedHasExplicitBreakRows,
   };
 }
 
-function extractLectureAnchors(
-  assignments: AssignmentDateInfo[],
-  syllabusEvents: SyllabusEventInfo[],
-): LectureAnchor[] {
-  const anchors = new Map<number, LectureAnchor>();
-  const sources = [
-    ...assignments.map((item) => ({ ...item, source: "assignment" as const })),
-    ...syllabusEvents.map((item) => ({ ...item, source: "syllabus-event" as const })),
-  ];
-
-  for (const source of sources) {
-    if (!source.dueDate) continue;
-    const dueDate = parseISO(`${source.dueDate.slice(0, 10)}T12:00:00Z`);
-    if (Number.isNaN(dueDate.getTime())) continue;
-
-    const singleMatch = source.title.match(/\blecture\s*#?\s*(\d+)\b/i);
-    const rangeMatch = source.title.match(/\blectures?\s*(\d+)\s*[-–]\s*(\d+)\b/i);
-    const lectureNumber = singleMatch
-      ? Number.parseInt(singleMatch[1], 10)
-      : rangeMatch
-        ? Number.parseInt(rangeMatch[2], 10)
-        : null;
-
-    if (!lectureNumber || lectureNumber < 1) continue;
-    if (!anchors.has(lectureNumber)) {
-      anchors.set(lectureNumber, {
-        lectureNumber,
-        dueDate: source.dueDate.slice(0, 10),
-        title: source.title,
-        source: source.source,
-      });
-    }
-  }
-
-  return [...anchors.values()].sort((a, b) => a.lectureNumber - b.lectureNumber);
-}
-
-function firstLectureOnOrAfter(date: Date, sortedDays: number[]): Date {
-  const cursor = new Date(date);
-  for (let i = 0; i < 7; i++) {
-    if (sortedDays.includes(cursor.getDay())) return cursor;
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  return new Date(date);
-}
-
-function lastLectureOnOrBefore(date: Date, sortedDays: number[]): Date {
-  const cursor = new Date(date);
-  for (let i = 0; i < 7; i++) {
-    if (sortedDays.includes(cursor.getDay())) return cursor;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return new Date(date);
-}
-
-function nextLectureDate(current: Date, sortedDays: number[]): Date {
-  const cursor = new Date(current);
-  for (let i = 1; i <= 7; i++) {
-    cursor.setDate(cursor.getDate() + 1);
-    if (sortedDays.includes(cursor.getDay())) return cursor;
-  }
-  return cursor;
-}
-
-function previousLectureDate(current: Date, sortedDays: number[]): Date {
-  const cursor = new Date(current);
-  for (let i = 1; i <= 7; i++) {
-    cursor.setDate(cursor.getDate() - 1);
-    if (sortedDays.includes(cursor.getDay())) return cursor;
-  }
-  return cursor;
-}
-
-function inferLectureSeriesStart(
-  anchors: LectureAnchor[],
-  sortedDays: number[],
-  termStart: Date,
-): Date | null {
-  if (anchors.length === 0) return null;
-
-  const earliest = anchors[0];
-  let cursor = lastLectureOnOrBefore(parseISO(`${earliest.dueDate}T12:00:00Z`), sortedDays);
-  for (let i = 1; i < earliest.lectureNumber; i++) {
-    cursor = previousLectureDate(cursor, sortedDays);
-  }
-
-  return cursor < termStart ? firstLectureOnOrAfter(termStart, sortedDays) : cursor;
-}
-
-function generateLectureSeries(
-  firstLectureDate: Date,
-  sortedDays: number[],
-  endDate: Date,
-  dayNames: string[],
-): LectureDate[] {
-  const allLectures: LectureDate[] = [];
-  let cursor = new Date(firstLectureDate);
-  let lectureNumber = 1;
-
-  while (cursor <= endDate) {
-    allLectures.push({
-      lectureNumber,
-      date: cursor.toISOString().slice(0, 10),
-      dayOfWeek: dayNames[cursor.getDay()],
-    });
-    lectureNumber++;
-    cursor = nextLectureDate(cursor, sortedDays);
-  }
-
-  return allLectures;
-}
-
-function buildBestAnchoredLectureSeries(
-  anchors: LectureAnchor[],
-  sortedDays: number[],
-  termStart: Date,
-  endDate: Date,
-  dayNames: string[],
-): LectureDate[] {
-  const baseStart = inferLectureSeriesStart(anchors, sortedDays, termStart);
-  if (!baseStart) return [];
-
-  const candidateStarts: Date[] = [baseStart];
-  let cursor = new Date(baseStart);
-  for (let i = 1; i < sortedDays.length; i++) {
-    cursor = previousLectureDate(cursor, sortedDays);
-    if (cursor >= termStart) {
-      candidateStarts.push(new Date(cursor));
-    }
-  }
-  const defaultStart = firstLectureOnOrAfter(termStart, sortedDays);
-  candidateStarts.push(defaultStart);
-
-  let bestSeries: LectureDate[] = [];
-  let bestScore = Number.POSITIVE_INFINITY;
-
-  for (const candidateStart of candidateStarts) {
-    const candidateSeries = generateLectureSeries(candidateStart, sortedDays, endDate, dayNames);
-    const score = scoreLectureSeries(candidateSeries, anchors);
-    if (score < bestScore) {
-      bestScore = score;
-      bestSeries = candidateSeries;
-    }
-  }
-
-  return Number.isFinite(bestScore) ? bestSeries : generateLectureSeries(defaultStart, sortedDays, endDate, dayNames);
-}
-
-function scoreLectureSeries(allLectures: LectureDate[], anchors: LectureAnchor[]): number {
-  let total = 0;
-  for (const anchor of anchors) {
-    const idx = anchor.lectureNumber - 1;
-    if (idx < 0 || idx >= allLectures.length) {
-      total += 100;
-      continue;
-    }
-
-    const lectureDate = parseISO(`${allLectures[idx].date}T12:00:00Z`);
-    const anchorDate = parseISO(`${anchor.dueDate}T12:00:00Z`);
-    if (Number.isNaN(lectureDate.getTime()) || Number.isNaN(anchorDate.getTime())) {
-      total += 50;
-      continue;
-    }
-
-    const diff = differenceInCalendarDays(anchorDate, lectureDate);
-    total += Math.abs(diff);
-    if (diff < -1) total += 25;
-    if (diff > 5) total += diff * 2;
-  }
-
-  return total;
-}
-
-// ─── Stage 3c: GROUP lectures into weeks (algorithmic) ──────────────────────
+// ─── Module-Only Fallback ───────────────────────────────────────────────────
 
 /**
- * If AI extracted individual lectures (e.g. 41 entries for 41 lectures),
- * group them into calendar weeks using the lecture calendar.
- * This is pure math — no AI needed.
+ * If the syllabus has no usable schedule, fall back to an honest assignment
+ * timeline built from Canvas due dates. This is explicitly not a lecture plan.
  */
-function groupLecturesIntoWeeks(
-  aiTopics: ParsedTopic[],
-  lectureCalendar: WeekDateRange[],
+function organizeAssignmentsAsTimeline(
+  assignments: AssignmentDateInfo[],
   courseName: string,
-  rowSemantics: RowSemantics,
-): ParsedTopic[] | null {
-  if (lectureCalendar.length === 0) return null;
-  // Only group when AI explicitly classified rows as lecture-number entries
-  if (rowSemantics !== "lecture_number") {
-    return null;
+): ParsedTopic[] {
+  const datedAssignments = assignments
+    .filter((assignment): assignment is AssignmentDateInfo & { dueDate: string } =>
+      typeof assignment.dueDate === "string" && /^\d{4}-\d{2}-\d{2}/.test(assignment.dueDate),
+    )
+    .map((assignment) => ({
+      title: assignment.title,
+      dueDate: assignment.dueDate.slice(0, 10),
+    }))
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.title.localeCompare(b.title));
+
+  if (datedAssignments.length === 0) return [];
+
+  const grouped = new Map<string, string[]>();
+  for (const assignment of datedAssignments) {
+    const parsed = parseISO(`${assignment.dueDate}T12:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) continue;
+    const monday = startOfWeek(parsed, { weekStartsOn: 1 }).toISOString().slice(0, 10);
+    const titles = grouped.get(monday) ?? [];
+    if (!titles.includes(assignment.title)) {
+      titles.push(assignment.title);
+    }
+    grouped.set(monday, titles);
   }
 
-  console.log(`[pipeline] ${courseName}: Stage 3c grouping ${aiTopics.length} lecture entries into ${lectureCalendar.length} calendar weeks`);
+  const timeline = [...grouped.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([monday, titles], index) => ({
+      weekNumber: index + 1,
+      weekLabel: `Assignments week of ${monday}`,
+      startDate: monday,
+      topics: titles,
+      readings: [],
+      notes: "Generated from Canvas assignment due dates",
+      courseName,
+    }));
 
-  // Build a map: lecture number → calendar week
-  const lectureToWeek = new Map<number, WeekDateRange>();
-  for (const week of lectureCalendar) {
-    for (const lec of week.lectures) {
-      lectureToWeek.set(lec.lectureNumber, week);
-    }
-  }
+  console.log(
+    `[pipeline] ${courseName}: assignment fallback organized ${datedAssignments.length} assignments → ${timeline.length} weekly entries`,
+  );
+  return timeline;
+}
 
-  // Group AI topics by calendar week
-  const weekGroups = new Map<number, { week: WeekDateRange; topics: ParsedTopic[] }>();
+/**
+ * When AI extraction fails but we have content modules, build a timeline
+ * from module labels. Modules provide structure but are explicitly labeled
+ * as canvas_modules source — never presented as a "Course Schedule".
+ */
+function organizeModulesAsTimeline(
+  contentModules: CanvasModuleInfo[],
+  courseName: string,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): ParsedTopic[] {
+  if (contentModules.length === 0) return [];
 
-  for (const topic of aiTopics) {
-    // Match by weekNumber (which is lecture number for per-lecture extraction)
-    const calWeek = lectureToWeek.get(topic.weekNumber);
-    if (calWeek) {
-      if (!weekGroups.has(calWeek.weekNumber)) {
-        weekGroups.set(calWeek.weekNumber, { week: calWeek, topics: [] });
-      }
-      weekGroups.get(calWeek.weekNumber)!.topics.push(topic);
-    }
-  }
+  const parsed = contentModules.map((m) => {
+    const label = m.weekLabel;
+    const unitMatch = label.match(/\b(?:unit|module|week)\s*(\d+)/i);
+    const unitNum = unitMatch ? parseInt(unitMatch[1], 10) : null;
+    const lecMatch = label.match(/lectures?\s*(\d+)\s*[-–]\s*(\d+)/i);
+    const lecStart = lecMatch ? parseInt(lecMatch[1], 10) : null;
+    const lecEnd = lecMatch ? parseInt(lecMatch[2], 10) : null;
 
-  // Handle unmatched topics (lecture numbers beyond calendar range)
-  const matchedCount = [...weekGroups.values()].reduce((s, g) => s + g.topics.length, 0);
-  const unmatchedTopics = aiTopics.filter((t) => !lectureToWeek.has(t.weekNumber));
+    let cleanLabel = label
+      .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
+      .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
+      .trim();
 
-  if (matchedCount === 0) return null; // no matches at all
-
-  // Build grouped weeks
-  const grouped: ParsedTopic[] = [];
-  const sortedWeekNums = [...weekGroups.keys()].sort((a, b) => a - b);
-
-  for (const wn of sortedWeekNums) {
-    const { week, topics } = weekGroups.get(wn)!;
-
-    // Combine all lecture topics into one week entry
-    const allTopics: string[] = [];
-    const allReadings: string[] = [];
-    const allNotes: string[] = [];
-
-    for (const t of topics) {
-      // Prefix with lecture label for detail preservation
-      const lecNum = t.weekNumber;
-      const prefix = `Lec ${lecNum}`;
-      if (t.topics && t.topics.length > 0) {
-        allTopics.push(`${prefix}: ${t.topics.join(", ")}`);
-      } else if (t.weekLabel) {
-        allTopics.push(`${prefix}: ${t.weekLabel}`);
-      }
-      if (t.readings) allReadings.push(...t.readings);
-      if (t.notes) allNotes.push(t.notes);
+    if (/^unit\s+\d+$/i.test(cleanLabel)) {
+      cleanLabel = `Unit ${unitNum}`;
     }
 
-    // Generate a week label from the primary theme
-    // Use first lecture's label — per-lecture detail is already in topics[]
-    const firstTopic = topics[0];
-    const weekLabel = firstTopic.weekLabel;
+    return { module: m, unitNum, lecStart, lecEnd, cleanLabel };
+  });
 
-    grouped.push({
-      weekNumber: grouped.length + 1,
-      weekLabel,
-      startDate: week.startDate,
-      topics: allTopics,
-      readings: [...new Set(allReadings)], // dedupe
-      notes: allNotes.length > 0 ? allNotes.join("; ") : null,
-      courseName: firstTopic.courseName,
+  parsed.sort((a, b) => {
+    if (a.unitNum !== null && b.unitNum !== null) return a.unitNum - b.unitNum;
+    if (a.unitNum !== null) return -1;
+    if (b.unitNum !== null) return 1;
+    if (a.lecStart !== null && b.lecStart !== null) return a.lecStart - b.lecStart;
+    return 0;
+  });
+
+  const ASSIGNED_READING_RX = /reading|chapter|paper|article|\.pdf$|et\s+al|journal|\(\d{4}\)/i;
+  const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope|slide|powerpoint|worksheet|problem\s+set|packet|handout|video/i;
+  const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
+
+  const timeline: ParsedTopic[] = [];
+
+  for (let i = 0; i < parsed.length; i++) {
+    const p = parsed[i];
+    const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
+    const usefulReadings = p.module.readings.filter(
+      (r) => ASSIGNED_READING_RX.test(r) && !SKIP_READING_RX.test(r),
+    );
+
+    // Try to infer date from module text (limited — no fabricated calendar)
+    const startDate = inferIsoDateFromText(
+      [p.cleanLabel, ...p.module.topics, ...p.module.readings].join(" | "),
+      termStartDate,
+      termEndDate,
+    ) ?? null;
+
+    timeline.push({
+      weekNumber: i + 1,
+      weekLabel: p.cleanLabel,
+      startDate,
+      topics: usefulTopics.length > 0
+        ? usefulTopics
+        : p.lecStart !== null && p.lecEnd !== null
+          ? [`Lectures ${p.lecStart}–${p.lecEnd}`]
+          : [],
+      readings: usefulReadings,
+      notes: null,
+      courseName,
     });
   }
 
-  // Append any unmatched topics to the last week
-  if (unmatchedTopics.length > 0 && grouped.length > 0) {
-    const lastWeek = grouped[grouped.length - 1];
-    for (const t of unmatchedTopics) {
-      if (t.topics && t.topics.length > 0) {
-        lastWeek.topics.push(`Lec ${t.weekNumber}: ${t.topics.join(", ")}`);
-      }
-      if (t.readings) lastWeek.readings.push(...t.readings);
-    }
-    console.log(`[pipeline] ${courseName}: Stage 3c appended ${unmatchedTopics.length} unmatched lectures to last week`);
-  }
-
-  const withBreaks: ParsedTopic[] = [];
-  for (let i = 0; i < grouped.length; i++) {
-    const current = grouped[i];
-    withBreaks.push({ ...current, weekNumber: withBreaks.length + 1 });
-
-    const next = grouped[i + 1];
-    if (!current.startDate || !next?.startDate) continue;
-    let cursor = addDays(parseISO(`${current.startDate}T12:00:00Z`), 7);
-    const nextStart = parseISO(`${next.startDate}T12:00:00Z`);
-    while (differenceInCalendarDays(nextStart, cursor) >= 7) {
-      withBreaks.push({
-        weekNumber: withBreaks.length + 1,
-        weekLabel: "No Class / Academic Break",
-        startDate: cursor.toISOString().slice(0, 10),
-        topics: [],
-        readings: [],
-        notes: "Inferred no-class week from lecture schedule gap",
-        courseName,
-      });
-      cursor = addDays(cursor, 7);
-    }
-  }
-
-  console.log(`[pipeline] ${courseName}: Stage 3c produced ${withBreaks.length} grouped weeks from ${matchedCount} matched lectures`);
-  return withBreaks;
+  console.log(`[pipeline] ${courseName}: module fallback organized ${contentModules.length} modules → ${timeline.length} timeline entries`);
+  return timeline;
 }
 
 // ─── Module Normalizer ──────────────────────────────────────────────────────
@@ -1736,13 +922,6 @@ const moduleDeltaSchema = z.object({
   coveredWeeks: z.array(z.number()),
 });
 
-/**
- * The ONE AI call for module data. Classifies each module item into typed
- * facts and matches modules to spine weeks. Returns per-week deltas —
- * only new topics and readings to add.
- *
- * Resources (slides, problem sets, handouts) and assessments are excluded.
- */
 async function normalizeModules(
   modules: CanvasModuleInfo[],
   spine: { weekNumber: number; weekLabel: string; startDate: string | null; topics: string[]; readings: string[] }[],
@@ -1792,7 +971,6 @@ Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at l
     });
 
     const deltas = object.deltas as ModuleDelta[];
-    // Filter out deltas targeting non-existent weeks; validate + dedup coveredWeeks
     const validWeeks = new Set(spine.map((w) => w.weekNumber));
     const valid = deltas.filter((d) => validWeeks.has(d.weekNumber));
     const validCovered = [...new Set(object.coveredWeeks ?? [])].filter((w) => validWeeks.has(w));
@@ -1810,18 +988,10 @@ Also return coveredWeeks: a list of ALL spine weekNumbers where you matched at l
 
 // ─── Fusion (deterministic) ──────────────────────────────────────────────────
 
-/**
- * Normalize a string for dedup comparison: lowercase, strip punctuation,
- * collapse whitespace. Two strings that normalize identically are duplicates.
- */
 function normalizeForDedup(s: string): string {
   return s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
 }
 
-/**
- * Deterministic fusion: apply module deltas onto syllabus-extracted topics.
- * Cannot change week count, ordering, or dates — only adds new topics/readings.
- */
 function fuseTimeline(
   syllabusFacts: ParsedTopic[],
   moduleDeltas: ModuleDelta[],
@@ -1829,7 +999,6 @@ function fuseTimeline(
 ): ParsedTopic[] {
   if (moduleDeltas.length === 0) return syllabusFacts;
 
-  // Group deltas by target week
   const deltasByWeek = new Map<number, ModuleDelta[]>();
   for (const delta of moduleDeltas) {
     const existing = deltasByWeek.get(delta.weekNumber);
@@ -1885,12 +1054,6 @@ function fuseTimeline(
   return fused;
 }
 
-/**
- * Per-week fallback for uncovered weeks. For weeks the normalizer didn't
- * examine (not in coveredWeeks), additively merge scaffold content.
- * Covered weeks are trusted even if empty (normalizer decided all items
- * were resources/assessments).
- */
 function applyPerWeekFallback(
   fused: ParsedTopic[],
   fallback: ParsedTopic[],
@@ -1900,10 +1063,8 @@ function applyPerWeekFallback(
   for (const t of fallback) fallbackByWeek.set(t.weekNumber, t);
 
   return fused.map((week) => {
-    // Covered weeks: trust normalizer result (even if empty — it examined the week)
     if (coveredWeeks.has(week.weekNumber)) return week;
 
-    // Uncovered week: merge scaffold content additively
     const fb = fallbackByWeek.get(week.weekNumber);
     if (!fb) return week;
 
@@ -1932,23 +1093,7 @@ function applyPerWeekFallback(
   });
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-const TOKEN_STOPWORDS = new Set([
-  "the", "a", "an", "and", "or", "of", "for", "in", "to", "on", "with",
-  "unit", "module", "week", "lecture", "lectures", "chapter", "introduction",
-]);
-
-function tokenize(text: string): Set<string> {
-  return new Set(
-    text.toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter(w => w.length > 2 && !TOKEN_STOPWORDS.has(w))
-  );
-}
-
-// ─── Stage 5: VALIDATE ──────────────────────────────────────────────────────
+// ─── Validate ────────────────────────────────────────────────────────────────
 
 function validateTimeline(
   topics: ParsedTopic[],
@@ -1968,10 +1113,8 @@ function validateTimeline(
     warnings.push(`Shifted topic dates by ${realigned.shiftYears} year(s) to align with term ${termStart}..${termEnd ?? "unknown"}`);
   }
 
-  // 1. Ensure weekNumbers are sequential starting at 1
   topics = renumberSequentialWeeks(topics);
 
-  // 2. Check dates are chronological
   const dated = topics.filter(
     (t) => t.startDate && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate!),
   );
@@ -1984,7 +1127,6 @@ function validateTimeline(
     }
   }
 
-  // 3. Check for large gaps (> 21 days) unless this is a sparse schedule.
   if (!isSparseTimeline(topics)) {
     for (let i = 1; i < dated.length; i++) {
       if (dated[i].startDate && dated[i - 1].startDate) {
@@ -2000,7 +1142,6 @@ function validateTimeline(
     }
   }
 
-  // 4. Check dates within term bounds
   if (termStart && termEnd) {
     for (const t of dated) {
       if (t.startDate! < termStart || t.startDate! > termEnd) {
@@ -2009,14 +1150,12 @@ function validateTimeline(
     }
   }
 
-  // 5. Check for placeholder labels
   for (const t of topics) {
     if (!t.weekLabel || t.weekLabel.trim() === "" || /^week\s+\d+$/i.test(t.weekLabel)) {
       warnings.push(`Weak weekLabel "${t.weekLabel}" on week ${t.weekNumber}`);
     }
   }
 
-  // 6. Check week count is reasonable (flag if >18 or <4)
   if (topics.length > 18) {
     warnings.push(`Too many weeks (${topics.length}) — semester is typically 14-16 weeks`);
   }
@@ -2024,124 +1163,7 @@ function validateTimeline(
   return { topics, warnings };
 }
 
-// ─── Module-Only Fallback: organize modules into a timeline ─────────────────
-
-/**
- * When AI extraction fails but we have content modules, parse unit/lecture
- * structure from module labels and build a proper timeline.
- *
- * Handles patterns like:
- *   "Unit 1 (Lectures 1-5) - Quiz on 1/29/26"  → unit 1, lectures 1-5
- *   "Unit 7 (Lectures 20-23) - No Quiz"         → unit 7, lectures 20-23
- *   "Module 3 - Thermodynamics"                  → unit 3
- *   "Week 5: Acid-Base Equilibria"               → unit 5
- */
-function organizeModulesAsTimeline(
-  contentModules: CanvasModuleInfo[],
-  lectureCalendar: WeekDateRange[],
-  courseName: string,
-  termStartDate: string | null,
-  termEndDate: string | null,
-): ParsedTopic[] {
-  if (contentModules.length === 0) return [];
-
-  // Parse unit number and lecture range from each module label
-  const parsed = contentModules.map((m) => {
-    const label = m.weekLabel;
-
-    // Extract unit/module/week number
-    const unitMatch = label.match(/\b(?:unit|module|week)\s*(\d+)/i);
-    const unitNum = unitMatch ? parseInt(unitMatch[1], 10) : null;
-
-    // Extract lecture range: "Lectures 1-5" or "Lectures 20-23"
-    const lecMatch = label.match(/lectures?\s*(\d+)\s*[-–]\s*(\d+)/i);
-    const lecStart = lecMatch ? parseInt(lecMatch[1], 10) : null;
-    const lecEnd = lecMatch ? parseInt(lecMatch[2], 10) : null;
-
-    // Clean label: remove quiz/exam dates and "No Quiz" suffixes
-    let cleanLabel = label
-      .replace(/\s*-\s*(quiz\s+on\s+\S+|no\s+quiz|exam\s+on\s+\S+)/i, "")
-      .replace(/\s*\(lectures?\s*\d+\s*[-–]\s*\d+\)/i, "")
-      .trim();
-
-    // If label is just "Unit N", keep it simple
-    if (/^unit\s+\d+$/i.test(cleanLabel)) {
-      cleanLabel = `Unit ${unitNum}`;
-    }
-
-    return { module: m, unitNum, lecStart, lecEnd, cleanLabel };
-  });
-
-  // Sort by unit number (ascending), then by first lecture number
-  parsed.sort((a, b) => {
-    if (a.unitNum !== null && b.unitNum !== null) return a.unitNum - b.unitNum;
-    if (a.unitNum !== null) return -1;
-    if (b.unitNum !== null) return 1;
-    if (a.lecStart !== null && b.lecStart !== null) return a.lecStart - b.lecStart;
-    return 0;
-  });
-
-  // Filter to actual assigned readings only — papers, chapters, articles
-  // Resources (slides, problem sets, handouts, videos) are excluded per
-  // "one fact, one gate" — those belong in CourseMaterial, not readings
-  const ASSIGNED_READING_RX = /reading|chapter|paper|article|\.pdf$|et\s+al|journal|\(\d{4}\)/i;
-  const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope|slide|powerpoint|worksheet|problem\s+set|packet|handout|video/i;
-
-  // Build lecture-to-calendar-week map for date assignment
-  const lectureToWeek = new Map<number, WeekDateRange>();
-  for (const week of lectureCalendar) {
-    for (const lec of week.lectures) {
-      lectureToWeek.set(lec.lectureNumber, week);
-    }
-  }
-
-  // Build timeline entries
-  const timeline: ParsedTopic[] = [];
-
-  for (let i = 0; i < parsed.length; i++) {
-    const p = parsed[i];
-
-    // Filter topics: remove generic Canvas item-type names
-    const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
-    const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
-
-    // Filter readings — only actual assigned readings, not resources
-    const usefulReadings = p.module.readings.filter(
-      (r) => ASSIGNED_READING_RX.test(r) && !SKIP_READING_RX.test(r),
-    );
-
-    // Find date from lecture calendar
-    let startDate: string | null = null;
-    if (p.lecStart !== null) {
-      const calWeek = lectureToWeek.get(p.lecStart);
-      if (calWeek) startDate = calWeek.startDate;
-    }
-    if (!startDate) {
-      startDate = inferIsoDateFromText(
-        [p.cleanLabel, ...p.module.topics, ...p.module.readings].join(" | "),
-        termStartDate,
-        termEndDate,
-      ) ?? null;
-    }
-
-    timeline.push({
-      weekNumber: i + 1,
-      weekLabel: p.cleanLabel,
-      startDate,
-      topics: usefulTopics.length > 0
-        ? usefulTopics
-        : p.lecStart !== null && p.lecEnd !== null
-          ? [`Lectures ${p.lecStart}–${p.lecEnd}`]
-          : [],
-      readings: usefulReadings,
-      notes: null,
-      courseName,
-    });
-  }
-
-  console.log(`[pipeline] ${courseName}: module fallback organized ${contentModules.length} modules → ${timeline.length} timeline entries`);
-  return timeline;
-}
+// ─── Finalize ────────────────────────────────────────────────────────────────
 
 function pickPreferredWeekLabel(a: ParsedTopic, b: ParsedTopic): string {
   const score = (topic: ParsedTopic) => {
@@ -2220,25 +1242,22 @@ function computeTimelineQuality(args: {
   topics: ParsedTopic[];
   warnings: string[];
   repairActionsApplied: string[];
-  timelineSource: string;
-  lectureCalendarSource: string;
+  reconciliation: ReconciliationDiagnostics;
   usedModuleScaffold: boolean;
-  hasTimelineAuthority: boolean;
 }): TimelineQuality {
   const datedTopics = args.topics.filter((topic) => Boolean(topic.startDate));
   const datedRatio = args.topics.length > 0 ? datedTopics.length / args.topics.length : 0;
-  const breakCount = args.topics.filter((topic) => isBreakTopic(topic)).length;
-  const hasOnlyHtmlBodyAuthority = args.timelineSource === "html-body";
   const warningPenalty = args.warnings.length;
   const repairPenalty = args.repairActionsApplied.filter((action) => action !== "used_module_scaffold").length;
+  const verifiedOrCorroborated = args.reconciliation.verified + args.reconciliation.corroborated;
+  const totalReconciled = verifiedOrCorroborated + args.reconciliation.unverified + args.reconciliation.conflicted;
 
   if (
-    args.hasTimelineAuthority &&
     datedRatio >= 0.8 &&
     warningPenalty === 0 &&
     repairPenalty === 0 &&
     !args.usedModuleScaffold &&
-    !hasOnlyHtmlBodyAuthority
+    (totalReconciled === 0 || verifiedOrCorroborated / totalReconciled >= 0.5)
   ) {
     return "strong";
   }
@@ -2246,7 +1265,7 @@ function computeTimelineQuality(args: {
   if (
     datedRatio >= 0.5 &&
     warningPenalty <= 2 &&
-    (args.hasTimelineAuthority || args.lectureCalendarSource === "lecture-anchors" || breakCount > 0)
+    args.reconciliation.conflicted <= 1
   ) {
     return "usable";
   }
@@ -2259,10 +1278,8 @@ export function finalizeTimelineForPersistence(args: {
   termStartDate: string | null;
   termEndDate: string | null;
   courseName: string;
-  timelineSource: string;
-  lectureCalendarSource: string;
   usedModuleScaffold: boolean;
-  hasTimelineAuthority: boolean;
+  reconciliation: ReconciliationDiagnostics;
 }): FinalizeTimelineResult {
   const repairActionsApplied: string[] = [];
 
@@ -2285,14 +1302,8 @@ export function finalizeTimelineForPersistence(args: {
   }
   finalizedTopics = splitBreakTopics;
 
-  const gapBreakTopics =
-    args.lectureCalendarSource === "lecture-anchors"
-      ? insertBreakWeeksFromDateGaps(finalizedTopics, args.courseName)
-      : finalizedTopics;
-  if (gapBreakTopics.length > finalizedTopics.length) {
-    repairActionsApplied.push(`inserted_gap_break_weeks:${gapBreakTopics.length - finalizedTopics.length}`);
-  }
-  finalizedTopics = gapBreakTopics;
+  // No more date-gap break inference — only explicitly stated breaks survive.
+  // This is the "fail-closed" principle: gaps are shown as gaps, not fabricated breaks.
 
   const collapsedTopics = collapseSameStartDateTopics(finalizedTopics, args.courseName);
   if (collapsedTopics.length < finalizedTopics.length) {
@@ -2314,9 +1325,7 @@ export function finalizeTimelineForPersistence(args: {
   }
   finalizedTopics = strippedBreakNotesTopics;
 
-  // Deduplicate topics and readings within each week using canonical
-  // normalization — catches format variants like "Chang & Tsao (2017)"
-  // vs "chang_tsao_2017.pdf" that exact-string Set dedup misses
+  // Deduplicate topics and readings within each week
   for (const topic of finalizedTopics) {
     if (topic.readings && topic.readings.length > 1) {
       const seen = new Set<string>();
@@ -2351,10 +1360,8 @@ export function finalizeTimelineForPersistence(args: {
     topics: finalizedTopics,
     warnings: validated.warnings,
     repairActionsApplied,
-    timelineSource: args.timelineSource,
-    lectureCalendarSource: args.lectureCalendarSource,
+    reconciliation: args.reconciliation,
     usedModuleScaffold: args.usedModuleScaffold,
-    hasTimelineAuthority: args.hasTimelineAuthority,
   });
 
   return {
@@ -2365,27 +1372,105 @@ export function finalizeTimelineForPersistence(args: {
   };
 }
 
+// ─── Step 4: COMMIT — Synthesize with verification states ───────────────────
+
+function synthesizeTopics(args: {
+  reconciledTopics: ReconciledTopic[];
+  scheduleMode: ScheduleMode;
+  usedModuleScaffold: boolean;
+  usedLabel: string;
+}): { topics: SynthesizedTopic[]; anchors: TimelineAnchorRecord[] } {
+  const topics: SynthesizedTopic[] = [];
+  const anchors: TimelineAnchorRecord[] = [];
+
+  for (let i = 0; i < args.reconciledTopics.length; i++) {
+    const rt = args.reconciledTopics[i];
+
+    // Map verification status to confidence levels
+    const dateConfidence: ConfidenceLevel =
+      rt.verificationStatus === "verified" || rt.verificationStatus === "corroborated"
+        ? "high"
+        : rt.verificationStatus === "unverified"
+          ? "medium"
+          : rt.verificationStatus === "conflicted"
+            ? "low"
+            : "unknown";
+
+    const hasContent = (rt.topics?.length ?? 0) > 0 || (rt.readings?.length ?? 0) > 0;
+    const contentConfidence: ConfidenceLevel =
+      !hasContent
+        ? "low"
+        : rt.sourceBlock === "schedule_table" || rt.sourceBlock === "syllabus_body"
+          ? "high"
+          : rt.sourceBlock === "canvas_modules" || rt.sourceBlock === "canvas_assignments"
+            ? "medium"
+            : "low";
+
+    // Map verification status to anchor type
+    const isBreak = isBreakTopic(rt);
+    let anchorType: TimelineAnchorType;
+    if (isBreak) {
+      anchorType = "break";
+    } else if (rt.sourceBlock === "canvas_modules" || rt.sourceBlock === "canvas_assignments") {
+      anchorType = "canvas_only";
+    } else {
+      switch (rt.verificationStatus) {
+        case "verified": anchorType = "syllabus_verified"; break;
+        case "corroborated": anchorType = "syllabus_corroborated"; break;
+        case "conflicted": anchorType = "conflicted"; break;
+        default: anchorType = "syllabus_unverified"; break;
+      }
+    }
+
+    topics.push({
+      ...rt,
+      dateConfidence,
+      contentConfidence,
+      scheduleMode: args.scheduleMode,
+      provenance: {
+        sourceBlock: rt.sourceBlock,
+        verificationStatus: rt.verificationStatus,
+        matchedAssignment: rt.matchedAssignment ?? null,
+        usedLabel: args.usedLabel,
+        usedModuleScaffold: args.usedModuleScaffold,
+      },
+      verificationStatus: rt.verificationStatus,
+      sourceBlock: rt.sourceBlock,
+    });
+
+    anchors.push({
+      sequenceNumber: i + 1,
+      anchorDate: rt.startDate ?? null,
+      anchorType,
+      isInstructional: !isBreak && hasInstructionalContent(rt),
+      calendarConfidence: dateConfidence,
+      sourceRefs: { sourceBlock: rt.sourceBlock, verificationStatus: rt.verificationStatus },
+      notes: rt.notes ?? null,
+    });
+  }
+
+  return { topics, anchors };
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 export async function runTopicPipeline(input: PipelineInput): Promise<PipelineResult> {
   const debug: PipelineDebug = {
-    stage2Classifications: [],
-    stage3Sources: input.candidates.length,
-    stage3Weeks: 0,
-    moduleNormalizerDeltas: 0,
-    singlePassExtraction: false,
-    lectureCalendarDates: 0,
+    stage1Classifications: [],
+    stage2Sources: input.candidates.length,
+    stage2Weeks: 0,
+    stage3Reconciliation: { verified: 0, corroborated: 0, unverified: 0, conflicted: 0, gaps: 0, dayOfWeekMismatches: 0, outOfTermBounds: 0 },
     stage4OutputWeeks: 0,
-    stage5Warnings: [],
+    stage4Warnings: [],
     fallbackUsed: false,
   };
 
-  // ── STAGE 2: CLASSIFY modules ──
+  // ── STEP 1: SEGMENT — classify modules ──
   const moduleClassifications = input.modules.length > 0
     ? await classifyModules(input.modules.map((m) => m.weekLabel))
     : new Map<string, ModuleCategory>();
 
-  debug.stage2Classifications = input.modules.map((m) => ({
+  debug.stage1Classifications = input.modules.map((m) => ({
     name: m.weekLabel,
     category: moduleClassifications.get(m.weekLabel) ?? "content",
   }));
@@ -2401,233 +1486,93 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     .map((m) => m.id);
 
   console.log(
-    `[pipeline] ${input.courseName}: Stage 2 classified ${input.modules.length} modules → ` +
+    `[pipeline] ${input.courseName}: Step 1 classified ${input.modules.length} modules → ` +
     `${contentModules.length} content, ${nonContentModuleIds.length} non-content`,
   );
 
-  const authoritySplit = splitCandidatesByAuthority(input.candidates);
-  debug.sourceRoles = authoritySplit.classified.map((src) => ({
-    label: src.label,
-    role: src.role ?? "timeline",
-  }));
+  // ── STEP 2: EXTRACT — single-pass per block ──
+  const extraction = await extractFromBlocks(input.candidates, input.courseName);
 
-  // ── STAGE 2b: BUILD LECTURE CALENDAR (before AI extraction) ──
-  // Moved before Stage 3 so we can compute deterministic structure hints for the AI
-  const lectureCalendarBuild = buildLectureCalendar(
-    input.classSchedule,
-    input.classSchedule?.semesterStart ?? input.termStartDate ?? null,
-    input.classSchedule?.semesterEnd ?? input.termEndDate ?? null,
-    input.assignments,
-    input.syllabusEvents ?? [],
-  );
-  const lectureCalendar = lectureCalendarBuild.weeks;
-  debug.lectureCalendarSource = lectureCalendarBuild.source;
-  debug.lectureCalendarDates = lectureCalendar.reduce((sum, w) => sum + w.lectures.length, 0);
+  debug.stage2Weeks = extraction.topics.length;
+  debug.extractedScheduleShape = extraction.scheduleShape;
+  debug.extractedRowSemantics = extraction.rowSemantics;
 
-  if (lectureCalendar.length > 0) {
-    console.log(
-      `[pipeline] ${input.courseName}: Stage 2b built lecture calendar — ` +
-      `${debug.lectureCalendarDates} lectures across ${lectureCalendar.length} weeks (${lectureCalendarBuild.source})`,
-    );
+  let aiTopics = extraction.topics;
+  let usedModuleScaffold = false;
+  let sourceBlock = "schedule_table";
+
+  // Determine source block from extraction shape
+  if (extraction.scheduleShape === "none") {
+    sourceBlock = "syllabus_body";
   }
-
-  // Compute deterministic structure hint from Canvas assignment data
-  const structureHint = buildStructureHint(input.assignments, lectureCalendar);
-  if (structureHint) {
-    console.log(
-      `[pipeline] ${input.courseName}: Stage 2b structure hint computed (${structureHint.length} chars)`,
-    );
-  }
-
-  // ── STAGE 3: EXTRACT from syllabus only (no module context) ──
-  // Detect when timeline/content candidate sets overlap — if so, run ONE pass
-  const singlePass = candidateSetsOverlap(
-    authoritySplit.timelineCandidates,
-    authoritySplit.contentCandidates,
-  );
-  debug.singlePassExtraction = singlePass;
-
-  let timelineExtraction: ExtractionResult;
-  let contentExtraction: ExtractionResult;
-
-  if (singlePass) {
-    console.log(`[pipeline] ${input.courseName}: Stage 3 single-pass (candidate sets overlap)`);
-    const single = await extractTopicsExpanded(
-      authoritySplit.classified, input.courseName, structureHint,
-    );
-    timelineExtraction = single;
-    contentExtraction = {
-      topics: [], usedLabel: "none", usedWindow: "",
-      scheduleShape: "none", rowSemantics: "unknown",
-      hasExplicitDates: false, hasExplicitBreakRows: false,
-    };
-  } else {
-    console.log(`[pipeline] ${input.courseName}: Stage 3 dual-pass (disjoint candidate sets)`);
-    [timelineExtraction, contentExtraction] = await Promise.all([
-      extractTopicsExpanded(authoritySplit.timelineCandidates, input.courseName, structureHint),
-      extractTopicsExpanded(authoritySplit.contentCandidates, input.courseName, structureHint),
-    ]);
-  }
-
-  debug.timelineSource = timelineExtraction.usedLabel;
-  debug.contentSource = contentExtraction.usedLabel;
-  const resolvedTimelineAuthority = summarizeAuthorityCandidates(authoritySplit.timelineCandidates, timelineExtraction.usedLabel);
-  const resolvedContentAuthority = summarizeAuthorityCandidates(authoritySplit.contentCandidates, contentExtraction.usedLabel);
-
-  // Track schedule metadata from AI extraction
-  const extractedRowSemantics: RowSemantics = timelineExtraction.rowSemantics !== "unknown"
-    ? timelineExtraction.rowSemantics
-    : contentExtraction.rowSemantics;
-  const extractedScheduleShape: ScheduleShape = timelineExtraction.scheduleShape !== "none"
-    ? timelineExtraction.scheduleShape
-    : contentExtraction.scheduleShape;
-  debug.extractedScheduleShape = extractedScheduleShape;
-  debug.extractedRowSemantics = extractedRowSemantics;
-
-  const timelineTopics = timelineExtraction.topics.filter(
-    (topic) => topic.startDate || isBreakTopic(topic),
-  );
-
-  const hasTimelineAuthority = timelineTopics.length > 0;
-  let aiTopics: ParsedTopic[];
-
-  if (singlePass) {
-    // Single pass — use result directly, no merge needed
-    aiTopics = timelineTopics.length > 0 ? timelineTopics : timelineExtraction.topics;
-  } else {
-    // Dual pass — merge content onto timeline spine
-    aiTopics =
-      timelineTopics.length > 0
-        ? mergeContentOntoTimeline(timelineTopics, contentExtraction.topics, input.courseName)
-        : contentExtraction.topics.length > 0
-          ? contentExtraction.topics
-          : timelineExtraction.topics;
-  }
-
-  debug.stage3Weeks = aiTopics.length;
 
   console.log(
-    `[pipeline] ${input.courseName}: Stage 3 extracted ${aiTopics.length} entries ` +
-    `| timeline=${timelineExtraction.usedLabel}:${timelineExtraction.topics.length}` +
-    ` | content=${contentExtraction.usedLabel}:${contentExtraction.topics.length}` +
-    ` | singlePass=${singlePass}`,
+    `[pipeline] ${input.courseName}: Step 2 extracted ${aiTopics.length} entries` +
+    ` | source=${extraction.usedLabel} | shape=${extraction.scheduleShape}`,
   );
 
-  // Use module scaffold ONLY when:
-  // - AI extraction has no dated entries (no timeline authority), AND
-  // - There's no lecture calendar to assign dates to per-lecture AI topics, AND
-  // - We have enough content modules to form a meaningful scaffold
-  const shouldUseModuleScaffold =
-    !hasTimelineAuthority &&
-    lectureCalendar.length === 0 &&
-    contentModules.length >= Math.max(4, Math.min(8, aiTopics.length || 4));
-  let usedModuleScaffold = false;
-  let savedScaffold: ParsedTopic[] | null = null;
-
-  if (shouldUseModuleScaffold) {
-    const scaffold = organizeModulesAsTimeline(
-      contentModules,
-      lectureCalendarBuild.source === "lecture-anchors" ? lectureCalendar : [],
-      input.courseName,
-      input.termStartDate,
-      input.termEndDate,
-    );
-    if (scaffold.length > 0) {
-      savedScaffold = scaffold;
-
-      // Merge syllabus content onto scaffold STRUCTURE (not scaffold content).
-      // This gives us: scaffold dates/ordering + syllabus topics/readings.
-      // Scaffold regex content does NOT enter the pipeline.
-      const scaffoldStructure = scaffold.map((t) => ({
-        ...t,
-        topics: [] as string[],
-        readings: [] as string[],
-      }));
-      aiTopics = mergeContentOntoTimeline(scaffoldStructure, aiTopics, input.courseName);
-
+  // Assignment fallback: if there is no usable syllabus schedule, prefer
+  // Canvas due dates over module ordering because due dates are ground truth.
+  if (aiTopics.length === 0) {
+    const assignmentTimeline = organizeAssignmentsAsTimeline(input.assignments, input.courseName);
+    if (assignmentTimeline.length > 0) {
+      aiTopics = assignmentTimeline;
+      sourceBlock = "canvas_assignments";
       debug.fallbackUsed = true;
-      usedModuleScaffold = true;
       console.log(
-        `[pipeline] ${input.courseName}: Stage 3d merged syllabus content onto ${scaffold.length}-entry scaffold structure`,
+        `[pipeline] ${input.courseName}: Step 2 fallback → ${assignmentTimeline.length} assignment-timeline entries`,
       );
     }
   }
 
-  // ── STAGE 3c: GROUP lectures into weeks (algorithmic) ──
-  const grouped = groupLecturesIntoWeeks(aiTopics, lectureCalendar, input.courseName, extractedRowSemantics);
-  if (grouped) {
-    aiTopics = grouped;
+  // Module scaffold fallback: only when both syllabus extraction and assignment
+  // fallback produced nothing.
+  if (aiTopics.length === 0 && contentModules.length >= 4) {
+    const scaffold = organizeModulesAsTimeline(
+      contentModules, input.courseName, input.termStartDate, input.termEndDate,
+    );
+    if (scaffold.length > 0) {
+      aiTopics = scaffold;
+      usedModuleScaffold = true;
+      sourceBlock = "canvas_modules";
+      debug.fallbackUsed = true;
+      console.log(`[pipeline] ${input.courseName}: Step 2 fallback → ${scaffold.length} module entries`);
+    }
   }
 
-  // ── STAGE 4: NORMALIZE MODULES → per-week deltas ──
-  // ── STAGE 5: FUSE — deterministic merge of syllabus facts + module deltas ──
-  let finalTopics: ParsedTopic[];
+  // ── STEP 3: RECONCILE — verify against Canvas ground truth ──
+  const reconciliation = reconcileAgainstCanvas({
+    extractedTopics: aiTopics,
+    assignments: input.assignments,
+    syllabusEvents: input.syllabusEvents ?? [],
+    termStartDate: input.termStartDate,
+    termEndDate: input.termEndDate,
+    classSchedule: input.classSchedule,
+    sourceBlock,
+  });
+
+  debug.stage3Reconciliation = reconciliation.diagnostics;
+
+  console.log(
+    `[pipeline] ${input.courseName}: Step 3 reconciled → ` +
+    `verified=${reconciliation.diagnostics.verified} corroborated=${reconciliation.diagnostics.corroborated} ` +
+    `unverified=${reconciliation.diagnostics.unverified} conflicted=${reconciliation.diagnostics.conflicted} ` +
+    `gaps=${reconciliation.diagnostics.gaps}`,
+  );
+
+  // ── STEP 4: COMMIT — normalize, fuse, finalize, synthesize ──
+  let finalTopics: ReconciledTopic[] = reconciliation.topics;
   let moduleIdsToDelete: string[];
 
   if (aiTopics.length === 0 && contentModules.length === 0) {
-    finalTopics = [];
+    // Nothing from either source
     moduleIdsToDelete = [];
     debug.fallbackUsed = true;
-    console.log(`[pipeline] ${input.courseName}: Stage 4-5 skipped — no data from either source`);
+    console.log(`[pipeline] ${input.courseName}: Step 4 skipped — no data from either source`);
 
-  } else if (aiTopics.length === 0) {
-    // No AI topics but we have content modules — organize into a timeline,
-    // then run normalizer for proper classification + filename humanization.
-    const organizedModules = organizeModulesAsTimeline(
-      contentModules,
-      lectureCalendar,
-      input.courseName,
-      input.termStartDate,
-      input.termEndDate,
-    );
-    if (organizedModules.length > 0) {
-      // Structure-only spine for normalizer: no scaffold content to suppress humanization.
-      // Normalizer matches modules to weeks by weekLabel and sequential position.
-      const structureSpine = organizedModules.map((t) => ({
-        weekNumber: t.weekNumber,
-        weekLabel: t.weekLabel,
-        startDate: t.startDate ?? null,
-        topics: [] as string[],
-        readings: [] as string[],
-      }));
-
-      const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
-        contentModules, structureSpine, input.courseName,
-      );
-      debug.moduleNormalizerDeltas = moduleDeltas.length;
-
-      // Always: structure-only base → fuse → per-week fallback from full scaffold.
-      // If normalizer returned deltas=[] but coveredWeeks=[1,2,...], that's valid
-      // ("examined, nothing to add"). If both empty (true failure), fallback
-      // restores scaffold content for all weeks naturally.
-      const structureOnly = organizedModules.map((t) => ({
-        ...t,
-        topics: [] as string[],
-        readings: [] as string[],
-      }));
-      const fused = fuseTimeline(structureOnly, moduleDeltas, input.courseName);
-      finalTopics = applyPerWeekFallback(fused, organizedModules, new Set(coveredWeeks));
-
-      moduleIdsToDelete = input.modules.map((m) => m.id);
-      debug.stage4OutputWeeks = finalTopics.length;
-      debug.fallbackUsed = coveredWeeks.length === 0;
-      usedModuleScaffold = true;
-      console.log(
-        `[pipeline] ${input.courseName}: Stage 4 module-only → ${finalTopics.length} entries ` +
-        `(${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`,
-      );
-    } else {
-      finalTopics = [];
-      moduleIdsToDelete = nonContentModuleIds;
-      debug.fallbackUsed = true;
-      console.log(`[pipeline] ${input.courseName}: Stage 4-5 skipped — no AI topics, keeping ${contentModules.length} content modules`);
-    }
-
-  } else if (usedModuleScaffold && savedScaffold) {
-    // aiTopics = scaffold structure + syllabus content (no scaffold regex content).
-    // Use aiTopics as normalizer spine: syllabus content provides dedup context,
-    // scaffold regex content is NOT in spine so won't suppress humanized replacements.
-    const spineForNormalizer = aiTopics.map((t) => ({
+  } else if (usedModuleScaffold) {
+    // Module scaffold path — run normalizer for content humanization
+    const spineForNormalizer = finalTopics.map((t) => ({
       weekNumber: t.weekNumber,
       weekLabel: t.weekLabel,
       startDate: t.startDate ?? null,
@@ -2638,22 +1583,27 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
     const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
       contentModules, spineForNormalizer, input.courseName,
     );
-    debug.moduleNormalizerDeltas = moduleDeltas.length;
 
-    // Fuse onto aiTopics (syllabus content base), then per-week fallback from full scaffold
-    const fused = fuseTimeline(aiTopics, moduleDeltas, input.courseName);
-    finalTopics = applyPerWeekFallback(fused, savedScaffold, new Set(coveredWeeks));
+    const fused = fuseTimeline(finalTopics, moduleDeltas, input.courseName);
+    const withFallback = applyPerWeekFallback(fused, aiTopics, new Set(coveredWeeks));
+
+    // Re-apply reconciliation data to fused topics
+    finalTopics = withFallback.map((t, i) => ({
+      ...t,
+      verificationStatus: finalTopics[i]?.verificationStatus ?? "unverified" as VerificationStatus,
+      sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
+      matchedAssignment: finalTopics[i]?.matchedAssignment,
+    }));
 
     moduleIdsToDelete = input.modules.map((m) => m.id);
-    debug.stage4OutputWeeks = finalTopics.length;
     console.log(
-      `[pipeline] ${input.courseName}: Stage 4-5 scaffold path → ${finalTopics.length} weeks ` +
+      `[pipeline] ${input.courseName}: Step 4 scaffold path → ${finalTopics.length} weeks ` +
       `(${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`,
     );
 
   } else {
-    // Normalize modules into typed deltas, then fuse deterministically
-    const spineForNormalizer = aiTopics.map((t) => ({
+    // Normal path — normalize modules into deltas and fuse
+    const spineForNormalizer = finalTopics.map((t) => ({
       weekNumber: t.weekNumber,
       weekLabel: t.weekLabel,
       startDate: t.startDate ?? null,
@@ -2661,71 +1611,88 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       readings: t.readings ?? [],
     }));
 
-    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(contentModules, spineForNormalizer, input.courseName);
-    debug.moduleNormalizerDeltas = moduleDeltas.length;
+    const { deltas: moduleDeltas, coveredWeeks } = await normalizeModules(
+      contentModules, spineForNormalizer, input.courseName,
+    );
 
-    finalTopics = fuseTimeline(aiTopics, moduleDeltas, input.courseName);
+    const fused = fuseTimeline(finalTopics, moduleDeltas, input.courseName);
+
+    // Re-apply reconciliation data to fused topics
+    finalTopics = fused.map((t, i) => ({
+      ...t,
+      verificationStatus: finalTopics[i]?.verificationStatus ?? "unverified" as VerificationStatus,
+      sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
+      matchedAssignment: finalTopics[i]?.matchedAssignment,
+    }));
+
     moduleIdsToDelete = input.modules.map((m) => m.id);
-    debug.stage4OutputWeeks = finalTopics.length;
-    console.log(`[pipeline] ${input.courseName}: Stage 4-5 produced ${finalTopics.length} weeks (${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`);
+    console.log(
+      `[pipeline] ${input.courseName}: Step 4 produced ${finalTopics.length} weeks ` +
+      `(${moduleDeltas.length} deltas, ${coveredWeeks.length} covered)`,
+    );
   }
 
-  // ── STAGE 5: FINALIZE + VALIDATE ──
+  // Finalize: break splitting, dedup, collapse, validation
   const finalized = finalizeTimelineForPersistence({
     topics: finalTopics,
     termStartDate: input.termStartDate,
     termEndDate: input.termEndDate,
     courseName: input.courseName,
-    timelineSource: debug.timelineSource ?? "none",
-    lectureCalendarSource: debug.lectureCalendarSource ?? "none",
     usedModuleScaffold,
-    hasTimelineAuthority,
+    reconciliation: reconciliation.diagnostics,
   });
-  debug.stage5Warnings = finalized.warnings;
+  debug.stage4OutputWeeks = finalized.topics.length;
+  debug.stage4Warnings = finalized.warnings;
 
   if (finalized.warnings.length > 0) {
     console.warn(`[pipeline] ${input.courseName}: validation warnings:`, finalized.warnings);
   }
 
-  const spine = buildTimelineSpine({
-    topics: finalized.topics,
-    hasTimelineAuthority,
-    usedModuleScaffold,
-    lectureCalendarSource: debug.lectureCalendarSource,
-    sourceRefs: debug.sourceRoles ?? [],
+  // Re-reconcile after finalization (break splitting / collapsing may have changed topics)
+  // Map finalized topics back to reconciled topics using weekNumber matching
+  const reconciledByWeek = new Map<number, ReconciledTopic>();
+  for (const rt of finalTopics) {
+    reconciledByWeek.set(rt.weekNumber, rt);
+  }
+
+  const finalReconciledTopics: ReconciledTopic[] = finalized.topics.map((t) => {
+    const original = reconciledByWeek.get(t.weekNumber);
+    return {
+      ...t,
+      verificationStatus: original?.verificationStatus ?? "unverified" as VerificationStatus,
+      sourceBlock: original?.sourceBlock ?? sourceBlock,
+      matchedAssignment: original?.matchedAssignment,
+    };
   });
 
-  const synthesizedTopics = mergeContentOntoSpine({
-    spine,
-    topics: finalized.topics,
-    timelineSource: debug.timelineSource ?? "none",
-    contentSource: debug.contentSource ?? "none",
-    lectureCalendarSource: debug.lectureCalendarSource,
-    sourceRefs: debug.sourceRoles ?? [],
+  // Determine schedule mode
+  const scheduleMode: ScheduleMode = isSparseTimeline(finalized.topics)
+    ? "sparse"
+    : finalized.topics.some((t) => Boolean(t.startDate))
+      ? "weekly"
+      : usedModuleScaffold
+        ? "inferred"
+        : "unknown";
+
+  // Synthesize final output with verification states
+  const synthesized = synthesizeTopics({
+    reconciledTopics: finalReconciledTopics,
+    scheduleMode,
     usedModuleScaffold,
-    validationWarnings: debug.stage5Warnings,
+    usedLabel: extraction.usedLabel,
   });
 
   return {
-    topics: synthesizedTopics,
-    anchors: spine.anchors,
-    timelineMode: spine.scheduleMode,
-    materialSourceRoles: debug.sourceRoles ?? [],
+    topics: synthesized.topics,
+    anchors: synthesized.anchors,
+    timelineMode: scheduleMode,
     timelineDiagnostics: {
-      timelineSource: debug.timelineSource ?? "none",
-      contentSource: debug.contentSource ?? "none",
-      timelineAuthority: resolvedTimelineAuthority,
-      contentAuthority: resolvedContentAuthority,
-      timelineAuthorityWinner: resolvedTimelineAuthority.winner,
-      timelineAuthorityRunnerUp: resolvedTimelineAuthority.runnerUp,
-      contentAuthorityWinner: resolvedContentAuthority.winner,
-      contentAuthorityRunnerUp: resolvedContentAuthority.runnerUp,
-      lectureCalendarSource: debug.lectureCalendarSource ?? "none",
+      extractionSource: extraction.usedLabel,
+      reconciliation: reconciliation.diagnostics,
       usedModuleScaffold,
-      stage5Warnings: debug.stage5Warnings,
+      stage4Warnings: debug.stage4Warnings,
       repairActionsApplied: finalized.repairActionsApplied,
       timelineQuality: finalized.timelineQuality,
-      stage2Classifications: debug.stage2Classifications,
       extractedScheduleShape: debug.extractedScheduleShape ?? "none",
       extractedRowSemantics: debug.extractedRowSemantics ?? "unknown",
     },

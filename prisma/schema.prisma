@@ -108,6 +108,8 @@ model CourseTopic {
   contentConfidence String @default("unknown") // high | medium | low | unknown
   scheduleMode    String   @default("unknown") // weekly | sparse | inferred | unknown
   provenance      Json?
+  verificationStatus String @default("unverified") // verified | corroborated | unverified | conflicted | gap
+  sourceBlock     String?  // schedule_table | syllabus_body | canvas_assignments | canvas_modules
   completedTopics String[] @default([])
   canvasModuleId  String?  // Canvas module ID for upsert sync
   createdAt       DateTime @default(now())
@@ -119,7 +121,7 @@ model CourseTimelineAnchor {
   courseId           String
   sequenceNumber     Int
   anchorDate         String?
-  anchorType         String   // explicit_date | inferred_week | sparse_meeting | break | module_scaffold | lecture_group
+  anchorType         String   // syllabus_verified | syllabus_corroborated | syllabus_unverified | canvas_only | break | conflicted
   isInstructional    Boolean  @default(true)
   calendarConfidence String   @default("unknown") // high | medium | low | unknown
   sourceRefs         Json?
