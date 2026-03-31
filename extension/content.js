@@ -83,6 +83,17 @@ function extractScheduleSection(html) {
     return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
   }
 
+  function normalizeExternalSourceKey(rawUrl) {
+    try {
+      const parsed = new URL(rawUrl, window.location.origin);
+      parsed.hash = "";
+      parsed.search = "";
+      return `external:${parsed.toString()}`;
+    } catch {
+      return `external:${rawUrl}`;
+    }
+  }
+
   /**
    * Peek at the first 64 KB of a PDF via an HTTP Range request and return
    * true if it looks like a syllabus. PDFs embed text as semi-readable byte
@@ -182,7 +193,7 @@ function extractScheduleSection(html) {
         // Enrollment grades — from include[]=total_scores
         currentGrade: c.enrollments?.[0]?.computed_current_grade ?? c.enrollments?.[0]?.grades?.current_grade ?? null,
         currentScore: c.enrollments?.[0]?.computed_current_score ?? c.enrollments?.[0]?.grades?.current_score ?? null,
-        // Populated below: { fileName, url } entries for the offscreen doc to parse
+        // Populated below: metadata + download URLs for the offscreen doc to parse
         syllabusFileUrls: [],
         // Populated below: all PDF metadata from non-orientation modules
         materialCandidates: [],
@@ -417,7 +428,7 @@ function extractScheduleSection(html) {
         }
       } catch { /* calendar events unavailable or restricted */ }
 
-      // ── Syllabus PDF URLs ──────────────────────────────────────────────────
+        // ── Syllabus PDF URLs ──────────────────────────────────────────────────
       // We collect download URLs here; the offscreen document (background.js)
       // fetches + text-extracts them via pdfjs-dist — no base64, no server PDF work.
       //
@@ -427,8 +438,8 @@ function extractScheduleSection(html) {
       // Strategy: name-match first, then peek inside unmatched ones. Cap at 3.
       {
         const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)/i;
-        const toFetch       = []; // { name, url } — URLs to send for text extraction
-        const peekCandidates = []; // { title, content_id } — resolve later if needed
+        const toFetch       = []; // { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt }
+        const peekCandidates = []; // { title, content_id, url, sourceKey, remoteSize, remoteUpdatedAt }
         const seenIds       = new Set();
 
         // ── Source 0: PDF links embedded in the syllabus HTML body ───────────
@@ -478,7 +489,14 @@ function extractScheduleSection(html) {
                   if (fileInfo?.url && isPdf && (fileInfo.size ?? 0) < 5_000_000) {
                     const name = fileInfo.display_name ?? a.textContent?.trim() ?? "syllabus.pdf";
                     console.log("[content] Source 0 found PDF:", name, ct);
-                    toFetch.push({ name, url: fileInfo.url });
+                    toFetch.push({
+                      name,
+                      url: fileInfo.url,
+                      sourceKey: String(fileInfo.id ?? fileId),
+                      sourceKind: "canvas_syllabus",
+                      remoteSize: fileInfo.size ?? null,
+                      remoteUpdatedAt: fileInfo.updated_at ?? null,
+                    });
                   }
                 } catch (err) {
                   console.warn("[content] Source 0: file API failed for fileId", fileId, err?.message ?? err);
@@ -487,7 +505,14 @@ function extractScheduleSection(html) {
                 // Direct external PDF link
                 seenIds.add(href);
                 const name = a.textContent?.trim() || "syllabus.pdf";
-                toFetch.push({ name, url: href });
+                toFetch.push({
+                  name,
+                  url: href,
+                  sourceKey: normalizeExternalSourceKey(href),
+                  sourceKind: "canvas_syllabus",
+                  remoteSize: null,
+                  remoteUpdatedAt: null,
+                });
               }
               if (toFetch.length >= 3) break;
             }
@@ -520,7 +545,14 @@ function extractScheduleSection(html) {
                 if (fileInfo?.url && isPdf1 && (fileInfo.size ?? 0) < 5_000_000) {
                   const name1 = fileInfo.display_name ?? item.title;
                   console.log("[content] Source 1 found PDF:", name1, ct1);
-                  toFetch.push({ name: name1, url: fileInfo.url });
+                  toFetch.push({
+                    name: name1,
+                    url: fileInfo.url,
+                    sourceKey: String(fileInfo.id ?? item.content_id),
+                    sourceKind: "canvas_syllabus",
+                    remoteSize: fileInfo.size ?? null,
+                    remoteUpdatedAt: fileInfo.updated_at ?? null,
+                  });
                 } else if (!fileInfo?.url) {
                   console.warn("[content] Source 1: file API returned no URL for", item.title, item.content_id);
                 }
@@ -529,7 +561,13 @@ function extractScheduleSection(html) {
               }
             } else {
               // No name match — save for peek phase (early modules only)
-              peekCandidates.push({ title: item.title, content_id: item.content_id });
+              peekCandidates.push({
+                title: item.title,
+                content_id: item.content_id,
+                sourceKey: String(item.content_id),
+                remoteSize: null,
+                remoteUpdatedAt: null,
+              });
             }
           }
         }
@@ -544,9 +582,22 @@ function extractScheduleSection(html) {
             if (seenIds.has(f.id)) continue;
             seenIds.add(f.id);
             if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) {
-              toFetch.push({ name: f.display_name, url: f.url });
+              toFetch.push({
+                name: f.display_name,
+                url: f.url,
+                sourceKey: String(f.id),
+                sourceKind: "canvas_syllabus",
+                remoteSize: f.size ?? null,
+                remoteUpdatedAt: f.updated_at ?? null,
+              });
             } else {
-              peekCandidates.push({ title: f.display_name, url: f.url });
+              peekCandidates.push({
+                title: f.display_name,
+                url: f.url,
+                sourceKey: String(f.id),
+                remoteSize: f.size ?? null,
+                remoteUpdatedAt: f.updated_at ?? null,
+              });
             }
           }
         } catch { /* files endpoint restricted */ }
@@ -558,8 +609,9 @@ function extractScheduleSection(html) {
             try {
               // Resolve download URL if we only have content_id
               let url = candidate.url;
+              let fileInfo = null;
               if (!url && candidate.content_id) {
-                const [fileInfo] = await fetchAll(`${BASE}/files/${candidate.content_id}`);
+                [fileInfo] = await fetchAll(`${BASE}/files/${candidate.content_id}`);
                 const ct2 = fileInfo?.["content-type"] ?? "";
                 const isPdf2 = ct2.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
                 if (!fileInfo?.url || !isPdf2) continue;
@@ -567,15 +619,29 @@ function extractScheduleSection(html) {
                 url = fileInfo.url;
               }
               if (url && await peekIsSyllabus(url)) {
-                toFetch.push({ name: candidate.title, url });
+                toFetch.push({
+                  name: candidate.title,
+                  url,
+                  sourceKey: candidate.sourceKey ?? String(fileInfo?.id ?? candidate.content_id ?? url),
+                  sourceKind: "canvas_syllabus",
+                  remoteSize: fileInfo?.size ?? candidate.remoteSize ?? null,
+                  remoteUpdatedAt: fileInfo?.updated_at ?? candidate.remoteUpdatedAt ?? null,
+                });
               }
             } catch { /* skip */ }
           }
         }
 
         // ── Collect syllabus URLs for offscreen document to fetch + extract ──
-        for (const { name, url } of toFetch.slice(0, 3)) {
-          course.syllabusFileUrls.push({ fileName: name, url });
+        for (const { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of toFetch.slice(0, 3)) {
+          course.syllabusFileUrls.push({
+            fileName: name,
+            url,
+            sourceKey,
+            sourceKind,
+            remoteSize,
+            remoteUpdatedAt,
+          });
         }
 
         // ── Source 3: course materials from ALL non-orientation modules ───────
@@ -649,6 +715,9 @@ function extractScheduleSection(html) {
               fileName: candidateFileName,
               moduleName: mod.name ?? "Unknown Module",
               contentId: cid,
+              sourceKind: "canvas_module",
+              remoteSize: candidateSize || null,
+              remoteUpdatedAt: details.updated_at ?? null,
             });
 
             const isRequested = requestedContentIds.has(cid);
@@ -662,7 +731,14 @@ function extractScheduleSection(html) {
                 const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
                 const size = fileInfo?.size ?? 0;
                 if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000) {
-                  course.materialFileUrls.push({ fileName: name, url: fileInfo.url });
+                  course.materialFileUrls.push({
+                    fileName: name,
+                    url: fileInfo.url,
+                    sourceKey: cid,
+                    sourceKind: "canvas_module",
+                    remoteSize: size,
+                    remoteUpdatedAt: fileInfo.updated_at ?? details.updated_at ?? null,
+                  });
                   if (isAutoSelect) moduleAutoAdded = true;
                   console.log(`[scout] ${course.name} | ${isRequested ? "requested" : "auto"}: "${name}" (${Math.round(size / 1024)}KB)`);
                 } else if (isAutoSelect) {

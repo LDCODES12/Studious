@@ -37,7 +37,10 @@ export async function PATCH(
 
   const updated = await db.canvasMaterialCandidate.update({
     where: { id: candidateId },
-    data: { requested },
+    data: {
+      requested,
+      status: requested ? "requested" : "discovered",
+    },
     select: { id: true, requested: true },
   });
 

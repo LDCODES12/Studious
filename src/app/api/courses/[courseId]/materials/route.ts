@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
+import { hashMaterialText, updateMaterialEmbedding } from "@/lib/material-sync";
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const topicLabels = course.topics.map((t) => t.weekLabel);
   const analysis = await analyzeCourseMaterial(text, topicLabels);
 
-  const storedForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
+  const autoStoredForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
 
   const material = await db.courseMaterial.create({
     data: {
@@ -46,12 +47,20 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       fileName,
       detectedType: analysis.detectedType,
       sourceRole: inferMaterialSourceRole(analysis.detectedType, fileName),
+      sourceKind: "manual_upload",
       summary: analysis.summary,
       relatedTopics: analysis.relatedTopics,
       rawText: text.slice(0, 25000),
-      storedForAI,
+      storedForAI: autoStoredForAI,
+      autoStoredForAI,
+      contentHash: hashMaterialText(text),
+      syncStatus: "ready",
     },
   });
+
+  try {
+    await updateMaterialEmbedding(material.id, text);
+  } catch { /* embedding failure never blocks upload */ }
 
   return NextResponse.json(
     {
@@ -96,7 +105,10 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
   const updated = await db.courseMaterial.update({
     where: { id: materialId },
-    data: { storedForAI },
+    data: {
+      storedForAI,
+      userStoredForAIOverride: storedForAI,
+    },
   });
 
   return NextResponse.json({

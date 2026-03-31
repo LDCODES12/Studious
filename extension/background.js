@@ -257,11 +257,11 @@ async function handleCanvasData(payload) {
 
       const allPdfTasks = [];
       for (const course of payload.courses) {
-        for (const { fileName, url } of (course.syllabusFileUrls ?? [])) {
-          allPdfTasks.push({ course, type: "syllabus", fileName, url });
+        for (const { fileName, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of (course.syllabusFileUrls ?? [])) {
+          allPdfTasks.push({ course, type: "syllabus", fileName, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt });
         }
-        for (const { fileName, url } of (course.materialFileUrls ?? [])) {
-          allPdfTasks.push({ course, type: "material", fileName, url });
+        for (const { fileName, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of (course.materialFileUrls ?? [])) {
+          allPdfTasks.push({ course, type: "material", fileName, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt });
         }
       }
 
@@ -278,9 +278,23 @@ async function handleCanvasData(payload) {
           console.warn(`[worker] ${task.course.name} | ${task.type} "${task.fileName}": 0 chars after ${ms}ms`);
         }
         if (task.type === "syllabus") {
-          task.course.syllabusTexts.push({ fileName: task.fileName, text });
+          task.course.syllabusTexts.push({
+            fileName: task.fileName,
+            text,
+            sourceKey: task.sourceKey ?? null,
+            sourceKind: task.sourceKind ?? "canvas_syllabus",
+            remoteSize: task.remoteSize ?? null,
+            remoteUpdatedAt: task.remoteUpdatedAt ?? null,
+          });
         } else {
-          task.course.materialTexts.push({ fileName: task.fileName, text });
+          task.course.materialTexts.push({
+            fileName: task.fileName,
+            text,
+            sourceKey: task.sourceKey ?? null,
+            sourceKind: task.sourceKind ?? "canvas_module",
+            remoteSize: task.remoteSize ?? null,
+            remoteUpdatedAt: task.remoteUpdatedAt ?? null,
+          });
         }
       }
 

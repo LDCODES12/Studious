@@ -11,20 +11,20 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  name          String?
-  password      String?
-  image         String?
-  emailVerified DateTime?
-  canvasIcsUrl  String?
-  apiTokenHash        String?   @unique // SHA-256 hash of extension API token
-  bgSyncProcessingAt  DateTime? // set when after() starts AI processing, cleared when done
-  createdAt           DateTime  @default(now())
-  courses       Course[]
-  tasks         Task[]
-  accounts      Account[]
-  sessions      Session[]
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String?
+  password           String?
+  image              String?
+  emailVerified      DateTime?
+  canvasIcsUrl       String?
+  apiTokenHash       String?   @unique // SHA-256 hash of extension API token
+  bgSyncProcessingAt DateTime? // set when after() starts AI processing, cleared when done
+  createdAt          DateTime  @default(now())
+  courses            Course[]
+  tasks              Task[]
+  accounts           Account[]
+  sessions           Session[]
 }
 
 model Account {
@@ -62,58 +62,58 @@ model VerificationToken {
 }
 
 model Course {
-  id             String           @id @default(cuid())
-  userId         String
-  name           String
-  shortName      String?
-  instructor     String?
-  term           String?
-  color          String           @default("blue")
-  schedule       String?
-  location       String?
-  canvasCourseId     String?       // Canvas course ID for upsert sync
-  gradescopeCourseId String?       // Gradescope course ID (from Canvas LTI tab link)
-  currentGrade   String?          // Letter grade from Canvas (e.g. "A-")
-  currentScore   Float?           // Numeric score from Canvas (e.g. 91.4)
-  gradingScheme  Json?            // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard
-  applyGroupWeights Boolean       @default(false) // from Canvas apply_assignment_group_weights
-  classSchedule  Json?            // AI-extracted meeting schedule: { meetings, semesterStart, semesterEnd }
-  syllabusEvents Json?            // AI-extracted dated events: [{ title, dueDate, type }] for cross-source reconciliation
-  timelineMode   String?          @default("unknown") // weekly | sparse | inferred | unknown
-  timelineDiagnostics Json?       // pipeline diagnostics + source selections for timeline synthesis
-  createdAt      DateTime         @default(now())
-  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  assignments    Assignment[]
-  assignmentGroups AssignmentGroup[]
-  topics         CourseTopic[]
-  timelineAnchors CourseTimelineAnchor[]
-  materials      CourseMaterial[]
-  materialCandidates CanvasMaterialCandidate[]
-  quizzes        Quiz[]
-  flashcardDecks FlashcardDeck[]
-  announcements  Announcement[]
-  tasks          Task[]
+  id                  String                    @id @default(cuid())
+  userId              String
+  name                String
+  shortName           String?
+  instructor          String?
+  term                String?
+  color               String                    @default("blue")
+  schedule            String?
+  location            String?
+  canvasCourseId      String? // Canvas course ID for upsert sync
+  gradescopeCourseId  String? // Gradescope course ID (from Canvas LTI tab link)
+  currentGrade        String? // Letter grade from Canvas (e.g. "A-")
+  currentScore        Float? // Numeric score from Canvas (e.g. 91.4)
+  gradingScheme       Json? // [{ name: "A", value: 0.94 }, ...] from Canvas grading standard
+  applyGroupWeights   Boolean                   @default(false) // from Canvas apply_assignment_group_weights
+  classSchedule       Json? // AI-extracted meeting schedule: { meetings, semesterStart, semesterEnd }
+  syllabusEvents      Json? // AI-extracted dated events: [{ title, dueDate, type }] for cross-source reconciliation
+  timelineMode        String?                   @default("unknown") // weekly | sparse | inferred | unknown
+  timelineDiagnostics Json? // pipeline diagnostics + source selections for timeline synthesis
+  createdAt           DateTime                  @default(now())
+  user                User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments         Assignment[]
+  assignmentGroups    AssignmentGroup[]
+  topics              CourseTopic[]
+  timelineAnchors     CourseTimelineAnchor[]
+  materials           CourseMaterial[]
+  materialCandidates  CanvasMaterialCandidate[]
+  quizzes             Quiz[]
+  flashcardDecks      FlashcardDeck[]
+  announcements       Announcement[]
+  tasks               Task[]
 }
 
 model CourseTopic {
-  id              String   @id @default(cuid())
-  courseId        String
-  weekNumber      Int
-  weekLabel       String
-  startDate       String?
-  topics          String[]
-  readings        String[]
-  notes           String?
-  dateConfidence  String   @default("unknown") // high | medium | low | unknown
-  contentConfidence String @default("unknown") // high | medium | low | unknown
-  scheduleMode    String   @default("unknown") // weekly | sparse | inferred | unknown
-  provenance      Json?
-  verificationStatus String @default("unverified") // verified | corroborated | unverified | conflicted | gap
-  sourceBlock     String?  // schedule_table | syllabus_body | canvas_assignments | canvas_modules
-  completedTopics String[] @default([])
-  canvasModuleId  String?  // Canvas module ID for upsert sync
-  createdAt       DateTime @default(now())
-  course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                 String   @id @default(cuid())
+  courseId           String
+  weekNumber         Int
+  weekLabel          String
+  startDate          String?
+  topics             String[]
+  readings           String[]
+  notes              String?
+  dateConfidence     String   @default("unknown") // high | medium | low | unknown
+  contentConfidence  String   @default("unknown") // high | medium | low | unknown
+  scheduleMode       String   @default("unknown") // weekly | sparse | inferred | unknown
+  provenance         Json?
+  verificationStatus String   @default("unverified") // verified | corroborated | unverified | conflicted | gap
+  sourceBlock        String? // schedule_table | syllabus_body | canvas_assignments | canvas_modules
+  completedTopics    String[] @default([])
+  canvasModuleId     String? // Canvas module ID for upsert sync
+  createdAt          DateTime @default(now())
+  course             Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }
 
 model CourseTimelineAnchor {
@@ -121,7 +121,7 @@ model CourseTimelineAnchor {
   courseId           String
   sequenceNumber     Int
   anchorDate         String?
-  anchorType         String   // syllabus_verified | syllabus_corroborated | syllabus_unverified | canvas_only | break | conflicted
+  anchorType         String // syllabus_verified | syllabus_corroborated | syllabus_unverified | canvas_only | break | conflicted
   isInstructional    Boolean  @default(true)
   calendarConfidence String   @default("unknown") // high | medium | low | unknown
   sourceRefs         Json?
@@ -133,18 +133,28 @@ model CourseTimelineAnchor {
 }
 
 model CourseMaterial {
-  id            String   @id @default(cuid())
-  courseId      String
-  fileName      String
-  detectedType  String
-  sourceRole    String   @default("unknown") // timeline | content | mixed | unknown
-  summary       String
-  relatedTopics String[]
-  rawText       String
-  storedForAI   Boolean  @default(false)
-  uploadedAt    DateTime @default(now())
-  embedding     Unsupported("vector(1536)")?
-  course        Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                      String                       @id @default(cuid())
+  courseId                String
+  fileName                String
+  detectedType            String
+  sourceRole              String                       @default("unknown") // timeline | content | mixed | unknown
+  sourceKind              String                       @default("legacy") // canvas_syllabus | canvas_module | manual_upload | auto_route | legacy
+  sourceKey               String?
+  summary                 String
+  relatedTopics           String[]
+  rawText                 String
+  storedForAI             Boolean                      @default(false)
+  autoStoredForAI         Boolean                      @default(false)
+  userStoredForAIOverride Boolean?
+  contentHash             String?
+  lastSyncedAt            DateTime?
+  syncStatus              String                       @default("ready") // ready | stale | failed
+  uploadedAt              DateTime                     @default(now())
+  embedding               Unsupported("vector(1536)")?
+  course                  Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, sourceKind, sourceKey])
+  @@index([courseId, sourceKind])
 }
 
 model Quiz {
@@ -176,98 +186,103 @@ model FlashcardDeck {
 }
 
 model Flashcard {
-  id         String   @id @default(cuid())
-  deckId     String
-  front      String
-  back       String
-  confidence Int      @default(0) // 0=new, 1=hard, 2=okay, 3=easy
-  nextReview DateTime @default(now())
-  reviewCount Int     @default(0)
-  deck       FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  id          String        @id @default(cuid())
+  deckId      String
+  front       String
+  back        String
+  confidence  Int           @default(0) // 0=new, 1=hard, 2=okay, 3=easy
+  nextReview  DateTime      @default(now())
+  reviewCount Int           @default(0)
+  deck        FlashcardDeck @relation(fields: [deckId], references: [id], onDelete: Cascade)
 }
 
 model AssignmentGroup {
-  id              String       @id @default(cuid())
-  courseId         String
-  canvasGroupId   String       // Canvas assignment_group ID for upsert
-  name            String       // e.g. "Exams", "Homework"
-  weight          Float        // 0-100 (0 for all groups if unweighted/points-based)
-  position        Int          // display order
-  dropLowest           Int          @default(0)
-  dropHighest          Int          @default(0)
-  neverDrop            String[]     @default([]) // Canvas assignment IDs that must never be dropped
-  syllabusDropLowest   Int          @default(0)
-  syllabusDropHighest  Int          @default(0)
-  course          Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  assignments     Assignment[]
+  id                  String       @id @default(cuid())
+  courseId            String
+  canvasGroupId       String // Canvas assignment_group ID for upsert
+  name                String // e.g. "Exams", "Homework"
+  weight              Float // 0-100 (0 for all groups if unweighted/points-based)
+  position            Int // display order
+  dropLowest          Int          @default(0)
+  dropHighest         Int          @default(0)
+  neverDrop           String[]     @default([]) // Canvas assignment IDs that must never be dropped
+  syllabusDropLowest  Int          @default(0)
+  syllabusDropHighest Int          @default(0)
+  course              Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  assignments         Assignment[]
 
   @@unique([courseId, canvasGroupId])
 }
 
 model Assignment {
-  id                 String            @id @default(cuid())
+  id                 String           @id @default(cuid())
   courseId           String
   title              String
   type               String
-  dueDate            String?           // Nullable for participation/attendance items
-  availableFrom      String?           // Canvas unlock_at (assignment becomes available)
-  availableUntil     String?           // Canvas lock_at (assignment closes/locks)
+  dueDate            String? // Nullable for participation/attendance items
+  availableFrom      String? // Canvas unlock_at (assignment becomes available)
+  availableUntil     String? // Canvas lock_at (assignment closes/locks)
   description        String?
-  status             String            @default("not_started")
-  score              Float?            // Student's score from Canvas submission
-  submittedAt        String?           // ISO datetime when student submitted
+  status             String           @default("not_started")
+  score              Float? // Student's score from Canvas submission
+  submittedAt        String? // ISO datetime when student submitted
   googleEventId      String?
-  canvasAssignmentId String?           // Canvas assignment ID for upsert sync
-  canvasUrl          String?           // Direct link to Canvas assignment
-  pointsPossible     Float?            // Points possible from Canvas
-  assignmentGroupId  String?           // FK to AssignmentGroup
-  gradingType        String?           // 'points' | 'pass_fail' | 'percent' | 'letter_grade' | 'gpa_scale' | 'not_graded'
-  submissionTypes    String[]  @default([]) // Canvas submission_types array
-  omitFromFinalGrade Boolean   @default(false) // true = doesn't count toward grade
-  excused            Boolean   @default(false) // true = excluded from grade calculation
-  missing            Boolean   @default(false) // true = past due, no submission
-  late               Boolean   @default(false) // true = submitted after due date
-  gradescopeScore    Float?                    // score from Gradescope before Canvas sync
-  gradescopeMaxScore Float?                    // max score from Gradescope
-  gradescopeId       String?                   // Gradescope assignment ID — set for GS-only assignments not in Canvas
-  createdAt          DateTime          @default(now())
-  course             Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  assignmentGroup    AssignmentGroup?  @relation(fields: [assignmentGroupId], references: [id])
+  canvasAssignmentId String? // Canvas assignment ID for upsert sync
+  canvasUrl          String? // Direct link to Canvas assignment
+  pointsPossible     Float? // Points possible from Canvas
+  assignmentGroupId  String? // FK to AssignmentGroup
+  gradingType        String? // 'points' | 'pass_fail' | 'percent' | 'letter_grade' | 'gpa_scale' | 'not_graded'
+  submissionTypes    String[]         @default([]) // Canvas submission_types array
+  omitFromFinalGrade Boolean          @default(false) // true = doesn't count toward grade
+  excused            Boolean          @default(false) // true = excluded from grade calculation
+  missing            Boolean          @default(false) // true = past due, no submission
+  late               Boolean          @default(false) // true = submitted after due date
+  gradescopeScore    Float? // score from Gradescope before Canvas sync
+  gradescopeMaxScore Float? // max score from Gradescope
+  gradescopeId       String? // Gradescope assignment ID — set for GS-only assignments not in Canvas
+  createdAt          DateTime         @default(now())
+  course             Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  assignmentGroup    AssignmentGroup? @relation(fields: [assignmentGroupId], references: [id])
 }
 
 model Task {
   id            String    @id @default(cuid())
   userId        String
-  courseId       String?
-  assignmentId  String?       // source assignment for auto-generated tasks
+  courseId      String?
+  assignmentId  String? // source assignment for auto-generated tasks
   title         String
   description   String?
-  dueDate       String?       // YYYY-MM-DD
-  dueTime       String?       // HH:MM (24h) — optional time component
-  priority      String        @default("medium") // "low" | "medium" | "high"
-  completed     Boolean       @default(false)
+  dueDate       String? // YYYY-MM-DD
+  dueTime       String? // HH:MM (24h) — optional time component
+  priority      String    @default("medium") // "low" | "medium" | "high"
+  completed     Boolean   @default(false)
   completedAt   DateTime?
-  source        String        @default("manual") // "manual" | "auto"
-  sourceType    String?       // "study" | "start" | "review" | "complete"
+  source        String    @default("manual") // "manual" | "auto"
+  sourceType    String? // "study" | "start" | "review" | "complete"
   googleEventId String?
-  createdAt     DateTime      @default(now())
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  course        Course?       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  createdAt     DateTime  @default(now())
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course        Course?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
+  @@unique([assignmentId, sourceType])
   @@index([userId, completed])
   @@index([userId, dueDate])
-  @@unique([assignmentId, sourceType])
 }
 
 model CanvasMaterialCandidate {
-  id         String   @id @default(cuid())
-  courseId   String
-  fileName   String
-  moduleName String
-  contentId  String   // Canvas file content_id — resolved to download URL at sync time
-  requested  Boolean  @default(false)
-  createdAt  DateTime @default(now())
-  course     Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  courseId        String
+  fileName        String
+  moduleName      String
+  contentId       String // Canvas file content_id — resolved to download URL at sync time
+  sourceKind      String   @default("canvas_module")
+  remoteUpdatedAt String?
+  remoteSize      Int?
+  requested       Boolean  @default(false)
+  status          String   @default("discovered") // discovered | requested | stale
+  lastSeenAt      DateTime @default(now())
+  createdAt       DateTime @default(now())
+  course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([courseId, contentId])
 }
@@ -275,10 +290,10 @@ model CanvasMaterialCandidate {
 model Announcement {
   id        String   @id @default(cuid())
   courseId  String
-  canvasId  String   // Canvas discussion_topic ID for upsert sync
+  canvasId  String // Canvas discussion_topic ID for upsert sync
   title     String
-  body      String   // Plain text, stripped from HTML
-  postedAt  String   // ISO datetime
+  body      String // Plain text, stripped from HTML
+  postedAt  String // ISO datetime
   createdAt DateTime @default(now())
   course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
 }
@@ -286,13 +301,13 @@ model Announcement {
 model Reflection {
   id             String   @id @default(cuid())
   userId         String
-  courseId        String?
-  taskId          String?
-  assignmentId    String?
-  type           String            // "task_completion" | "post_assignment" | "pre_class"
-  confidence     Int?              // 0=lost, 1=shaky, 2=solid, 3=nailed_it
-  blocker        String?           // "none" | "confused_by_topic" | "ran_out_of_time" | "missing_prereq"
-  priorKnowledge String?           // "nothing" | "heard_of_it" | "some_understanding" | "comfortable"
+  courseId       String?
+  taskId         String?
+  assignmentId   String?
+  type           String // "task_completion" | "post_assignment" | "pre_class"
+  confidence     Int? // 0=lost, 1=shaky, 2=solid, 3=nailed_it
+  blocker        String? // "none" | "confused_by_topic" | "ran_out_of_time" | "missing_prereq"
+  priorKnowledge String? // "nothing" | "heard_of_it" | "some_understanding" | "comfortable"
   topics         String[] @default([])
   note           String?
   createdAt      DateTime @default(now())
@@ -306,7 +321,7 @@ model Reflection {
 model LearningEvent {
   id        String   @id @default(cuid())
   userId    String
-  type      String   // "plan_generated" | future: "ai_suggestion_followed", "intervention_outcome"
+  type      String // "plan_generated" | future: "ai_suggestion_followed", "intervention_outcome"
   metadata  Json     @default("{}")
   createdAt DateTime @default(now())
 
