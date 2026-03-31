@@ -164,6 +164,16 @@ async function main() {
   if (neuro.timelineAnchors.some((anchor) => !allowedAnchorTypes.has(anchor.anchorType))) {
     fail("Neuroscience Futures has an invalid anchorType");
   }
+  const neuroContentWeeks = neuro.topics.filter(
+    (topic) => topic.topics.length > 0 || topic.readings.length > 0,
+  );
+  if (neuroContentWeeks.length < 4) {
+    fail(`Neuroscience Futures should retain at least 4 contentful seminar meetings, found ${neuroContentWeeks.length}`);
+  }
+  const neuroWeek1 = neuro.topics.find((topic) => topic.weekNumber === 1);
+  if (!neuroWeek1 || /^class meeting\s+1$/i.test(neuroWeek1.weekLabel)) {
+    fail("Neuroscience Futures week 1 is still using a generic Class Meeting label");
+  }
 
   console.log("Timeline regression checks passed.");
 }

@@ -309,6 +309,8 @@ const GENERIC_WEEK_LABEL_RX = /^(lectures?|course resources|report discussions|m
 const ASSIGNMENT_FALLBACK_LABEL_RX = /^assignments?(?:\s+due)?\s+week\s+of\s+\d{4}-\d{2}-\d{2}$/i;
 const ADMIN_ENTRY_RX = /^(syllabus|course schedule|office hours?|course information|course resources|exam resources)$/i;
 const BREAK_SEGMENT_RX = /\bspring break\b|\bacademic break\b|\bread(?:ing)? days?\b|\bbye week\b|\bholiday\b|\bno classes?\b|\bno lecture\b|\bno lab\b/i;
+const GENERIC_MEETING_LABEL_RX = /^(?:class meeting|meeting|seminar session|session)\s+\d+$/i;
+const DATE_ONLY_PLACEHOLDER_NOTE_RX = /no topics listed.*class meeting date/i;
 
 // ─── Break & Content Helpers ────────────────────────────────────────────────
 
@@ -368,6 +370,113 @@ function cleanModuleWeekLabel(label: string): string {
   }
 
   return cleanLabel;
+}
+
+function extractModuleSequenceNumber(label: string): number | null {
+  const match = label.match(/\b(?:class|meeting|session|week|lecture|unit|module)\s*(\d+)\b/i);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function cleanModuleReadingTitle(title: string): string {
+  let cleaned = title
+    .replace(/\.[a-z0-9]{2,5}$/i, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const yearMatch = cleaned.match(/^(.*?)[,\s-]+((?:19|20)\d{2})$/);
+  if (yearMatch) {
+    cleaned = `${yearMatch[1].trim()} (${yearMatch[2]})`;
+  }
+
+  cleaned = cleaned
+    .split(/\s+/)
+    .map((token) => {
+      if (/^\(\d{4}\)$/.test(token)) return token;
+      if (/^et$/i.test(token)) return "et";
+      if (/^al\.?$/i.test(token)) return "al.";
+      if (/^[a-z][a-z'-]+$/i.test(token) && token === token.toLowerCase()) {
+        return token[0].toUpperCase() + token.slice(1);
+      }
+      return token;
+    })
+    .join(" ")
+    .replace(/\s+-\s+/g, " - ")
+    .trim();
+
+  return cleaned;
+}
+
+function buildDeterministicSparseModuleResult(
+  modules: CanvasModuleInfo[],
+  spine: { weekNumber: number; weekLabel: string; startDate: string | null; topics: string[]; readings: string[] }[],
+): NormalizerResult {
+  const genericWeeks = new Set(
+    spine
+      .filter((week) =>
+        GENERIC_MEETING_LABEL_RX.test(week.weekLabel.trim()) &&
+        (week.topics?.length ?? 0) === 0 &&
+        (week.readings?.length ?? 0) === 0,
+      )
+      .map((week) => week.weekNumber),
+  );
+
+  if (genericWeeks.size === 0) {
+    return { deltas: [], coveredWeeks: [], weekLabelHints: [] };
+  }
+
+  const deltas: ModuleDelta[] = [];
+  const coveredWeeks = new Set<number>();
+  const weekLabelHints = new Map<number, WeekLabelHint>();
+
+  for (const module of modules) {
+    const targetWeek = extractModuleSequenceNumber(module.weekLabel) ?? (
+      genericWeeks.has(module.weekNumber) ? module.weekNumber : null
+    );
+    if (!targetWeek || !genericWeeks.has(targetWeek)) continue;
+
+    const addTopics = [...new Set(
+      (module.topics ?? [])
+        .map((topic) => topic.trim())
+        .filter(Boolean)
+        .filter((topic) => !isAdministrativeEntry(topic)),
+    )];
+    const addReadings = [...new Set(
+      (module.readings ?? [])
+        .map(cleanModuleReadingTitle)
+        .map((reading) => reading.trim())
+        .filter(Boolean),
+    )];
+
+    if (addTopics.length > 0 || addReadings.length > 0) {
+      deltas.push({
+        weekNumber: targetWeek,
+        addTopics,
+        addReadings,
+        sourceModule: module.weekLabel,
+      });
+    }
+    coveredWeeks.add(targetWeek);
+
+    const weekLabel = addReadings.length === 1
+      ? addReadings[0]
+      : null;
+    if (weekLabel) {
+      weekLabelHints.set(targetWeek, {
+        weekNumber: targetWeek,
+        weekLabel,
+        sourceModule: module.weekLabel,
+      });
+    }
+  }
+
+  return {
+    deltas,
+    coveredWeeks: [...coveredWeeks].sort((a, b) => a - b),
+    weekLabelHints: [...weekLabelHints.values()].sort((a, b) => a.weekNumber - b.weekNumber),
+  };
 }
 
 function formatLectureRange(lectureNumbers: number[]): string | null {
@@ -1233,6 +1342,15 @@ async function normalizeModules(
     return { deltas: [], coveredWeeks: [], weekLabelHints: [] };
   }
 
+  const deterministicSparse = buildDeterministicSparseModuleResult(modules, spine);
+  if (deterministicSparse.coveredWeeks.length > 0) {
+    console.log(
+      `[pipeline] ${courseName}: normalizeModules used deterministic sparse mapping — ` +
+      `${deterministicSparse.deltas.length} deltas, ${deterministicSparse.coveredWeeks.length} covered`,
+    );
+    return deterministicSparse;
+  }
+
   const t0 = Date.now();
   try {
     const { object } = await generateObject({
@@ -1343,6 +1461,7 @@ function fuseTimeline(
 
     const newTopics = [...(week.topics ?? [])];
     const newReadings = [...(week.readings ?? [])];
+    let addedContent = false;
 
     for (const delta of deltas) {
       for (const topic of delta.addTopics) {
@@ -1351,6 +1470,7 @@ function fuseTimeline(
           existingTopicNorms.add(norm);
           newTopics.push(topic);
           totalAdded++;
+          addedContent = true;
         }
       }
       for (const reading of delta.addReadings) {
@@ -1359,11 +1479,19 @@ function fuseTimeline(
           existingReadingNorms.add(norm);
           newReadings.push(reading);
           totalAdded++;
+          addedContent = true;
         }
       }
     }
 
-    return { ...week, topics: newTopics, readings: newReadings };
+    return {
+      ...week,
+      topics: newTopics,
+      readings: newReadings,
+      notes: addedContent && DATE_ONLY_PLACEHOLDER_NOTE_RX.test(week.notes ?? "")
+        ? null
+        : week.notes,
+    };
   });
 
   if (totalAdded > 0) {
@@ -1371,6 +1499,36 @@ function fuseTimeline(
   }
 
   return fused;
+}
+
+function applyWeekLabelHintsToTimeline(
+  topics: ReconciledTopic[],
+  weekLabelHints: WeekLabelHint[],
+): ReconciledTopic[] {
+  if (topics.length === 0 || weekLabelHints.length === 0) return topics;
+
+  const hintByWeek = new Map<number, WeekLabelHint>();
+  for (const hint of weekLabelHints) {
+    const existing = hintByWeek.get(hint.weekNumber);
+    if (!existing || hint.weekLabel.length > existing.weekLabel.length) {
+      hintByWeek.set(hint.weekNumber, hint);
+    }
+  }
+
+  return topics.map((week) => {
+    const hint = hintByWeek.get(week.weekNumber);
+    if (!hint) return week;
+
+    const labelIsGeneric =
+      GENERIC_MEETING_LABEL_RX.test(week.weekLabel) ||
+      /^week\s+\d+$/i.test(week.weekLabel) ||
+      isAssignmentFallbackLabel(week.weekLabel);
+
+    const hasNoVisibleContent = (week.topics?.length ?? 0) === 0 && (week.readings?.length ?? 0) === 0;
+    if (!labelIsGeneric && !hasNoVisibleContent) return week;
+
+    return { ...week, weekLabel: hint.weekLabel };
+  });
 }
 
 function applyPerWeekFallback(
@@ -2026,6 +2184,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
       matchedAssignment: finalTopics[i]?.matchedAssignment,
     }));
+    finalTopics = applyWeekLabelHintsToTimeline(finalTopics, weekLabelHints);
     finalTopics = refineAssignmentFallbackPresentation(
       finalTopics,
       assignmentFallbackTopics,
@@ -2063,6 +2222,7 @@ export async function runTopicPipeline(input: PipelineInput): Promise<PipelineRe
       sourceBlock: finalTopics[i]?.sourceBlock ?? sourceBlock,
       matchedAssignment: finalTopics[i]?.matchedAssignment,
     }));
+    finalTopics = applyWeekLabelHintsToTimeline(finalTopics, weekLabelHints);
     finalTopics = refineAssignmentFallbackPresentation(
       finalTopics,
       assignmentFallbackTopics,
