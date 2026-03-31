@@ -43,6 +43,7 @@ export interface ScoredSource {
   text: string;
   score: number;
   label: string;
+  authority?: "primary" | "supporting" | "enrichment";
 }
 
 export interface CanvasModuleInfo {
@@ -140,6 +141,8 @@ export interface FinalizeTimelineResult {
   repairActionsApplied: string[];
   timelineQuality: TimelineQuality;
 }
+
+type SourceAuthority = "primary" | "supporting" | "enrichment";
 
 // ─── Shared Helpers ─────────────────────────────────────────────────────────
 
@@ -1055,6 +1058,54 @@ function isCanonicalTimelineExtraction(extraction: ExtractionResult): boolean {
   return true;
 }
 
+function sourceAuthorityRank(authority: SourceAuthority | undefined): number {
+  switch (authority) {
+    case "primary":
+      return 2;
+    case "supporting":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function weekLabelIsGeneric(label?: string | null): boolean {
+  if (!label) return true;
+  return (
+    GENERIC_WEEK_LABEL_RX.test(label.trim()) ||
+    GENERIC_MEETING_LABEL_RX.test(label.trim()) ||
+    /^week\s+\d+$/i.test(label.trim()) ||
+    isAssignmentFallbackLabel(label)
+  );
+}
+
+function fillMissingWeekFields(target: ParsedTopic, source: ParsedTopic): boolean {
+  let changed = false;
+
+  if (!target.startDate && source.startDate) {
+    target.startDate = source.startDate;
+    changed = true;
+  }
+  if (weekLabelIsGeneric(target.weekLabel) && source.weekLabel && !weekLabelIsGeneric(source.weekLabel)) {
+    target.weekLabel = source.weekLabel;
+    changed = true;
+  }
+  if ((target.topics?.length ?? 0) === 0 && (source.topics?.length ?? 0) > 0) {
+    target.topics = source.topics;
+    changed = true;
+  }
+  if ((target.readings?.length ?? 0) === 0 && (source.readings?.length ?? 0) > 0) {
+    target.readings = source.readings;
+    changed = true;
+  }
+  if (!normalizeNotesValue(target.notes) && normalizeNotesValue(source.notes)) {
+    target.notes = source.notes;
+    changed = true;
+  }
+
+  return changed;
+}
+
 /**
  * Extracts topics from all syllabus candidates. Single-pass per block —
  * no timeline/content role split. Iterates candidates, picks best result,
@@ -1073,10 +1124,13 @@ async function extractFromBlocks(
     fmt: string;
     win: string;
     parsedSchedule: ParsedSchedule;
+    authority: SourceAuthority;
+    score: number;
   }> = [];
 
   for (let ci = 0; ci < candidates.length; ci++) {
     const src = candidates[ci];
+    if (src.authority === "enrichment") continue;
 
     const win = src.text.length <= FULL_TEXT_THRESHOLD
       ? src.text
@@ -1103,7 +1157,15 @@ async function extractFromBlocks(
     console.log(`[pipeline] ${courseName} extract[${ci}] ${src.label} fmt=${fmt}: ${result.length} weeks, ${richWeeks} rich, ${datedWeeks} dated → ${isGoodResult ? "ACCEPTED" : "rejected"}`);
 
     if (isGoodResult) {
-      allGoodResults.push({ result, label: src.label, fmt, win, parsedSchedule });
+      allGoodResults.push({
+        result,
+        label: src.label,
+        fmt,
+        win,
+        parsedSchedule,
+        authority: src.authority ?? "supporting",
+        score: src.score,
+      });
     }
   }
 
@@ -1115,9 +1177,15 @@ async function extractFromBlocks(
     };
   }
 
-  // Merge: start with highest-coverage source, fill gaps from others
-  allGoodResults.sort((a, b) => b.result.length - a.result.length);
-  const merged = new Map<number, ParsedTopic>();
+  // Merge: start with the highest-authority schedule source, then let
+  // lower-authority sources fill only genuinely missing fields.
+  allGoodResults.sort(
+    (a, b) =>
+      sourceAuthorityRank(b.authority) - sourceAuthorityRank(a.authority) ||
+      b.result.length - a.result.length ||
+      b.score - a.score,
+  );
+  const merged = new Map<number, { topic: ParsedTopic; authority: SourceAuthority }>();
   const sourceLabels: string[] = [];
   let usedWindow = allGoodResults[0].win;
   const mergedScheduleShape = allGoodResults[0].parsedSchedule.shape;
@@ -1125,29 +1193,49 @@ async function extractFromBlocks(
   const mergedHasExplicitDates = allGoodResults.some((item) => item.parsedSchedule.hasExplicitDates);
   const mergedHasExplicitBreakRows = allGoodResults.some((item) => item.parsedSchedule.hasExplicitBreakRows);
 
-  for (const { result, label } of allGoodResults) {
+  for (const { result, label, authority } of allGoodResults) {
     let contributed = false;
     for (const week of result) {
-      const existing = merged.get(week.weekNumber);
-      if (!existing) {
-        merged.set(week.weekNumber, week);
+      const existingEntry = merged.get(week.weekNumber);
+      if (!existingEntry) {
+        merged.set(week.weekNumber, { topic: week, authority });
         contributed = true;
       } else {
+        const existing = existingEntry.topic;
+        const existingRank = sourceAuthorityRank(existingEntry.authority);
+        const newRank = sourceAuthorityRank(authority);
+
+        if (newRank > existingRank) {
+          merged.set(week.weekNumber, {
+            topic: { ...week, startDate: existing.startDate ?? week.startDate },
+            authority,
+          });
+          contributed = true;
+          continue;
+        }
+
+        if (newRank < existingRank) {
+          contributed = fillMissingWeekFields(existing, week) || contributed;
+          continue;
+        }
+
         const existingRich = (existing.topics?.length ?? 0) + (existing.readings?.length ?? 0);
         const newRich = (week.topics?.length ?? 0) + (week.readings?.length ?? 0);
         if (newRich > existingRich) {
-          merged.set(week.weekNumber, { ...week, startDate: existing.startDate ?? week.startDate });
+          merged.set(week.weekNumber, {
+            topic: { ...week, startDate: existing.startDate ?? week.startDate },
+            authority,
+          });
           contributed = true;
-        } else if (!existing.startDate && week.startDate) {
-          existing.startDate = week.startDate;
-          contributed = true;
+        } else {
+          contributed = fillMissingWeekFields(existing, week) || contributed;
         }
       }
     }
     if (contributed) sourceLabels.push(label);
   }
 
-  let topics = [...merged.values()].sort((a, b) => a.weekNumber - b.weekNumber);
+  let topics = [...merged.values()].map((entry) => entry.topic).sort((a, b) => a.weekNumber - b.weekNumber);
   const usedLabel = sourceLabels.length > 1
     ? `merged(${sourceLabels.join("+")})`
     : sourceLabels[0] ?? "none";

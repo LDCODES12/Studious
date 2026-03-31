@@ -228,6 +228,79 @@ function classScheduleProbe(text: string) {
   };
 }
 
+type ScheduleSourceAuthority = "primary" | "supporting" | "enrichment";
+
+function classifyImportedPdfSource(
+  fileName: string,
+  scheduleWindow: string,
+  score: number,
+): {
+  authority: ScheduleSourceAuthority;
+  detectedType: "syllabus" | "lecture_notes" | "lecture_slides" | "other";
+  sourceRole: "timeline" | "content" | "mixed" | "unknown";
+  storedForAI: boolean;
+} {
+  const normalized = fileName.toLowerCase();
+  const hasAuthorityName = /\bsyllab|schedul|calendar|course[\s._-]?(guide|outline|info|overview|pack)\b/i.test(normalized);
+  const hasEnrichmentName = /\b(lecture|delivered|slides?|reading|paper|handout|worksheet|study outline|review questions?|exam\s*\d+)\b/i.test(normalized);
+  const format = detectSourceFormat(scheduleWindow);
+  const looksStronglyScheduleStructured =
+    score >= 1.5 ||
+    format === "tab-separated table" ||
+    format === "structured schedule (one entry per line)" ||
+    format === "lecture outline with repeated Lecture N rows" ||
+    format.startsWith("weekly calendar grid");
+  const looksWeaklyScheduleStructured =
+    looksStronglyScheduleStructured ||
+    score >= 0.75 ||
+    /\bweek\s+\d+|lecture\s+\d+|class meeting|session\s+\d+|spring break|no class\b/i.test(scheduleWindow);
+
+  let authority: ScheduleSourceAuthority;
+  if (hasEnrichmentName && !hasAuthorityName) {
+    authority = looksStronglyScheduleStructured && score >= 3 ? "supporting" : "enrichment";
+  } else if (hasAuthorityName) {
+    authority = looksWeaklyScheduleStructured ? "primary" : "supporting";
+  } else if (looksStronglyScheduleStructured) {
+    authority = "supporting";
+  } else {
+    authority = "enrichment";
+  }
+
+  if (authority !== "enrichment") {
+    return {
+      authority,
+      detectedType: "syllabus",
+      sourceRole: authority === "primary" ? "timeline" : "mixed",
+      storedForAI: false,
+    };
+  }
+
+  if (/\b(slides?|lecture|delivered)\b/i.test(normalized)) {
+    return {
+      authority,
+      detectedType: "lecture_slides",
+      sourceRole: "content",
+      storedForAI: true,
+    };
+  }
+
+  if (/\b(reading|paper|article|chapter|handout)\b/i.test(normalized)) {
+    return {
+      authority,
+      detectedType: "lecture_notes",
+      sourceRole: "content",
+      storedForAI: true,
+    };
+  }
+
+  return {
+    authority,
+    detectedType: "other",
+    sourceRole: "content",
+    storedForAI: false,
+  };
+}
+
 function hasOverlappingDateRanges(
   aStart: string,
   aEnd: string,
@@ -655,14 +728,14 @@ export async function POST(request: NextRequest) {
   // Built during processing, logged immediately per course (not batched at
   // end so a timeout can't silently kill the log), and returned in the
   // response body so the extension can persist it to chrome.storage.local.
-  type CandidateDebug = { label: string; chars: number; windowChars: number; score: number };
-  type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
+type CandidateDebug = { label: string; chars: number; windowChars: number; score: number; authority?: ScheduleSourceAuthority };
+type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
   type CourseDebug = {
     name: string;
     existingAiTopics: number;
     shouldRunAI: boolean;
     syllabusBody: { chars: number; score: number } | null;
-    syllabusTexts: { fileName: string; chars: number; windowChars: number; score: number }[];
+    syllabusTexts: { fileName: string; chars: number; windowChars: number; score: number; authority: ScheduleSourceAuthority }[];
     candidates: CandidateDebug[];
     selectedSource: string;
     materials: MaterialDebug[];
@@ -740,7 +813,7 @@ export async function POST(request: NextRequest) {
       // than a 3k-char week-by-week schedule table.
       const syllabusTexts = c.syllabusTexts ?? [];
 
-      type ScoredSource = { text: string; score: number; label: string };
+      type ScoredSource = { text: string; score: number; label: string; authority: ScheduleSourceAuthority };
       const candidates: ScoredSource[] = [];
 
       if (c.syllabusBody) {
@@ -749,21 +822,37 @@ export async function POST(request: NextRequest) {
           const win = bestWindow(bodyText);
           const score = scheduleScore(win);
           // Score the best window — short HTML bodies are scored whole; large ones find densest slice
-          candidates.push({ text: bodyText, score, label: "html-body" });
+          candidates.push({ text: bodyText, score, label: "html-body", authority: "primary" });
           dbg.syllabusBody = { chars: bodyText.length, score };
         }
       }
 
       for (const st of syllabusTexts) {
         const pdfText = st.text.trim();
+        let pdfClassification = classifyImportedPdfSource(st.fileName, "", 0);
         if (pdfText.length >= 100) {
           // Score using bestWindow so large PDFs with a dense schedule section aren't penalized by dilution
           const win = bestWindow(pdfText);
           const score = scheduleScore(win);
-          candidates.push({ text: pdfText, score, label: st.fileName });
-          dbg.syllabusTexts.push({ fileName: st.fileName, chars: pdfText.length, windowChars: win.length, score });
+          pdfClassification = classifyImportedPdfSource(st.fileName, win, score);
+          if (pdfClassification.authority !== "enrichment") {
+            candidates.push({ text: pdfText, score, label: st.fileName, authority: pdfClassification.authority });
+          }
+          dbg.syllabusTexts.push({
+            fileName: st.fileName,
+            chars: pdfText.length,
+            windowChars: win.length,
+            score,
+            authority: pdfClassification.authority,
+          });
         } else {
-          dbg.syllabusTexts.push({ fileName: st.fileName, chars: pdfText.length, windowChars: 0, score: 0 });
+          dbg.syllabusTexts.push({
+            fileName: st.fileName,
+            chars: pdfText.length,
+            windowChars: 0,
+            score: 0,
+            authority: pdfClassification.authority,
+          });
         }
 
         // Save as CourseMaterial (visible in the Materials tab)
@@ -778,12 +867,15 @@ export async function POST(request: NextRequest) {
               data: {
                 courseId: scCourseId,
                 fileName: st.fileName,
-                detectedType: "syllabus",
-                sourceRole: "mixed",
-                summary: "Syllabus automatically imported from Canvas.",
+                detectedType: pdfClassification.detectedType,
+                sourceRole: pdfClassification.sourceRole,
+                summary:
+                  pdfClassification.detectedType === "syllabus"
+                    ? "Syllabus automatically imported from Canvas."
+                    : "Canvas-linked PDF imported from the syllabus page.",
                 relatedTopics: [],
                 rawText: storedText,
-                storedForAI: false,
+                storedForAI: pdfClassification.storedForAI,
               },
             });
             syllabusFilesImported++;
@@ -796,10 +888,20 @@ export async function POST(request: NextRequest) {
               `;
             } catch { /* embedding failure never blocks import */ }
           } else {
-            // Update stored text if we have a longer version (previous truncation may have lost data)
+            // Keep metadata aligned with the latest classification so a lecture PDF
+            // found on the syllabus page does not keep masquerading as the syllabus.
             await db.courseMaterial.update({
               where: { id: existing.id },
-              data: { rawText: storedText },
+              data: {
+                rawText: storedText,
+                detectedType: pdfClassification.detectedType,
+                sourceRole: pdfClassification.sourceRole,
+                summary:
+                  pdfClassification.detectedType === "syllabus"
+                    ? "Syllabus automatically imported from Canvas."
+                    : "Canvas-linked PDF imported from the syllabus page.",
+                storedForAI: pdfClassification.storedForAI,
+              },
             });
           }
         } catch (matErr) {
@@ -920,7 +1022,15 @@ export async function POST(request: NextRequest) {
             if (stored.rawText && stored.rawText.length >= 100) {
               const win = bestWindow(stored.rawText);
               const score = scheduleScore(win);
-              candidates.push({ text: stored.rawText, score, label: `stored:${stored.fileName}` });
+              const storedClassification = classifyImportedPdfSource(stored.fileName, win, score);
+              if (storedClassification.authority !== "enrichment") {
+                candidates.push({
+                  text: stored.rawText,
+                  score,
+                  label: `stored:${stored.fileName}`,
+                  authority: storedClassification.authority,
+                });
+              }
               console.log(`[sync] ${c.name}: using stored syllabus text "${stored.fileName}" (${stored.rawText.length}c, score=${score.toFixed(3)})`);
             }
           }
@@ -944,6 +1054,7 @@ export async function POST(request: NextRequest) {
         chars: cd.text.length,
         windowChars: bestWindow(cd.text).length,
         score: cd.score,
+        authority: cd.authority,
       }));
       dbg.selectedSource = bestLabel;
 
@@ -1146,7 +1257,12 @@ export async function POST(request: NextRequest) {
         const pipelineInput: PipelineInput = {
           courseId: scCourseId,
           courseName: c.name,
-          candidates: candidates.map((src) => ({ text: src.text, score: src.score, label: src.label })),
+          candidates: candidates.map((src) => ({
+            text: src.text,
+            score: src.score,
+            label: src.label,
+            authority: src.authority,
+          })),
           modules: existingModuleTopics.map((mt) => ({
             id: mt.id,
             canvasModuleId: mt.canvasModuleId!,
