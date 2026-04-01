@@ -36,7 +36,7 @@ export interface WeekCourseData {
   dateConfidence: string | null;
   contentConfidence: string | null;
   scheduleMode: string | null;
-  deadlines: { title: string; type: string; dueDay: string; pointsPossible: number | null; status: string }[];
+  deadlines: { title: string; type: string; dueDate: string; pointsPossible: number | null; status: string }[];
   aiNote: string | null;
 }
 
@@ -60,7 +60,7 @@ type CourseContextBundle = {
   context: CourseContextSnapshot;
 };
 
-const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-03-09-provenance-v3";
+const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-04-01-local-deadline-v4";
 
 // ── Week key ─────────────────────────────────────────────────────────────────
 
@@ -215,16 +215,13 @@ export function buildWeekCourses(
           if (!isValid(due)) return false;
           return due >= weekStart && due <= weekEnd;
         })
-        .map((a) => {
-          const due = parseISO(a.dueDate);
-          return {
-            title: a.title,
-            type: a.type,
-            dueDay: isValid(due) ? DAY_NAMES[getDay(due)] : "?",
-            pointsPossible: a.pointsPossible,
-            status: a.status,
-          };
-        });
+        .map((a) => ({
+          title: a.title,
+          type: a.type,
+          dueDate: a.dueDate,
+          pointsPossible: a.pointsPossible,
+          status: a.status,
+        }));
 
       return {
         courseId: course.id,
@@ -334,10 +331,8 @@ async function generateOverview(
     });
     if (deadlines.length > 0) {
       const dlStr = deadlines.slice(0, 5).map((a) => {
-        const due = parseISO(a.dueDate);
-        const dayStr = isValid(due) ? format(due, "EEE") : "?";
         const pts = a.pointsPossible ? ` (${a.pointsPossible}pts)` : "";
-        return `${a.title} (${a.type}) due ${dayStr}${pts}`;
+        return `${a.title} (${a.type})${pts}`;
       }).join("; ");
       parts.push(`Due: ${dlStr}`);
     }

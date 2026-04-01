@@ -1,15 +1,55 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
-import type { WeekOverviewData, WeekCourseData, WeekDeadlineDay } from "@/lib/week-overview";
+import { format, parseISO, startOfWeek, addDays, isValid } from "date-fns";
+import { formatAcademicDueDateShort } from "@/lib/academic-deadlines";
+import type { WeekOverviewData, WeekCourseData } from "@/lib/week-overview";
 
 interface WeekOverviewProps {
   overview: WeekOverviewData;
   courses: WeekCourseData[];
-  deadlineDays: WeekDeadlineDay[];
 }
 
-export function WeekOverview({ overview, courses, deadlineDays }: WeekOverviewProps) {
+export function WeekOverview({ overview, courses }: WeekOverviewProps) {
   const courseNoteMap = new Map(overview.courseNotes.map((n) => [n.courseName, n.note]));
+  const [browserReady, setBrowserReady] = useState(false);
+
+  useEffect(() => {
+    setBrowserReady(true);
+  }, []);
+
+  const now = new Date();
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const todayStr = format(now, "yyyy-MM-dd");
+
+  const deadlineDays = browserReady ? Array.from({ length: 5 }, (_, index) => {
+    const date = addDays(weekStart, index);
+    const dateStr = format(date, "yyyy-MM-dd");
+    const deadlines = courses.flatMap((course) =>
+      course.deadlines
+        .filter((deadline) => {
+          const due = parseISO(deadline.dueDate);
+          return isValid(due) && format(due, "yyyy-MM-dd") === dateStr;
+        })
+        .map((deadline) => ({
+          title: deadline.title,
+          type: deadline.type,
+          courseName: course.courseName,
+          courseColor: course.courseColor,
+          status: deadline.status,
+        }))
+    );
+
+    return {
+      dayName: format(date, "EEE"),
+      date: format(date, "MMM d"),
+      isToday: dateStr === todayStr,
+      isPast: dateStr < todayStr,
+      deadlines,
+    };
+  }) : [];
 
   // Only show deadline days that have items or are today
   const relevantDays = deadlineDays.filter((d) => d.deadlines.length > 0 || d.isToday);
@@ -75,7 +115,9 @@ export function WeekOverview({ overview, courses, deadlineDays }: WeekOverviewPr
                       )}>
                         {dl.title}
                       </span>
-                      <span className="text-muted-foreground/60"> · {dl.dueDay}</span>
+                      {browserReady && (
+                        <span className="text-muted-foreground/60"> · {formatAcademicDueDateShort(dl.dueDate)}</span>
+                      )}
                     </span>
                   ))}
                 </div>

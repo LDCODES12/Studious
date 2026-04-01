@@ -12,7 +12,7 @@ import { computeLearningSignals } from "@/lib/learning-signals";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import { SyncStatusBanner } from "@/components/dashboard/sync-status-banner";
 import { WeekOverview } from "@/components/dashboard/week-overview";
-import { getOrCreateWeekOverview, buildWeekCourses, buildDeadlineDays, applyDetectedTermBreaks } from "@/lib/week-overview";
+import { getOrCreateWeekOverview, buildWeekCourses, applyDetectedTermBreaks } from "@/lib/week-overview";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 
 export default async function DashboardPage() {
@@ -154,7 +154,6 @@ export default async function DashboardPage() {
     ? await getOrCreateWeekOverview(userId, normalizedCourseContexts, learningSignals, dashboardCalendarNow)
     : null;
   const weekCourses = normalizedCourseContexts.length > 0 ? buildWeekCourses(normalizedCourseContexts, dashboardCalendarNow) : [];
-  const deadlineDays = normalizedCourseContexts.length > 0 ? buildDeadlineDays(normalizedCourseContexts, dashboardCalendarNow) : [];
 
   // Pre-class prompts from course contexts
   const isSemanticTopic = (name: string) =>
@@ -194,7 +193,7 @@ export default async function DashboardPage() {
 
       {/* Week overview — AI-generated timeline */}
       {weekOverview && weekCourses.length > 0 && (
-        <WeekOverview overview={weekOverview} courses={weekCourses} deadlineDays={deadlineDays} />
+        <WeekOverview overview={weekOverview} courses={weekCourses} />
       )}
 
       {/* Pre-class prompts — most time-sensitive, shown first */}
