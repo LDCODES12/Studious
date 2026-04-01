@@ -1087,32 +1087,49 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                         ? existing.autoStoredForAI || existing.storedForAI
                         : existing.autoStoredForAI,
                   });
-                  if (sourceKind === "canvas_module" && mt.sourceKey) importedCandidateIds.add(mt.sourceKey);
+                  if ((sourceKind === "canvas_module" || sourceKind === "canvas_media") && mt.sourceKey) {
+                    importedCandidateIds.add(mt.sourceKey);
+                  }
                   dbg.materials.push({ fileName: mt.fileName, detectedType: existing.detectedType, chars: pdfText.length });
                   return;
                 }
 
                 const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
-                const autoStoredForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
+                const detectedType =
+                  sourceKind === "canvas_media" && analysis.detectedType === "other"
+                    ? "lecture_notes"
+                    : analysis.detectedType;
+                const summary =
+                  sourceKind === "canvas_media" && analysis.summary === "Unable to analyze document."
+                    ? "Auto-imported lecture transcript from Canvas Media Gallery."
+                    : analysis.summary;
+                const autoStoredForAI =
+                  sourceKind === "canvas_media" ||
+                  ["lecture_notes", "lecture_slides", "textbook"].includes(detectedType);
                 const material = await saveSyncedMaterial({
                   existing,
                   courseId: scCourseId,
                   fileName: mt.fileName,
-                  detectedType: analysis.detectedType,
-                  sourceRole: inferMaterialSourceRole(analysis.detectedType, mt.fileName),
+                  detectedType,
+                  sourceRole:
+                    sourceKind === "canvas_media"
+                      ? "content"
+                      : inferMaterialSourceRole(detectedType, mt.fileName),
                   sourceKind,
                   sourceKey,
-                  summary: analysis.summary,
+                  summary,
                   relatedTopics: analysis.relatedTopics,
                   rawText: pdfText.slice(0, 25_000),
                   contentHash,
                   autoStoredForAI,
                 });
-                if (sourceKind === "canvas_module" && mt.sourceKey) importedCandidateIds.add(mt.sourceKey);
+                if ((sourceKind === "canvas_module" || sourceKind === "canvas_media") && mt.sourceKey) {
+                  importedCandidateIds.add(mt.sourceKey);
+                }
                 try {
                   await updateMaterialEmbedding(material.id, pdfText);
                 } catch { /* embedding failure never blocks import */ }
-                dbg.materials.push({ fileName: mt.fileName, detectedType: analysis.detectedType, chars: pdfText.length });
+                dbg.materials.push({ fileName: mt.fileName, detectedType, chars: pdfText.length });
               } catch {
                 dbg.materials.push({ fileName: mt.fileName, detectedType: "error", chars: pdfText.length });
               }

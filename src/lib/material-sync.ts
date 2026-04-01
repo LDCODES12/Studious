@@ -5,6 +5,7 @@ import { generateEmbedding } from "@/lib/embeddings";
 export type MaterialSourceKind =
   | "canvas_syllabus"
   | "canvas_module"
+  | "canvas_media"
   | "manual_upload"
   | "auto_route"
   | "legacy";

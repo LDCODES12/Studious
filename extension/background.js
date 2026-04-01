@@ -235,8 +235,27 @@ async function handleCanvasData(payload) {
       }
     }
 
+    // ── Step 1b: Discover Kaltura / Media Gallery transcript attachments ────
+    // Transcript .txt attachments are high-value lecture material: they contain
+    // the spoken lecture itself, but they live outside the normal module PDF
+    // workflow. We discover them from the Media Gallery tab and feed them into
+    // the regular material sync as plain text.
+    const coursesWithMediaGallery = payload.courses.filter((c) => c.mediaGalleryTabUrl);
+    if (coursesWithMediaGallery.length > 0) {
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 87, label: "Checking lecture transcripts…" });
+      try {
+        await syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, coursesWithMediaGallery);
+      } catch (err) {
+        syncLog("media_sync_err", { error: err?.message ?? String(err) });
+        console.warn("[worker] Media transcript sync failed (non-fatal):", err?.message ?? err);
+      }
+    }
+
     // Clean up — server doesn't need these
-    for (const c of payload.courses) delete c.gradescopeTabUrl;
+    for (const c of payload.courses) {
+      delete c.gradescopeTabUrl;
+      delete c.mediaGalleryTabUrl;
+    }
 
     // ── Step 2: Extract text from all PDF URLs via the offscreen document ─────
     const totalPdfs = payload.courses.reduce(
@@ -251,8 +270,8 @@ async function handleCanvasData(payload) {
       });
 
       for (const course of payload.courses) {
-        course.syllabusTexts = [];
-        course.materialTexts = [];
+        course.syllabusTexts = course.syllabusTexts ?? [];
+        course.materialTexts = course.materialTexts ?? [];
       }
 
       const allPdfTasks = [];
@@ -306,8 +325,8 @@ async function handleCanvasData(payload) {
       }
     } else {
       for (const course of payload.courses) {
-        course.syllabusTexts = [];
-        course.materialTexts = [];
+        course.syllabusTexts = course.syllabusTexts ?? [];
+        course.materialTexts = course.materialTexts ?? [];
         delete course.syllabusFileUrls;
         delete course.materialFileUrls;
       }
@@ -423,6 +442,362 @@ async function resolveGradescopeCourseId(tabId, canvasTabUrl) {
     }
   }
   return null;
+}
+
+async function fetchPendingCandidateIds(scUrl, apiToken, canvasCourseId) {
+  try {
+    const res = await fetch(
+      `https://${scUrl}/api/canvas/materials/pending?canvasCourseId=${canvasCourseId}`,
+      { headers: { Authorization: `Bearer ${apiToken}` } }
+    );
+    if (!res.ok) return new Set();
+    const data = await res.json();
+    return new Set((data.candidates ?? []).map((candidate) => String(candidate.contentId)));
+  } catch {
+    return new Set();
+  }
+}
+
+async function fetchPlainTextFile(url) {
+  const res = await fetch(url, { credentials: "include" });
+  if (!res.ok) return "";
+  const buf = await res.arrayBuffer();
+  let text = new TextDecoder("utf-8").decode(buf);
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  return text.trim();
+}
+
+function buildMediaTranscriptContentId(mediaId, attachmentFileName, attachmentUrl) {
+  const normalizedMediaId = String(mediaId || "unknown")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .slice(0, 120);
+  const normalizedFile = encodeURIComponent(
+    String(attachmentFileName || attachmentUrl || "transcript.txt").trim().toLowerCase()
+  );
+  return `media:${normalizedMediaId}:${normalizedFile}`;
+}
+
+function buildMediaTranscriptDisplayName(mediaTitle, attachmentFileName) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const title = clean(mediaTitle);
+  const fileName = clean(attachmentFileName);
+  const opaqueAttachment =
+    !fileName ||
+    (/pid[\s._-]*\d+/i.test(fileName) && /^\d/.test(fileName)) ||
+    /^[\d\s._-]+\.txt$/i.test(fileName);
+
+  if (!title) return fileName || "Lecture transcript.txt";
+  if (opaqueAttachment) return `${title} transcript.txt`;
+  if (fileName.toLowerCase().includes(title.toLowerCase())) return fileName;
+  return `${title} — ${fileName}`;
+}
+
+async function collectMediaGalleryEntries(tabId) {
+  const frameResults = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () => {
+      const clean = (value) =>
+        String(value || "")
+          .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+      const findNearestSection = (node) => {
+        let current = node;
+        while (current && current !== document.body) {
+          let sibling = current.previousElementSibling;
+          while (sibling) {
+            const heading = sibling.matches?.("h1,h2,h3,h4,h5,h6")
+              ? sibling
+              : sibling.querySelector?.("h1,h2,h3,h4,h5,h6");
+            const text = clean(heading?.textContent);
+            if (text) return text;
+            sibling = sibling.previousElementSibling;
+          }
+          current = current.parentElement;
+        }
+        return null;
+      };
+
+      const titleFromAnchor = (anchor) =>
+        clean(anchor.getAttribute("aria-label")) ||
+        clean(anchor.querySelector("img")?.getAttribute("alt")) ||
+        clean(anchor.querySelector("h1,h2,h3,h4,h5,h6,.title,.media-title,.name,.video-title")?.textContent) ||
+        clean(anchor.textContent);
+
+      const results = [];
+      const seen = new Set();
+
+      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+        const href = anchor.href || "";
+        const mediaMatch =
+          href.match(/\/media\/([^/?#]+)/i) ||
+          href.match(/[?&]entry_id=([^&#]+)/i);
+        if (!mediaMatch?.[1]) continue;
+
+        const mediaId = mediaMatch[1];
+        if (seen.has(mediaId)) continue;
+
+        const title = titleFromAnchor(anchor);
+        if (!title || title.length < 4) continue;
+        if (/^(attachments|share|back|actions)$/i.test(title)) continue;
+
+        seen.add(mediaId);
+        results.push({
+          mediaId,
+          url: href,
+          title,
+          section: findNearestSection(anchor),
+        });
+      }
+
+      return results;
+    },
+  });
+
+  const merged = [];
+  const seen = new Set();
+  for (const frame of frameResults) {
+    for (const entry of frame?.result ?? []) {
+      const key = entry.mediaId || entry.url;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
+
+async function extractMediaTranscriptAttachments(tabId) {
+  const frameResults = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+      const findAttachmentsTab = () =>
+        Array.from(document.querySelectorAll("a,button,[role='tab']"))
+          .find((el) => /attachments/i.test(clean(el.textContent)));
+
+      const scanAttachments = () => {
+        const attachments = [];
+        const seen = new Set();
+        const extractSize = (text) => {
+          const match = clean(text).match(/(\d+(?:\.\d+)?)\s*(kb|mb|bytes?)/i);
+          if (!match) return null;
+          const value = Number(match[1]);
+          const unit = match[2].toLowerCase();
+          if (!Number.isFinite(value)) return null;
+          if (unit.startsWith("mb")) return Math.round(value * 1024 * 1024);
+          if (unit.startsWith("kb")) return Math.round(value * 1024);
+          return Math.round(value);
+        };
+
+        const extractUploadedAt = (row) => {
+          const text = clean(row.textContent);
+          const match = text.match(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}\b/i);
+          return match?.[0] ?? null;
+        };
+
+        const extractFileName = (row) => {
+          const explicit = clean(
+            row.querySelector("a[href], td, th, [class*='file'], [class*='name']")?.textContent
+          );
+          if (/\.txt\b/i.test(explicit)) {
+            const txtMatch = explicit.match(/([^/\\]+?\.txt)\b/i);
+            return txtMatch?.[1] ?? explicit;
+          }
+          const rowText = clean(row.textContent);
+          const txtMatch = rowText.match(/([^/\\]+?\.txt)\b/i);
+          return txtMatch?.[1] ?? null;
+        };
+
+        const containers = Array.from(
+          document.querySelectorAll("tr, li, .attachment, [class*='attachment'], [data-testid*='attachment']")
+        );
+        for (const row of containers) {
+          const rowText = clean(row.textContent);
+          if (!/\.txt\b/i.test(rowText)) continue;
+
+          const fileName = extractFileName(row);
+          if (!fileName) continue;
+
+          const downloadUrl =
+            row.querySelector("a[download][href]")?.href ||
+            row.querySelector("a[href*='download']")?.href ||
+            row.querySelector("a[href]")?.href ||
+            row.querySelector("[data-download-url]")?.getAttribute("data-download-url") ||
+            row.querySelector("[data-url]")?.getAttribute("data-url") ||
+            null;
+          if (!downloadUrl) continue;
+
+          const key = `${fileName}|${downloadUrl}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          attachments.push({
+            fileName,
+            url: downloadUrl,
+            uploadedAt: extractUploadedAt(row),
+            size: extractSize(rowText),
+          });
+        }
+
+        if (attachments.length > 0) return attachments;
+
+        for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+          const label = clean(anchor.textContent) || clean(anchor.getAttribute("aria-label"));
+          const href = anchor.href || "";
+          if (!label && !href) continue;
+          const fileNameMatch = label.match(/([^/\\]+?\.txt)\b/i) || href.match(/([^/\\?&#]+?\.txt)\b/i);
+          if (!fileNameMatch?.[1]) continue;
+          const key = `${fileNameMatch[1]}|${href}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          attachments.push({
+            fileName: fileNameMatch[1],
+            url: href,
+            uploadedAt: null,
+            size: null,
+          });
+        }
+
+        return attachments;
+      };
+
+      const attachmentsTab = findAttachmentsTab();
+      if (attachmentsTab) attachmentsTab.click();
+
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const found = scanAttachments();
+        if (found.length > 0) return found;
+        await sleep(400);
+      }
+
+      return scanAttachments();
+    },
+  });
+
+  const merged = [];
+  const seen = new Set();
+  for (const frame of frameResults) {
+    for (const attachment of frame?.result ?? []) {
+      const key = `${attachment.fileName}|${attachment.url}`;
+      if (!attachment?.url || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(attachment);
+    }
+  }
+  return merged;
+}
+
+async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
+  const MAX_MEDIA_ITEMS_TO_INSPECT = 24;
+  const MAX_AUTO_IMPORTS_PER_COURSE = 8;
+
+  const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
+  const mediaTabId = tab.id;
+  await waitForTabLoad(mediaTabId, 30_000);
+
+  try {
+    for (const course of courses) {
+      const requestedIds = await fetchPendingCandidateIds(scUrl, apiToken, course.id);
+      course.materialCandidates = course.materialCandidates ?? [];
+      course.materialTexts = course.materialTexts ?? [];
+
+      try {
+        await chrome.tabs.update(mediaTabId, { url: course.mediaGalleryTabUrl });
+        await waitForTabLoad(mediaTabId, 30_000);
+
+        const galleryEntries = await collectMediaGalleryEntries(mediaTabId);
+        if (galleryEntries.length === 0) {
+          syncLog("media_gallery_empty", { course: course.name });
+          continue;
+        }
+
+        const entriesToInspect = galleryEntries.slice(0, MAX_MEDIA_ITEMS_TO_INSPECT);
+        const seenCandidateIds = new Set(course.materialCandidates.map((candidate) => candidate.contentId));
+        const downloadedIds = new Set(course.materialTexts.map((material) => material.sourceKey).filter(Boolean));
+        let autoImportedCount = 0;
+        let transcriptCount = 0;
+
+        syncLog("media_gallery_found", {
+          course: course.name,
+          entries: galleryEntries.length,
+          inspecting: entriesToInspect.length,
+        });
+
+        for (const entry of entriesToInspect) {
+          try {
+            await chrome.tabs.update(mediaTabId, { url: entry.url });
+            await waitForTabLoad(mediaTabId, 30_000);
+
+            const attachments = await extractMediaTranscriptAttachments(mediaTabId);
+            if (attachments.length === 0) continue;
+
+            for (const attachment of attachments) {
+              const contentId = buildMediaTranscriptContentId(entry.mediaId, attachment.fileName, attachment.url);
+              const displayName = buildMediaTranscriptDisplayName(entry.title, attachment.fileName);
+              const moduleName = entry.section ? `Kaltura Media Gallery · ${entry.section}` : "Kaltura Media Gallery";
+
+              if (!seenCandidateIds.has(contentId)) {
+                seenCandidateIds.add(contentId);
+                course.materialCandidates.push({
+                  fileName: displayName,
+                  moduleName,
+                  contentId,
+                  sourceKind: "canvas_media",
+                  remoteSize: attachment.size ?? null,
+                  remoteUpdatedAt: attachment.uploadedAt ?? null,
+                });
+              }
+
+              const shouldAutoImport = autoImportedCount < MAX_AUTO_IMPORTS_PER_COURSE;
+              const shouldDownload = requestedIds.has(contentId) || shouldAutoImport;
+              if (!shouldDownload || downloadedIds.has(contentId)) continue;
+
+              const text = await fetchPlainTextFile(attachment.url);
+              if (text.length < 100) continue;
+
+              downloadedIds.add(contentId);
+              course.materialTexts.push({
+                fileName: displayName,
+                text,
+                sourceKey: contentId,
+                sourceKind: "canvas_media",
+                remoteSize: attachment.size ?? null,
+                remoteUpdatedAt: attachment.uploadedAt ?? null,
+              });
+              transcriptCount++;
+              if (!requestedIds.has(contentId)) autoImportedCount++;
+            }
+          } catch (err) {
+            syncLog("media_entry_err", {
+              course: course.name,
+              title: entry.title,
+              error: err?.message ?? String(err),
+            });
+          }
+        }
+
+        syncLog("media_gallery_done", {
+          course: course.name,
+          transcriptsImported: transcriptCount,
+          candidates: course.materialCandidates.filter((candidate) => candidate.sourceKind === "canvas_media").length,
+        });
+      } catch (err) {
+        syncLog("media_course_err", {
+          course: course.name,
+          error: err?.message ?? String(err),
+        });
+      }
+    }
+  } finally {
+    if (mediaTabId) {
+      try { await chrome.tabs.remove(mediaTabId); } catch { /* already closed */ }
+    }
+  }
 }
 
 /**

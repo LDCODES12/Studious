@@ -15,6 +15,8 @@
  *   - syllabus_body HTML (Canvas's built-in syllabus page)
  *   - Syllabus PDF URLs (auto-detected by name + peek; URLs sent to background
  *     which routes them through an offscreen document for text extraction)
+ *   - Media Gallery tab URL (used by background.js to discover Kaltura lecture
+ *     transcript attachments without asking the server to scrape Canvas)
  *
  * PDF text extraction is handled entirely in the browser via pdfjs-dist
  * running in an offscreen document — the server receives plain text, not binary.
@@ -199,6 +201,8 @@ function extractScheduleSection(html) {
         materialCandidates: [],
         // Populated below: PDFs to actually download (1 auto/module + requested)
         materialFileUrls: [],
+        // Kaltura / Media Gallery tab discovered from course navigation
+        mediaGalleryTabUrl: null,
         // Term dates for classSchedule semesterStart/End
         termStartAt: c.term?.start_at ?? null,
         termEndAt: c.term?.end_at ?? null,
@@ -219,8 +223,9 @@ function extractScheduleSection(html) {
       const pct = 15 + Math.floor((i / total) * 70);
       progress(pct, `Syncing ${course.name}… (${i + 1}/${total})`);
 
-      // ── Gradescope tab detection (Canvas navigation sidebar) ──────────────
-      // The tabs API returns relative URLs — make them absolute for chrome.tabs.update
+      // ── External tool tab detection (Canvas navigation sidebar) ───────────
+      // The tabs API returns relative URLs — make them absolute for
+      // chrome.tabs.update in background.js.
       try {
         const navTabs = await fetchAll(`${BASE}/courses/${course.id}/tabs`);
         const gsTab = navTabs.find((t) => /gradescope/i.test(t.label ?? ""));
@@ -230,6 +235,15 @@ function extractScheduleSection(html) {
             ? rawUrl
             : window.location.origin + rawUrl;
           console.log(`[scout] ${course.name}: found Gradescope tab → ${course.gradescopeTabUrl}`);
+        }
+
+        const mediaTab = navTabs.find((t) => /media\s+gallery|kaltura/i.test(t.label ?? ""));
+        if (mediaTab) {
+          const rawUrl = mediaTab.full_url || mediaTab.html_url || mediaTab.url || "";
+          course.mediaGalleryTabUrl = rawUrl.startsWith("http")
+            ? rawUrl
+            : window.location.origin + rawUrl;
+          console.log(`[scout] ${course.name}: found Media Gallery tab → ${course.mediaGalleryTabUrl}`);
         }
       } catch (err) {
         console.warn(`[scout] ${course.name}: tabs API error — ${err?.message}`);
