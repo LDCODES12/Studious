@@ -3,9 +3,9 @@
 import { AIChat } from "@/components/chat/ai-chat";
 
 const SUGGESTED_PROMPTS = [
-  "What topics should I review before next class?",
-  "Help me break down my next assignment",
-  "Generate practice problems on this week's material",
+  { label: "What topics should I review before next class?", prompt: "What topics should I review before next class?" },
+  { label: "Help me break down my next assignment", prompt: "Help me break down my next assignment" },
+  { label: "Generate practice problems on this week's material", prompt: "Generate practice problems on this week's material" },
 ];
 
 export function CourseChat({ courseId }: { courseId: string }) {

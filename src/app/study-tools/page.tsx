@@ -58,6 +58,7 @@ export default async function StudyToolsPage() {
           },
           materialCandidates: {
             select: {
+              id: true,
               fileName: true,
               moduleName: true,
               requested: true,

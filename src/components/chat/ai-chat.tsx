@@ -5,10 +5,24 @@ import { DefaultChatTransport } from "ai";
 import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { StudyTargetEvidence } from "@/lib/study-targets";
+import { summarizeStudyTargetEvidence } from "@/lib/study-target-presenters";
+
+export interface AIChatPromptOption {
+  label: string;
+  prompt: string;
+  context?: {
+    courseId?: string;
+    courseName?: string;
+    topicName?: string;
+    targetEvidence?: StudyTargetEvidence;
+  };
+  note?: string;
+}
 
 interface AIChatProps {
   courseId?: string;
-  suggestedPrompts: string[];
+  suggestedPrompts: AIChatPromptOption[];
   placeholder?: string;
   emptyMessage?: string;
 }
@@ -20,14 +34,25 @@ export function AIChat({
   emptyMessage = "Ask anything — topics, assignments, study planning.",
 }: AIChatProps) {
   const [input, setInput] = useState("");
+  const baseContext = courseId ? { courseId } : undefined;
+  const [activeContext, setActiveContext] = useState<AIChatPromptOption["context"] | undefined>(baseContext);
+  const activeContextRef = useRef<AIChatPromptOption["context"] | undefined>(baseContext);
   const { messages, sendMessage, status } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
-      body: courseId ? { courseId } : {},
       prepareSendMessagesRequest: ({ messages: msgs, body }) => {
         const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
         const rid = (lastAssistant?.metadata as { responseId?: string } | undefined)?.responseId;
-        return { body: { ...body, ...(rid ? { previousResponseId: rid } : {}) } };
+        const context = activeContextRef.current;
+        return {
+          body: {
+            ...body,
+            ...(context?.courseId ? { courseId: context.courseId } : {}),
+            ...(context?.topicName ? { topicName: context.topicName } : {}),
+            ...(context?.targetEvidence ? { targetEvidence: context.targetEvidence } : {}),
+            ...(rid ? { previousResponseId: rid } : {}),
+          },
+        };
       },
     }),
   });
@@ -38,6 +63,10 @@ export function AIChat({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    activeContextRef.current = activeContext;
+  }, [activeContext]);
 
   function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
@@ -59,15 +88,54 @@ export function AIChat({
     }
   }
 
-  function handleSuggestedPrompt(prompt: string) {
-    sendMessage({ text: prompt });
+  function handleSuggestedPrompt(prompt: AIChatPromptOption) {
+    const nextContext = prompt.context ?? baseContext;
+    activeContextRef.current = nextContext;
+    setActiveContext(nextContext);
+    sendMessage({ text: prompt.prompt });
   }
+
+  function clearFocus() {
+    activeContextRef.current = baseContext;
+    setActiveContext(baseContext);
+  }
+
+  const focusLines = activeContext?.targetEvidence
+    ? summarizeStudyTargetEvidence(activeContext.targetEvidence)
+    : [];
 
   return (
     <div
       className="flex flex-col rounded-lg border border-border bg-card"
       style={{ height: "60vh", minHeight: "400px" }}
     >
+      {activeContext?.topicName && (
+        <div className="border-b border-border px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-medium text-muted-foreground">
+                Focused study context
+              </p>
+              <p className="text-sm font-medium leading-snug">
+                {activeContext.courseName ? `${activeContext.courseName}: ` : ""}
+                {activeContext.topicName}
+              </p>
+              {focusLines.length > 0 && (
+                <p className="mt-1 text-[11px] text-muted-foreground line-clamp-2">
+                  {focusLines.join(" • ")}
+                </p>
+              )}
+            </div>
+            <button
+              onClick={clearFocus}
+              className="shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              Clear focus
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Message list */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 ? (
@@ -76,12 +144,17 @@ export function AIChat({
             <div className="flex flex-col gap-2 w-full max-w-sm">
               {suggestedPrompts.map((prompt) => (
                 <button
-                  key={prompt}
+                  key={`${prompt.label}-${prompt.prompt}`}
                   onClick={() => handleSuggestedPrompt(prompt)}
                   disabled={isLoading}
                   className="rounded-lg border border-border bg-muted px-4 py-2 text-sm text-left hover:bg-accent transition-colors disabled:opacity-50"
                 >
-                  {prompt}
+                  <span className="block">{prompt.label}</span>
+                  {prompt.note && (
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
+                      {prompt.note}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

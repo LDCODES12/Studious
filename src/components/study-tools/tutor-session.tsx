@@ -8,6 +8,10 @@ import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import Link from "next/link";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
+import {
+  getImportableCandidate,
+  summarizeStudyTargetEvidence,
+} from "@/lib/study-target-presenters";
 
 interface TutorSessionProps {
   courseId?: string;
@@ -27,7 +31,18 @@ export function TutorSession({
   targetEvidence,
 }: TutorSessionProps) {
   const [input, setInput] = useState("");
+  const [candidateState, setCandidateState] = useState(targetEvidence?.candidates ?? []);
+  const [requestingCandidateId, setRequestingCandidateId] = useState<string | null>(null);
   const colors = courseColor ? courseColors[courseColor] : null;
+  const evidenceForDisplay = targetEvidence
+    ? { ...targetEvidence, candidates: candidateState }
+    : undefined;
+  const evidenceLines = evidenceForDisplay
+    ? summarizeStudyTargetEvidence(evidenceForDisplay)
+    : [];
+  const importCandidate = evidenceForDisplay
+    ? getImportableCandidate(evidenceForDisplay)
+    : null;
 
   const { messages, sendMessage, status } = useChat({
     transport: new DefaultChatTransport({
@@ -53,6 +68,10 @@ export function TutorSession({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    setCandidateState(targetEvidence?.candidates ?? []);
+  }, [targetEvidence]);
 
   // Auto-start: send initial prompt when topic is provided
   const startedRef = useRef(false);
@@ -90,6 +109,34 @@ export function TutorSession({
     }
   }
 
+  async function handleRequestCandidate() {
+    if (!courseId || !importCandidate || requestingCandidateId) return;
+
+    setRequestingCandidateId(importCandidate.id);
+    try {
+      const res = await fetch(
+        `/api/courses/${courseId}/materials/candidates/${importCandidate.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ requested: true }),
+        }
+      );
+
+      if (res.ok) {
+        setCandidateState((prev) =>
+          prev.map((candidate) =>
+            candidate.id === importCandidate.id
+              ? { ...candidate, requested: true }
+              : candidate
+          )
+        );
+      }
+    } finally {
+      setRequestingCandidateId(null);
+    }
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -119,6 +166,27 @@ export function TutorSession({
               <p className="mt-0.5 text-[11px] text-muted-foreground/70">
                 {readings.join(", ")}
               </p>
+            )}
+            {evidenceLines.length > 0 && (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {evidenceLines.join(" • ")}
+              </p>
+            )}
+            {courseId && importCandidate && !evidenceForDisplay?.materials.length && (
+              <div className="mt-3 rounded-md border border-dashed border-border px-3 py-2">
+                <p className="text-[11px] text-muted-foreground">
+                  Best supporting Canvas file: {importCandidate.fileName}
+                </p>
+                <button
+                  onClick={handleRequestCandidate}
+                  disabled={!!requestingCandidateId}
+                  className="mt-2 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                >
+                  {requestingCandidateId === importCandidate.id
+                    ? "Adding..."
+                    : "Add top Canvas file"}
+                </button>
+              </div>
             )}
           </div>
         )}

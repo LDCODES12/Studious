@@ -8,44 +8,11 @@ import { buildStudyContext } from "@/lib/course-context";
 import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
+import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
 
 export const maxDuration = 60;
 
 type RetrievedMaterial = { id: string; fileName: string; rawText: string };
-type RequestUIPart = { type: "text"; text: string };
-type RequestUIMessage = {
-  role: "system" | "user" | "assistant";
-  parts: RequestUIPart[];
-};
-
-function sanitizeUiMessages(input: unknown): RequestUIMessage[] {
-  if (!Array.isArray(input)) return [];
-
-  return input.flatMap((message) => {
-    if (!message || typeof message !== "object") return [];
-
-    const role = "role" in message ? message.role : undefined;
-    if (role !== "system" && role !== "user" && role !== "assistant") return [];
-
-    const rawParts = "parts" in message ? message.parts : undefined;
-    const parts = Array.isArray(rawParts)
-      ? rawParts.flatMap((part) => {
-          if (!part || typeof part !== "object") return [];
-          if (!("type" in part) || part.type !== "text") return [];
-          if (!("text" in part) || typeof part.text !== "string") return [];
-          return [{ type: "text" as const, text: part.text }];
-        })
-      : [];
-
-    return [{ role, parts }];
-  });
-}
-
-function extractTextFromParts(parts: RequestUIPart[] | undefined): string {
-  return (parts ?? [])
-    .map((part) => part.text)
-    .join("");
-}
 
 function mergeMaterials(
   preferred: RetrievedMaterial[],
@@ -144,8 +111,10 @@ export async function POST(request: NextRequest) {
     const lines: string[] = [];
     if (targetEvidence.weekLabel) lines.push(`Selected study target comes from: ${targetEvidence.weekLabel}`);
     if (targetEvidence.readings.length > 0) lines.push(`Related readings: ${targetEvidence.readings.join(", ")}`);
-    if (targetEvidence.materialFileNames.length > 0) lines.push(`Most relevant imported materials: ${targetEvidence.materialFileNames.join(", ")}`);
-    if (targetEvidence.candidateModuleNames.length > 0) lines.push(`Nearby Canvas modules: ${targetEvidence.candidateModuleNames.join(" | ")}`);
+    if (targetEvidence.materials.length > 0) lines.push(`Most relevant imported materials: ${targetEvidence.materials.map((material) => material.fileName).join(", ")}`);
+    if (targetEvidence.candidates.length > 0) {
+      lines.push(`Nearby Canvas modules: ${[...new Set(targetEvidence.candidates.map((candidate) => candidate.moduleName))].join(" | ")}`);
+    }
     if (lines.length > 0) {
       targetContext = `\n\nSelected study target evidence:\n${lines.map((line) => `- ${line}`).join("\n")}`;
     }
@@ -160,7 +129,7 @@ export async function POST(request: NextRequest) {
 
       const evidenceTerms = [
         ...(targetEvidence?.readings ?? []),
-        ...(targetEvidence?.candidateModuleNames ?? []),
+        ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
         targetEvidence?.weekLabel ?? "",
       ]
         .filter(Boolean)
@@ -176,8 +145,8 @@ export async function POST(request: NextRequest) {
 
       if (ragQuery) {
         const [preferredMaterials, semanticMaterials] = await Promise.all([
-          targetEvidence?.materialIds?.length
-            ? getMaterialsByIds(courseId, targetEvidence.materialIds.slice(0, 3))
+          targetEvidence?.materials?.length
+            ? getMaterialsByIds(courseId, targetEvidence.materials.map((material) => material.id).slice(0, 3))
             : Promise.resolve([]),
           (async () => {
             const vector = await generateEmbedding(ragQuery);
@@ -192,10 +161,10 @@ export async function POST(request: NextRequest) {
             materials
               .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 800)}`)
               .join("\n\n");
-        } else if (targetEvidence?.candidateFileNames?.length) {
+        } else if (targetEvidence?.candidates?.length) {
           materialContext =
             "\n\nRelevant Canvas files exist for this topic, but their contents are not imported yet:\n" +
-            targetEvidence.candidateFileNames.slice(0, 5).map((name) => `- ${name}`).join("\n") +
+            targetEvidence.candidates.slice(0, 5).map((candidate) => `- ${candidate.fileName}`).join("\n") +
             "\nUse the week and reading context you do have, and be honest that you cannot quote from those files yet.";
         } else {
           materialContext = "\n\nNote: No course materials were found for this topic. Be honest about this — do not claim you can see documents you cannot. If the student asks about specific documents, tell them you don't have access to those materials.";

@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import { Send } from "lucide-react";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
+import { summarizeStudyTargetEvidence } from "@/lib/study-target-presenters";
 
 export interface TutorTopic {
   courseId: string;
@@ -57,6 +58,7 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             {topics.map((topic) => {
               const colors = courseColors[topic.courseColor];
+              const evidenceLines = summarizeStudyTargetEvidence(topic.evidence);
               return (
                 <button
                   key={`${topic.courseId}-${topic.topicName}`}
@@ -80,6 +82,11 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
                   {topic.readings.length > 0 && (
                     <p className="mt-1 text-[11px] text-muted-foreground/70 line-clamp-1">
                       {topic.readings.join(", ")}
+                    </p>
+                  )}
+                  {!topic.readings.length && evidenceLines.length > 0 && (
+                    <p className="mt-1 text-[11px] text-muted-foreground/70 line-clamp-2">
+                      {evidenceLines.join(" • ")}
                     </p>
                   )}
                   <span className="mt-2 inline-block text-[11px] font-medium text-muted-foreground group-hover:text-foreground transition-colors">

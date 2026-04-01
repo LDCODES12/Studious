@@ -24,10 +24,16 @@ export interface StudyTargetEvidence {
   source: StudyTarget["source"];
   weekLabel: string | null;
   readings: string[];
-  materialIds: string[];
-  materialFileNames: string[];
-  candidateModuleNames: string[];
-  candidateFileNames: string[];
+  materials: Array<{
+    id: string;
+    fileName: string;
+  }>;
+  candidates: Array<{
+    id: string;
+    fileName: string;
+    moduleName: string;
+    requested: boolean;
+  }>;
 }
 
 export interface StudyTargetCourseInput
@@ -40,6 +46,7 @@ export interface StudyTargetCourseInput
     relatedTopics: string[];
   }[];
   materialCandidates?: {
+    id: string;
     fileName: string;
     moduleName: string;
     requested?: boolean;
@@ -327,17 +334,22 @@ function buildTargetEvidence(
     .slice(0, 5)
     .map((entry) => entry.candidate);
 
-  const candidateModuleNames = [...new Set(matchedCandidates.map((candidate) => candidate.moduleName))].slice(0, 3);
-  const candidateFileNames = matchedCandidates.map((candidate) => candidate.fileName).slice(0, 5);
+  const candidates = matchedCandidates.slice(0, 3).map((candidate) => ({
+    id: candidate.id,
+    fileName: candidate.fileName,
+    moduleName: candidate.moduleName,
+    requested: !!candidate.requested,
+  }));
 
   return {
     source: target.source,
     weekLabel: target.weekLabel,
     readings: target.readings,
-    materialIds: matchedMaterials.map((material) => material.id),
-    materialFileNames: matchedMaterials.map((material) => material.fileName),
-    candidateModuleNames,
-    candidateFileNames,
+    materials: matchedMaterials.map((material) => ({
+      id: material.id,
+      fileName: material.fileName,
+    })),
+    candidates,
   };
 }
 

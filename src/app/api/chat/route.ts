@@ -3,12 +3,29 @@ import { streamText, convertToModelMessages } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
-import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
+import { generateEmbedding, getMaterialsByIds, searchMaterials } from "@/lib/embeddings";
 import { buildStudyContext } from "@/lib/course-context";
 import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
+import type { StudyTargetEvidence } from "@/lib/study-targets";
+import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
 
 export const maxDuration = 60;
+
+type RetrievedMaterial = { id: string; fileName: string; rawText: string };
+
+function mergeMaterials(
+  preferred: RetrievedMaterial[],
+  semantic: RetrievedMaterial[],
+  limit: number
+): RetrievedMaterial[] {
+  const merged = new Map<string, RetrievedMaterial>();
+  for (const material of [...preferred, ...semantic]) {
+    if (!merged.has(material.id)) merged.set(material.id, material);
+    if (merged.size >= limit) break;
+  }
+  return [...merged.values()];
+}
 
 // ── Learning-aligned system prompt instructions ──────────────────────────────
 
@@ -87,8 +104,22 @@ export async function POST(request: NextRequest) {
 
   const log = apiLogger("POST /api/chat", session.user.id);
 
-  const { messages: uiMessages, courseId, previousResponseId } = await request.json();
-  log.info("chat request", { courseId, hasPrevResponse: !!previousResponseId, messageCount: uiMessages?.length ?? 0 });
+  const body = await request.json() as {
+    messages?: unknown;
+    courseId?: string;
+    topicName?: string;
+    targetEvidence?: StudyTargetEvidence;
+    previousResponseId?: string;
+  };
+  const uiMessages = sanitizeUiMessages(body.messages);
+  const { courseId, topicName, targetEvidence, previousResponseId } = body;
+  log.info("chat request", {
+    courseId,
+    topicName,
+    evidenceSource: targetEvidence?.source ?? null,
+    hasPrevResponse: !!previousResponseId,
+    messageCount: uiMessages?.length ?? 0,
+  });
 
   // Log first message of a chat session as an intervention event
   const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
@@ -97,7 +128,11 @@ export async function POST(request: NextRequest) {
       data: {
         userId: session.user.id,
         type: "chat_session",
-        metadata: { courseId: courseId ?? null },
+        metadata: {
+          courseId: courseId ?? null,
+          topicName: topicName ?? null,
+          targetSource: targetEvidence?.source ?? null,
+        },
       },
     }).catch(() => {});
   }
@@ -109,24 +144,65 @@ export async function POST(request: NextRequest) {
     return new Response(JSON.stringify({ error: "Course not found" }), { status: 404 });
   }
 
+  let targetContext = "";
+  if (targetEvidence) {
+    const lines: string[] = [];
+    if (targetEvidence.weekLabel) lines.push(`Selected study target comes from: ${targetEvidence.weekLabel}`);
+    if (targetEvidence.readings.length > 0) lines.push(`Related readings: ${targetEvidence.readings.join(", ")}`);
+    if (targetEvidence.materials.length > 0) {
+      lines.push(`Most relevant imported materials: ${targetEvidence.materials.map((material) => material.fileName).join(", ")}`);
+    }
+    if (targetEvidence.candidates.length > 0) {
+      lines.push(`Nearby Canvas modules: ${[...new Set(targetEvidence.candidates.map((candidate) => candidate.moduleName))].join(" | ")}`);
+    }
+    if (lines.length > 0) {
+      targetContext = `\n\nSelected study target evidence:\n${lines.map((line) => `- ${line}`).join("\n")}`;
+    }
+  }
+
   // RAG: embed last user message for single-course mode
   let materialContext = "";
   if (courseId) {
-    const lastUserMsg = [...(uiMessages ?? [])].reverse().find((m: { role: string }) => m.role === "user");
-    const lastUserText = lastUserMsg?.parts
-      ?.filter((p: { type: string }) => p.type === "text")
-      .map((p: { text: string }) => p.text)
-      .join("") ?? "";
-    if (lastUserText) {
+    const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
+    const lastUserText = extractTextFromParts(lastUserMsg?.parts);
+    const evidenceTerms = [
+      ...(targetEvidence?.readings ?? []),
+      ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
+      targetEvidence?.weekLabel ?? "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const ragQueryBase = topicName
+      ? (lastUserText ? `${topicName}: ${lastUserText}` : topicName)
+      : lastUserText;
+    const ragQuery = ragQueryBase
+      ? [ragQueryBase, evidenceTerms].filter(Boolean).join(" | ")
+      : evidenceTerms || null;
+
+    if (ragQuery) {
       try {
-        const vector = await generateEmbedding(lastUserText);
-        const materials = await searchMaterials(courseId, vector, 3);
+        const [preferredMaterials, semanticMaterials] = await Promise.all([
+          targetEvidence?.materials?.length
+            ? getMaterialsByIds(courseId, targetEvidence.materials.map((material) => material.id).slice(0, 3))
+            : Promise.resolve([]),
+          (async () => {
+            const vector = await generateEmbedding(ragQuery);
+            return searchMaterials(courseId, vector, 5);
+          })(),
+        ]);
+
+        const materials = mergeMaterials(preferredMaterials, semanticMaterials, 3);
         if (materials.length > 0) {
           materialContext =
             "\n\nRelevant course material:\n" +
             materials
               .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 500)}`)
               .join("\n\n");
+        } else if (targetEvidence?.candidates?.length) {
+          materialContext =
+            "\n\nRelevant Canvas files exist for this topic, but their contents are not imported yet:\n" +
+            targetEvidence.candidates.slice(0, 5).map((candidate) => `- ${candidate.fileName}`).join("\n") +
+            "\nUse the week and reading context you do have, and be honest that you cannot quote from those files yet.";
         }
       } catch { /* RAG failure is non-fatal */ }
     }
@@ -163,7 +239,7 @@ export async function POST(request: NextRequest) {
 
 Today is ${today}.
 ${adaptiveRules}
-${promptText}${materialContext}`;
+${promptText}${targetContext}${materialContext}`;
 
   // ── Responses API conversation chaining ──────────────────────────────────
   // previousResponseId comes from the client (round-tripped via message metadata).
@@ -174,10 +250,7 @@ ${promptText}${materialContext}`;
   const result = previousResponseId
     ? (() => {
         const lastMsg = uiMessages[uiMessages.length - 1];
-        const lastText = (lastMsg.parts ?? [])
-          .filter((p: { type: string }) => p.type === "text")
-          .map((p: { text: string }) => p.text)
-          .join("");
+        const lastText = extractTextFromParts(lastMsg?.parts);
         log.info("streaming continuation", { previousResponseId });
         return streamText({
           ...config,

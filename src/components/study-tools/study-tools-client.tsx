@@ -6,18 +6,17 @@ import { cn } from "@/lib/utils";
 import { AIChat } from "@/components/chat/ai-chat";
 import { StudyPlanPanel } from "@/components/study-tools/study-plan-panel";
 import { TutorTopicPicker, type TutorTopic } from "@/components/study-tools/tutor-topic-picker";
-
-const CROSS_COURSE_PROMPTS = [
-  "What should I focus on today?",
-  "Which assignments are most urgent right now?",
-  "Help me plan my study sessions for this week",
-  "What topics should I review before my next class?",
-];
+import { buildStudyAssistantPromptOptions } from "@/lib/study-target-presenters";
 
 type Tab = "tutor" | "chat" | "plan";
 
 export function StudyToolsClient({ tutorTopics }: { tutorTopics: TutorTopic[] }) {
   const [tab, setTab] = useState<Tab>("tutor");
+  const assistantPrompts = [
+    ...buildStudyAssistantPromptOptions(tutorTopics, 4),
+    { label: "What should I focus on today?", prompt: "What should I focus on today?" },
+    { label: "Help me plan my study sessions for this week", prompt: "Help me plan my study sessions for this week" },
+  ];
 
   return (
     <div className="flex flex-1 flex-col gap-4 overflow-hidden">
@@ -66,7 +65,7 @@ export function StudyToolsClient({ tutorTopics }: { tutorTopics: TutorTopic[] })
         <TutorTopicPicker topics={tutorTopics} />
       ) : tab === "chat" ? (
         <AIChat
-          suggestedPrompts={CROSS_COURSE_PROMPTS}
+          suggestedPrompts={assistantPrompts}
           emptyMessage="Ask about any of your courses — planning, priorities, study strategies, exam prep."
           placeholder="Ask across all your courses... (Enter to send)"
         />
