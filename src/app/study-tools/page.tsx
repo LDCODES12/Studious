@@ -1,15 +1,14 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { computeCourseContext } from "@/lib/course-context";
-import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
 import { StudyToolsClient } from "@/components/study-tools/study-tools-client";
 import type { TutorTopic } from "@/components/study-tools/tutor-topic-picker";
+import { buildStudyTargets } from "@/lib/study-targets";
 
 export default async function StudyToolsPage() {
   const session = await auth();
   const userId = session?.user?.id;
 
-  // Fetch courses with topics to compute current week
+  // Fetch courses with nearby timeline context and stored materials for study-target ranking.
   const courses = userId
     ? await db.course.findMany({
         where: { userId },
@@ -49,36 +48,27 @@ export default async function StudyToolsPage() {
               omitFromFinalGrade: true,
             },
           },
+          materials: {
+            select: {
+              id: true,
+              fileName: true,
+              detectedType: true,
+              relatedTopics: true,
+            },
+          },
+          materialCandidates: {
+            select: {
+              fileName: true,
+              moduleName: true,
+              requested: true,
+            },
+          },
         },
         orderBy: { createdAt: "asc" },
       })
     : [];
 
-  // Extract current week topics for tutor topic picker
-  const isSemanticTopic = (name: string) =>
-    !/^(Lecture|Module|Week|Unit|Chapter|Session|Class)\s*\d+$/i.test(name);
-
-  const tutorTopics: TutorTopic[] = [];
-
-  for (const course of courses) {
-    const ctx = computeCourseContext({
-      ...course,
-      classSchedule: course.classSchedule as ExtractedClassSchedule | null,
-    });
-
-    if (ctx.currentWeek) {
-      const semanticTopics = ctx.currentWeek.topics.filter(isSemanticTopic);
-      for (const topicName of semanticTopics.slice(0, 3)) {
-        tutorTopics.push({
-          courseId: course.id,
-          courseName: course.name,
-          courseColor: course.color,
-          topicName,
-          readings: ctx.currentWeek.readings,
-        });
-      }
-    }
-  }
+  const tutorTopics: TutorTopic[] = courses.flatMap((course) => buildStudyTargets(course));
 
   return <StudyToolsClient tutorTopics={tutorTopics} />;
 }

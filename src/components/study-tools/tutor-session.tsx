@@ -7,6 +7,7 @@ import { Send, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import Link from "next/link";
+import type { StudyTargetEvidence } from "@/lib/study-targets";
 
 interface TutorSessionProps {
   courseId?: string;
@@ -14,6 +15,7 @@ interface TutorSessionProps {
   courseColor?: string;
   topicName?: string;
   readings?: string[];
+  targetEvidence?: StudyTargetEvidence;
 }
 
 export function TutorSession({
@@ -22,6 +24,7 @@ export function TutorSession({
   courseColor,
   topicName,
   readings,
+  targetEvidence,
 }: TutorSessionProps) {
   const [input, setInput] = useState("");
   const colors = courseColor ? courseColors[courseColor] : null;
@@ -32,6 +35,7 @@ export function TutorSession({
       body: {
         ...(courseId ? { courseId } : {}),
         ...(topicName ? { topicName } : {}),
+        ...(targetEvidence ? { targetEvidence } : {}),
       },
       prepareSendMessagesRequest: ({ messages: msgs, body }) => {
         const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");

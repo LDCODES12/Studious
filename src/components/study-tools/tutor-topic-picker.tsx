@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import { Send } from "lucide-react";
+import type { StudyTargetEvidence } from "@/lib/study-targets";
 
 export interface TutorTopic {
   courseId: string;
@@ -12,6 +13,7 @@ export interface TutorTopic {
   courseColor: string;
   topicName: string;
   readings: string[];
+  evidence: StudyTargetEvidence;
 }
 
 export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
@@ -25,6 +27,7 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
       courseName: topic.courseName,
       courseColor: topic.courseColor,
       ...(topic.readings.length > 0 ? { readings: topic.readings.join("|||") } : {}),
+      evidence: JSON.stringify(topic.evidence),
     });
     router.push(`/study-tools/tutor?${params.toString()}`);
   }

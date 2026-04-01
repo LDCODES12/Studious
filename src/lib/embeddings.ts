@@ -28,3 +28,25 @@ export async function searchMaterials(
   `;
   return results;
 }
+
+export async function getMaterialsByIds(
+  courseId: string,
+  ids: string[]
+): Promise<{ id: string; fileName: string; rawText: string }[]> {
+  if (ids.length === 0) return [];
+
+  const materials = await db.courseMaterial.findMany({
+    where: {
+      courseId,
+      id: { in: ids },
+    },
+    select: {
+      id: true,
+      fileName: true,
+      rawText: true,
+    },
+  });
+
+  const byId = new Map(materials.map((material) => [material.id, material]));
+  return ids.map((id) => byId.get(id)).filter((material): material is { id: string; fileName: string; rawText: string } => !!material);
+}

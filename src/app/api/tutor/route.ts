@@ -3,12 +3,62 @@ import { streamText, convertToModelMessages } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
-import { generateEmbedding, searchMaterials } from "@/lib/embeddings";
+import { generateEmbedding, getMaterialsByIds, searchMaterials } from "@/lib/embeddings";
 import { buildStudyContext } from "@/lib/course-context";
 import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
+import type { StudyTargetEvidence } from "@/lib/study-targets";
 
 export const maxDuration = 60;
+
+type RetrievedMaterial = { id: string; fileName: string; rawText: string };
+type RequestUIPart = { type: "text"; text: string };
+type RequestUIMessage = {
+  role: "system" | "user" | "assistant";
+  parts: RequestUIPart[];
+};
+
+function sanitizeUiMessages(input: unknown): RequestUIMessage[] {
+  if (!Array.isArray(input)) return [];
+
+  return input.flatMap((message) => {
+    if (!message || typeof message !== "object") return [];
+
+    const role = "role" in message ? message.role : undefined;
+    if (role !== "system" && role !== "user" && role !== "assistant") return [];
+
+    const rawParts = "parts" in message ? message.parts : undefined;
+    const parts = Array.isArray(rawParts)
+      ? rawParts.flatMap((part) => {
+          if (!part || typeof part !== "object") return [];
+          if (!("type" in part) || part.type !== "text") return [];
+          if (!("text" in part) || typeof part.text !== "string") return [];
+          return [{ type: "text" as const, text: part.text }];
+        })
+      : [];
+
+    return [{ role, parts }];
+  });
+}
+
+function extractTextFromParts(parts: RequestUIPart[] | undefined): string {
+  return (parts ?? [])
+    .map((part) => part.text)
+    .join("");
+}
+
+function mergeMaterials(
+  preferred: RetrievedMaterial[],
+  semantic: RetrievedMaterial[],
+  limit: number
+): RetrievedMaterial[] {
+  const merged = new Map<string, RetrievedMaterial>();
+  for (const material of [...preferred, ...semantic]) {
+    if (!merged.has(material.id)) merged.set(material.id, material);
+    if (merged.size >= limit) break;
+  }
+  return [...merged.values()];
+}
 
 const SOCRATIC_INSTRUCTIONS = `You are a Socratic tutor. Your job is to help the student discover understanding through questions — NOT by explaining.
 
@@ -46,8 +96,27 @@ export async function POST(request: NextRequest) {
 
   const log = apiLogger("POST /api/tutor", session.user.id);
 
-  const { messages: uiMessages, courseId, topicName, previousResponseId } = await request.json();
-  log.info("tutor request", { courseId, topicName, hasPrevResponse: !!previousResponseId, messageCount: uiMessages?.length ?? 0 });
+  const body = await request.json() as {
+    messages?: unknown;
+    courseId?: string;
+    topicName?: string;
+    targetEvidence?: StudyTargetEvidence;
+    previousResponseId?: string;
+  };
+  const uiMessages = sanitizeUiMessages(body.messages);
+  const {
+    courseId,
+    topicName,
+    targetEvidence,
+    previousResponseId,
+  } = body;
+  log.info("tutor request", {
+    courseId,
+    topicName,
+    evidenceSource: targetEvidence?.source ?? null,
+    hasPrevResponse: !!previousResponseId,
+    messageCount: uiMessages?.length ?? 0,
+  });
 
   // Log first message as a tutoring session event
   const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
@@ -56,7 +125,13 @@ export async function POST(request: NextRequest) {
       data: {
         userId: session.user.id,
         type: "tutor_session",
-        metadata: JSON.parse(JSON.stringify({ courseId: courseId ?? null, topicName: topicName ?? null })),
+        metadata: JSON.parse(
+          JSON.stringify({
+            courseId: courseId ?? null,
+            topicName: topicName ?? null,
+            targetSource: targetEvidence?.source ?? null,
+          })
+        ),
       },
     }).catch(() => {});
   }
@@ -64,29 +139,64 @@ export async function POST(request: NextRequest) {
   // Build course context
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
+  let targetContext = "";
+  if (targetEvidence) {
+    const lines: string[] = [];
+    if (targetEvidence.weekLabel) lines.push(`Selected study target comes from: ${targetEvidence.weekLabel}`);
+    if (targetEvidence.readings.length > 0) lines.push(`Related readings: ${targetEvidence.readings.join(", ")}`);
+    if (targetEvidence.materialFileNames.length > 0) lines.push(`Most relevant imported materials: ${targetEvidence.materialFileNames.join(", ")}`);
+    if (targetEvidence.candidateModuleNames.length > 0) lines.push(`Nearby Canvas modules: ${targetEvidence.candidateModuleNames.join(" | ")}`);
+    if (lines.length > 0) {
+      targetContext = `\n\nSelected study target evidence:\n${lines.map((line) => `- ${line}`).join("\n")}`;
+    }
+  }
+
   // RAG: use topic name for initial search, then last user message for follow-ups
   let materialContext = "";
   if (courseId) {
     try {
-      const lastUserMsg = [...(uiMessages ?? [])].reverse().find((m: { role: string }) => m.role === "user");
-      const lastUserText = lastUserMsg?.parts
-        ?.filter((p: { type: string }) => p.type === "text")
-        .map((p: { text: string }) => p.text)
-        .join("") ?? "";
+      const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
+      const lastUserText = extractTextFromParts(lastUserMsg?.parts);
 
-      const ragQuery = userMessages.length <= 1 && topicName
+      const evidenceTerms = [
+        ...(targetEvidence?.readings ?? []),
+        ...(targetEvidence?.candidateModuleNames ?? []),
+        targetEvidence?.weekLabel ?? "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      const ragQueryBase = userMessages.length <= 1 && topicName
         ? topicName
         : (lastUserText ? (topicName ? `${topicName}: ${lastUserText}` : lastUserText) : topicName ?? null);
 
+      const ragQuery = ragQueryBase
+        ? [ragQueryBase, evidenceTerms].filter(Boolean).join(" | ")
+        : evidenceTerms || null;
+
       if (ragQuery) {
-        const vector = await generateEmbedding(ragQuery);
-        const materials = await searchMaterials(courseId, vector, 3);
+        const [preferredMaterials, semanticMaterials] = await Promise.all([
+          targetEvidence?.materialIds?.length
+            ? getMaterialsByIds(courseId, targetEvidence.materialIds.slice(0, 3))
+            : Promise.resolve([]),
+          (async () => {
+            const vector = await generateEmbedding(ragQuery);
+            return searchMaterials(courseId, vector, 5);
+          })(),
+        ]);
+
+        const materials = mergeMaterials(preferredMaterials, semanticMaterials, 3);
         if (materials.length > 0) {
           materialContext =
             "\n\nCourse materials you have access to (reference these when helpful):\n" +
             materials
               .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 800)}`)
               .join("\n\n");
+        } else if (targetEvidence?.candidateFileNames?.length) {
+          materialContext =
+            "\n\nRelevant Canvas files exist for this topic, but their contents are not imported yet:\n" +
+            targetEvidence.candidateFileNames.slice(0, 5).map((name) => `- ${name}`).join("\n") +
+            "\nUse the week and reading context you do have, and be honest that you cannot quote from those files yet.";
         } else {
           materialContext = "\n\nNote: No course materials were found for this topic. Be honest about this — do not claim you can see documents you cannot. If the student asks about specific documents, tell them you don't have access to those materials.";
         }
@@ -123,7 +233,7 @@ export async function POST(request: NextRequest) {
   const system = `${SOCRATIC_INSTRUCTIONS}
 
 Today is ${today}.${topicContext}${adaptiveRules}
-${promptText}${materialContext}`;
+${promptText}${targetContext}${materialContext}`;
 
   // ── Responses API conversation chaining ──────────────────────────────────
   const config = modelConfig("high");
@@ -131,10 +241,7 @@ ${promptText}${materialContext}`;
   const result = previousResponseId
     ? (() => {
         const lastMsg = uiMessages[uiMessages.length - 1];
-        const lastText = (lastMsg.parts ?? [])
-          .filter((p: { type: string }) => p.type === "text")
-          .map((p: { text: string }) => p.text)
-          .join("");
+        const lastText = extractTextFromParts(lastMsg?.parts);
         log.info("streaming tutor continuation", { previousResponseId });
         return streamText({
           ...config,
