@@ -458,90 +458,13 @@ async function fetchPendingCandidateIds(scUrl, apiToken, canvasCourseId) {
   }
 }
 
-async function fetchTextFile(url) {
+async function fetchPlainTextFile(url) {
   const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) {
-    return {
-      text: "",
-      contentType: res.headers.get("content-type") ?? "",
-    };
-  }
+  if (!res.ok) return "";
   const buf = await res.arrayBuffer();
   let text = new TextDecoder("utf-8").decode(buf);
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return {
-    text: text.trim(),
-    contentType: res.headers.get("content-type") ?? "",
-  };
-}
-
-async function fetchPlainTextFile(url) {
-  const { text } = await fetchTextFile(url);
   return text;
-}
-
-function normalizeTranscriptText(rawText, fileName = "", contentType = "") {
-  let text = String(rawText || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/^\uFEFF/, "");
-
-  const lowerName = String(fileName || "").toLowerCase();
-  const lowerType = String(contentType || "").toLowerCase();
-  const looksLikeWebVtt =
-    lowerName.endsWith(".vtt") ||
-    lowerType.includes("vtt") ||
-    /^\s*WEBVTT\b/i.test(text);
-  const looksLikeSrt =
-    lowerName.endsWith(".srt") ||
-    /\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(text);
-  const looksLikeXmlTranscript =
-    lowerName.endsWith(".ttml") ||
-    lowerName.endsWith(".dfxp") ||
-    lowerType.includes("xml") ||
-    /^\s*<\?xml\b/i.test(text) ||
-    /^\s*<tt\b/i.test(text);
-
-  if (looksLikeWebVtt) {
-    text = text
-      .replace(/^\s*WEBVTT[^\n]*\n+/i, "")
-      .replace(/^NOTE[\s\S]*?(?:\n{2,}|$)/gim, "\n")
-      .replace(
-        /^\s*\d{2}:\d{2}(?::\d{2})?\.\d{3}\s*-->\s*\d{2}:\d{2}(?::\d{2})?\.\d{3}[^\n]*$/gim,
-        ""
-      )
-      .replace(/^align:[^\n]*$/gim, "")
-      .replace(/<[^>]+>/g, " ");
-  } else if (looksLikeSrt) {
-    text = text
-      .replace(/^\s*\d+\s*$/gim, "")
-      .replace(
-        /^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}[^\n]*$/gim,
-        ""
-      )
-      .replace(/<[^>]+>/g, " ");
-  } else if (looksLikeXmlTranscript) {
-    text = text
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/p>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&quot;/gi, "\"")
-      .replace(/&#39;/gi, "'");
-  }
-
-  return text
-    .replace(/^[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-async function fetchTranscriptTextFile(url, fileName = "") {
-  const { text, contentType } = await fetchTextFile(url);
-  return normalizeTranscriptText(text, fileName, contentType);
 }
 
 function maybeDecodeURIComponent(value) {
@@ -589,30 +512,16 @@ function pickFirst(values, predicate = () => true) {
   return null;
 }
 
-function dedupeTranscriptAssets(items) {
-  const merged = [];
-  const seen = new Set();
-  for (const item of items ?? []) {
-    const key = `${item.fileName || ""}|${item.url || ""}|${item.assetId || ""}`;
-    if (!item?.url || seen.has(key)) continue;
-    seen.add(key);
-    merged.push(item);
-  }
-  return merged;
-}
-
-async function extractKalturaApiContext(tabId, fallbackEntry) {
+async function captureMediaGalleryContext(tabId) {
   const frameResults = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
-    args: [fallbackEntry?.mediaId ?? null, fallbackEntry?.title ?? null],
-    func: (fallbackEntryId, fallbackTitle) => {
+    func: () => {
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-      const entryIds = new Set();
       const categoryIds = new Set();
       const ksValues = new Set();
       const serviceUrls = new Set();
       const partnerIds = new Set();
-      const titles = new Set();
+      const galleryTitles = new Set();
 
       const add = (set, value, normalizer = null) => {
         if (value == null) return;
@@ -677,12 +586,6 @@ async function extractKalturaApiContext(tabId, fallbackEntry) {
         for (const match of text.matchAll(/\/channel\/[^/]+\/(\d+)/gi)) {
           add(categoryIds, match[1]);
         }
-        for (const match of text.matchAll(/(?:\/media\/|[?&]entry_id=)([^&#"'\/\s]+)/gi)) {
-          add(entryIds, match[1]);
-        }
-        for (const match of text.matchAll(/\b(?:entryId|entry_id)["']?\s*[:=]\s*["']([^"']{6,})["']/gi)) {
-          add(entryIds, match[1]);
-        }
       };
 
       const visitObject = (value, depth = 0, seen = new WeakSet()) => {
@@ -712,15 +615,13 @@ async function extractKalturaApiContext(tabId, fallbackEntry) {
               lowerKey === "channel_id"
             ) {
               add(categoryIds, child);
-            } else if (lowerKey === "entryid" || lowerKey === "entry_id" || lowerKey === "mediaid") {
-              add(entryIds, child);
             } else if (
               lowerKey === "title" ||
               lowerKey === "name" ||
-              lowerKey === "entryname" ||
-              lowerKey === "media_title"
+              lowerKey === "gallerytitle" ||
+              lowerKey === "gallery_title"
             ) {
-              add(titles, child);
+              add(galleryTitles, child);
             }
             if (typeof child === "string") scanText(child);
           } else if (child && typeof child === "object") {
@@ -729,17 +630,14 @@ async function extractKalturaApiContext(tabId, fallbackEntry) {
         }
       };
 
-      add(entryIds, fallbackEntryId);
-      add(titles, fallbackTitle);
-      add(titles, document.querySelector("h1, [data-testid='page-title']")?.textContent);
-      add(titles, document.title);
+      add(galleryTitles, document.querySelector("h1, [data-testid='page-title']")?.textContent);
+      add(galleryTitles, document.title);
       scanText(window.location.href);
 
       for (const el of Array.from(document.querySelectorAll("[href],[src],[data-entry-id],[data-entryid],[data-media-id],[data-partner-id],[data-partnerid],input[type='hidden']"))) {
         for (const attr of Array.from(el.attributes ?? [])) {
           if (!attr?.value) continue;
           scanText(attr.value);
-          if (/entry[-_]?id|media[-_]?id/i.test(attr.name)) add(entryIds, attr.value);
           if (/partner[-_]?id/i.test(attr.name)) add(partnerIds, attr.value);
           if (/category[-_]?id|channel[-_]?id/i.test(attr.name)) add(categoryIds, attr.value);
         }
@@ -772,43 +670,39 @@ async function extractKalturaApiContext(tabId, fallbackEntry) {
 
       return {
         href: window.location.href,
-        entryIds: Array.from(entryIds),
         categoryIds: Array.from(categoryIds),
         ksValues: Array.from(ksValues).sort((a, b) => b.length - a.length),
         serviceUrls: Array.from(serviceUrls),
         partnerIds: Array.from(partnerIds),
-        titles: Array.from(titles),
+        galleryTitles: Array.from(galleryTitles),
       };
     },
   });
 
   const merged = {
-    entryIds: new Set([fallbackEntry?.mediaId].filter(Boolean)),
     categoryIds: new Set(),
     ksValues: new Set(),
     serviceUrls: new Set(),
     partnerIds: new Set(),
-    titles: new Set([fallbackEntry?.title].filter(Boolean)),
+    galleryTitles: new Set(),
   };
 
   for (const frame of frameResults) {
     const result = frame?.result;
     if (!result) continue;
-    for (const value of result.entryIds ?? []) merged.entryIds.add(value);
     for (const value of result.categoryIds ?? []) merged.categoryIds.add(value);
     for (const value of result.ksValues ?? []) merged.ksValues.add(value);
     for (const value of result.serviceUrls ?? []) merged.serviceUrls.add(value);
     for (const value of result.partnerIds ?? []) merged.partnerIds.add(value);
-    for (const value of result.titles ?? []) merged.titles.add(value);
+    for (const value of result.galleryTitles ?? []) merged.galleryTitles.add(value);
   }
 
   return {
-    entryId: pickFirst(Array.from(merged.entryIds)),
     categoryId: pickFirst(Array.from(merged.categoryIds)),
     ks: pickFirst(Array.from(merged.ksValues), (value) => String(value).length >= 20),
     serviceUrl: pickFirst(Array.from(merged.serviceUrls), (value) => Boolean(normalizeKalturaServiceUrl(value))),
     partnerId: pickFirst(Array.from(merged.partnerIds)),
-    title: pickFirst(Array.from(merged.titles), (value) => String(value).length >= 4) ?? fallbackEntry?.title ?? null,
+    galleryTitle: pickFirst(Array.from(merged.galleryTitles), (value) => String(value).length >= 4),
   };
 }
 
@@ -870,11 +764,16 @@ async function callKalturaApi(context, service, action, params = {}) {
   throw lastError ?? new Error(`Kaltura ${service}.${action} returned an unreadable response`);
 }
 
-async function listKalturaAttachmentTranscriptAssets(context) {
-  if (!context?.entryId) return [];
+async function listKalturaAttachmentTranscriptAssets(context, entry) {
+  if (!context?.entryId && !entry?.mediaId) return [];
 
-  const response = await callKalturaApi(context, "attachment_attachmentasset", "list", {
-    "filter:entryIdEqual": context.entryId,
+  const entryContext = {
+    ...context,
+    entryId: entry?.mediaId ?? context?.entryId ?? null,
+  };
+
+  const response = await callKalturaApi(entryContext, "attachment_attachmentasset", "list", {
+    "filter:entryIdEqual": entryContext.entryId,
     "filter:statusEqual": 2,
     "pager:pageSize": 200,
   });
@@ -891,7 +790,7 @@ async function listKalturaAttachmentTranscriptAssets(context) {
 
     let url = null;
     try {
-      const downloadUrl = await callKalturaApi(context, "attachment_attachmentasset", "getUrl", {
+      const downloadUrl = await callKalturaApi(entryContext, "attachment_attachmentasset", "getUrl", {
         id: asset.id,
       });
       if (typeof downloadUrl === "string") url = downloadUrl;
@@ -913,101 +812,48 @@ async function listKalturaAttachmentTranscriptAssets(context) {
   return transcriptAssets;
 }
 
-async function listKalturaCaptionTranscriptAssets(context) {
-  if (!context?.entryId) return [];
-
-  const response = await callKalturaApi(context, "caption_captionasset", "list", {
-    "filter:entryIdEqual": context.entryId,
-    "filter:statusEqual": 2,
-    "pager:pageSize": 50,
-  });
-  const assets = Array.isArray(response?.objects) ? response.objects : [];
-  if (assets.length === 0) return [];
-
-  const rankedAssets = [...assets].sort((a, b) => {
-    const score = (asset) => {
-      let points = 0;
-      if (Number(asset?.isDefault) === 1) points += 10;
-      if (/^en(-|$)/i.test(String(asset?.languageCode || ""))) points += 5;
-      if (/transcript/i.test(String(asset?.label || asset?.title || ""))) points += 2;
-      return points;
-    };
-    return score(b) - score(a);
-  });
-
-  const best = rankedAssets[0];
-  if (!best?.id) return [];
-
-  let url = null;
-  try {
-    const downloadUrl = await callKalturaApi(context, "caption_captionasset", "getUrl", {
-      id: best.id,
-    });
-    if (typeof downloadUrl === "string") url = downloadUrl;
-  } catch {
+async function listMediaGalleryEntriesViaApi(context) {
+  if (!context?.categoryId || !context?.serviceUrl || !context?.ks) {
     return [];
   }
-  if (!url) return [];
 
-  const labelBits = [best.languageCode, best.label].filter(Boolean).join(" ").trim();
-  const friendly = labelBits ? `${labelBits} transcript.txt` : "transcript.txt";
+  const PAGE_SIZE = 100;
+  const entries = [];
+  const seen = new Set();
 
-  return [{
-    assetId: best.id,
-    fileName: friendly,
-    url,
-    uploadedAt: coerceKalturaTimestamp(best.updatedAt ?? best.createdAt),
-    size: best.size ?? null,
-    transport: "caption_api",
-    isCaptionFallback: true,
-  }];
-}
+  for (let pageIndex = 1; pageIndex < 1000; pageIndex++) {
+    const response = await callKalturaApi(context, "baseentry", "list", {
+      "filter:categoryAncestorIdIn": context.categoryId,
+      "filter:statusEqual": 2,
+      "pager:pageSize": PAGE_SIZE,
+      "pager:pageIndex": pageIndex,
+      "filter:orderBy": "-createdAt",
+    });
+    const objects = Array.isArray(response?.objects) ? response.objects : [];
+    if (objects.length === 0) break;
 
-async function listMediaTranscriptAttachmentsViaApi(tabId, fallbackEntry) {
-  const context = await extractKalturaApiContext(tabId, fallbackEntry);
-  if (!context?.entryId || !context?.serviceUrl || !context?.ks) {
-    return { context, attachments: [] };
-  }
-
-  const [attachmentAssets, captionAssets] = await Promise.allSettled([
-    listKalturaAttachmentTranscriptAssets(context),
-    listKalturaCaptionTranscriptAssets(context),
-  ]);
-
-  return {
-    context,
-    attachments: dedupeTranscriptAssets(
-      (attachmentAssets.status === "fulfilled" && attachmentAssets.value.length > 0)
-        ? attachmentAssets.value
-        : (captionAssets.status === "fulfilled" ? captionAssets.value : [])
-    ),
-  };
-}
-
-async function listMediaGalleryEntriesViaApi(tabId) {
-  const context = await extractKalturaApiContext(tabId, {});
-  if (!context?.categoryId || !context?.serviceUrl || !context?.ks) {
-    return { context, entries: [] };
-  }
-
-  const response = await callKalturaApi(context, "baseentry", "list", {
-    "filter:categoryAncestorIdIn": context.categoryId,
-    "pager:pageSize": 100,
-    "filter:orderBy": "-createdAt",
-  });
-  const objects = Array.isArray(response?.objects) ? response.objects : [];
-
-  return {
-    context,
-    entries: objects
-      .filter((entry) => entry?.id && String(entry?.name || entry?.title || "").trim().length >= 3)
-      .map((entry) => ({
-        mediaId: entry.id,
-        url: null,
-        title: String(entry.name || entry.title || entry.id).trim(),
+    let addedThisPage = 0;
+    for (const entry of objects) {
+      const mediaId = entry?.id;
+      const title = String(entry?.name || entry?.title || entry?.id || "").trim();
+      if (!mediaId || title.length < 3 || seen.has(mediaId)) continue;
+      seen.add(mediaId);
+      addedThisPage++;
+      entries.push({
+        mediaId,
+        title,
+        createdAt: coerceKalturaTimestamp(entry.createdAt),
         section: null,
-      })),
-  };
+      });
+    }
+
+    const totalCount = Number(response?.totalCount);
+    if (Number.isFinite(totalCount) && seen.size >= totalCount) break;
+    if (objects.length < PAGE_SIZE) break;
+    if (addedThisPage === 0) break;
+  }
+
+  return entries;
 }
 
 function buildMediaTranscriptContentId(mediaId, attachmentFileName, attachmentUrl) {
@@ -1036,208 +882,9 @@ function buildMediaTranscriptDisplayName(mediaTitle, attachmentFileName) {
   return `${title} — ${fileName}`;
 }
 
-async function collectMediaGalleryEntries(tabId) {
-  const frameResults = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    func: () => {
-      const clean = (value) =>
-        String(value || "")
-          .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
-
-      const findNearestSection = (node) => {
-        let current = node;
-        while (current && current !== document.body) {
-          let sibling = current.previousElementSibling;
-          while (sibling) {
-            const heading = sibling.matches?.("h1,h2,h3,h4,h5,h6")
-              ? sibling
-              : sibling.querySelector?.("h1,h2,h3,h4,h5,h6");
-            const text = clean(heading?.textContent);
-            if (text) return text;
-            sibling = sibling.previousElementSibling;
-          }
-          current = current.parentElement;
-        }
-        return null;
-      };
-
-      const titleFromAnchor = (anchor) =>
-        clean(anchor.getAttribute("aria-label")) ||
-        clean(anchor.querySelector("img")?.getAttribute("alt")) ||
-        clean(anchor.querySelector("h1,h2,h3,h4,h5,h6,.title,.media-title,.name,.video-title")?.textContent) ||
-        clean(anchor.textContent);
-
-      const results = [];
-      const seen = new Set();
-
-      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-        const href = anchor.href || "";
-        const mediaMatch =
-          href.match(/\/media\/([^/?#]+)/i) ||
-          href.match(/[?&]entry_id=([^&#]+)/i);
-        if (!mediaMatch?.[1]) continue;
-
-        const mediaId = mediaMatch[1];
-        if (seen.has(mediaId)) continue;
-
-        const title = titleFromAnchor(anchor);
-        if (!title || title.length < 4) continue;
-        if (/^(attachments|share|back|actions)$/i.test(title)) continue;
-
-        seen.add(mediaId);
-        results.push({
-          mediaId,
-          url: href,
-          title,
-          section: findNearestSection(anchor),
-        });
-      }
-
-      return results;
-    },
-  });
-
-  const merged = [];
-  const seen = new Set();
-  for (const frame of frameResults) {
-    for (const entry of frame?.result ?? []) {
-      const key = entry.mediaId || entry.url;
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      merged.push(entry);
-    }
-  }
-  return merged;
-}
-
-async function extractMediaTranscriptAttachmentsFromDom(tabId) {
-  const frameResults = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    func: async () => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-
-      const findAttachmentsTab = () =>
-        Array.from(document.querySelectorAll("a,button,[role='tab']"))
-          .find((el) => /attachments/i.test(clean(el.textContent)));
-
-      const scanAttachments = () => {
-        const attachments = [];
-        const seen = new Set();
-        const extractSize = (text) => {
-          const match = clean(text).match(/(\d+(?:\.\d+)?)\s*(kb|mb|bytes?)/i);
-          if (!match) return null;
-          const value = Number(match[1]);
-          const unit = match[2].toLowerCase();
-          if (!Number.isFinite(value)) return null;
-          if (unit.startsWith("mb")) return Math.round(value * 1024 * 1024);
-          if (unit.startsWith("kb")) return Math.round(value * 1024);
-          return Math.round(value);
-        };
-
-        const extractUploadedAt = (row) => {
-          const text = clean(row.textContent);
-          const match = text.match(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}\b/i);
-          return match?.[0] ?? null;
-        };
-
-        const extractFileName = (row) => {
-          const explicit = clean(
-            row.querySelector("a[href], td, th, [class*='file'], [class*='name']")?.textContent
-          );
-          if (/\.txt\b/i.test(explicit)) {
-            const txtMatch = explicit.match(/([^/\\]+?\.txt)\b/i);
-            return txtMatch?.[1] ?? explicit;
-          }
-          const rowText = clean(row.textContent);
-          const txtMatch = rowText.match(/([^/\\]+?\.txt)\b/i);
-          return txtMatch?.[1] ?? null;
-        };
-
-        const containers = Array.from(
-          document.querySelectorAll("tr, li, .attachment, [class*='attachment'], [data-testid*='attachment']")
-        );
-        for (const row of containers) {
-          const rowText = clean(row.textContent);
-          if (!/\.txt\b/i.test(rowText)) continue;
-
-          const fileName = extractFileName(row);
-          if (!fileName) continue;
-
-          const downloadUrl =
-            row.querySelector("a[download][href]")?.href ||
-            row.querySelector("a[href*='download']")?.href ||
-            row.querySelector("a[href]")?.href ||
-            row.querySelector("[data-download-url]")?.getAttribute("data-download-url") ||
-            row.querySelector("[data-url]")?.getAttribute("data-url") ||
-            null;
-          if (!downloadUrl) continue;
-
-          const key = `${fileName}|${downloadUrl}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-
-          attachments.push({
-            fileName,
-            url: downloadUrl,
-            uploadedAt: extractUploadedAt(row),
-            size: extractSize(rowText),
-          });
-        }
-
-        if (attachments.length > 0) return attachments;
-
-        for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-          const label = clean(anchor.textContent) || clean(anchor.getAttribute("aria-label"));
-          const href = anchor.href || "";
-          if (!label && !href) continue;
-          const fileNameMatch = label.match(/([^/\\]+?\.txt)\b/i) || href.match(/([^/\\?&#]+?\.txt)\b/i);
-          if (!fileNameMatch?.[1]) continue;
-          const key = `${fileNameMatch[1]}|${href}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          attachments.push({
-            fileName: fileNameMatch[1],
-            url: href,
-            uploadedAt: null,
-            size: null,
-          });
-        }
-
-        return attachments;
-      };
-
-      const attachmentsTab = findAttachmentsTab();
-      if (attachmentsTab) attachmentsTab.click();
-
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const found = scanAttachments();
-        if (found.length > 0) return found;
-        await sleep(400);
-      }
-
-      return scanAttachments();
-    },
-  });
-
-  const merged = [];
-  const seen = new Set();
-  for (const frame of frameResults) {
-    for (const attachment of frame?.result ?? []) {
-      const key = `${attachment.fileName}|${attachment.url}`;
-      if (!attachment?.url || seen.has(key)) continue;
-      seen.add(key);
-      merged.push(attachment);
-    }
-  }
-  return merged;
-}
-
 async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
-  const MAX_MEDIA_ITEMS_TO_INSPECT = 24;
   const MAX_AUTO_IMPORTS_PER_COURSE = 8;
+  const mediaContextCache = new Map();
 
   const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
   const mediaTabId = tab.id;
@@ -1253,22 +900,42 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
         await chrome.tabs.update(mediaTabId, { url: course.mediaGalleryTabUrl });
         await waitForTabLoad(mediaTabId, 30_000);
 
-        const galleryApiResult = await listMediaGalleryEntriesViaApi(mediaTabId).catch((err) => {
+        const courseMediaContext =
+          mediaContextCache.get(course.id) ??
+          await captureMediaGalleryContext(mediaTabId).catch((err) => {
+            syncLog("media_context_capture_err", {
+              course: course.name,
+              error: err?.message ?? String(err),
+            });
+            return null;
+          });
+
+        if (courseMediaContext) {
+          mediaContextCache.set(course.id, courseMediaContext);
+        }
+
+        if (!courseMediaContext?.serviceUrl || !courseMediaContext?.ks || !courseMediaContext?.categoryId) {
+          syncLog("media_api_context_missing", {
+            course: course.name,
+            hasServiceUrl: Boolean(courseMediaContext?.serviceUrl),
+            hasKs: Boolean(courseMediaContext?.ks),
+            hasCategoryId: Boolean(courseMediaContext?.categoryId),
+          });
+          continue;
+        }
+
+        const galleryEntries = await listMediaGalleryEntriesViaApi(courseMediaContext).catch((err) => {
           syncLog("media_gallery_api_err", {
             course: course.name,
             error: err?.message ?? String(err),
           });
-          return { context: null, entries: [] };
+          return [];
         });
-        const galleryEntries = galleryApiResult.entries.length > 0
-          ? galleryApiResult.entries
-          : await collectMediaGalleryEntries(mediaTabId);
         if (galleryEntries.length === 0) {
           syncLog("media_gallery_empty", { course: course.name });
           continue;
         }
 
-        const entriesToInspect = galleryEntries.slice(0, MAX_MEDIA_ITEMS_TO_INSPECT);
         const seenCandidateIds = new Set(course.materialCandidates.map((candidate) => candidate.contentId));
         const downloadedIds = new Set(course.materialTexts.map((material) => material.sourceKey).filter(Boolean));
         let autoImportedCount = 0;
@@ -1277,63 +944,37 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
         syncLog("media_gallery_found", {
           course: course.name,
           entries: galleryEntries.length,
-          inspecting: entriesToInspect.length,
-          source: galleryApiResult.entries.length > 0 ? "kaltura_api" : "dom_fallback",
+          inspecting: galleryEntries.length,
+          categoryId: courseMediaContext.categoryId,
         });
 
-        for (const entry of entriesToInspect) {
+        for (const entry of galleryEntries) {
           try {
-            let apiResult;
-            if (galleryApiResult.entries.length > 0 && galleryApiResult.context?.serviceUrl && galleryApiResult.context?.ks) {
-              apiResult = await listMediaTranscriptAttachmentsViaApi(mediaTabId, {
-                ...entry,
-                mediaId: entry.mediaId,
+            const attachments = await listKalturaAttachmentTranscriptAssets(courseMediaContext, entry).catch((err) => {
+              syncLog("media_entry_api_err", {
+                course: course.name,
                 title: entry.title,
-              }).catch((err) => {
-                syncLog("media_entry_api_err", {
-                  course: course.name,
-                  title: entry.title,
-                  error: err?.message ?? String(err),
-                });
-                return { context: null, attachments: [] };
+                mediaId: entry.mediaId,
+                error: err?.message ?? String(err),
               });
-            } else {
-              await chrome.tabs.update(mediaTabId, { url: entry.url });
-              await waitForTabLoad(mediaTabId, 30_000);
-
-              apiResult = await listMediaTranscriptAttachmentsViaApi(mediaTabId, entry).catch((err) => {
-                syncLog("media_entry_api_err", {
-                  course: course.name,
-                  title: entry.title,
-                  error: err?.message ?? String(err),
-                });
-                return { context: null, attachments: [] };
-              });
-            }
-
-            let attachments = apiResult.attachments ?? [];
-            let attachmentSource = attachments.length > 0 ? "kaltura_api" : "dom_fallback";
-            if (attachments.length === 0 && entry.url) {
-              if (entry.url) {
-                await chrome.tabs.update(mediaTabId, { url: entry.url });
-                await waitForTabLoad(mediaTabId, 30_000);
-              }
-              attachments = await extractMediaTranscriptAttachmentsFromDom(mediaTabId);
-            }
+              return [];
+            });
             if (attachments.length === 0) continue;
 
             syncLog("media_entry_source", {
               course: course.name,
               title: entry.title,
-              source: attachmentSource,
+              source: "kaltura_api",
               attachments: attachments.length,
-              hasApiContext: Boolean(apiResult?.context?.serviceUrl && apiResult?.context?.ks),
+              mediaId: entry.mediaId,
             });
 
             for (const attachment of attachments) {
               const contentId = buildMediaTranscriptContentId(entry.mediaId, attachment.fileName, attachment.url);
               const displayName = buildMediaTranscriptDisplayName(entry.title, attachment.fileName);
-              const moduleName = entry.section ? `Kaltura Media Gallery · ${entry.section}` : "Kaltura Media Gallery";
+              const moduleName = courseMediaContext.galleryTitle
+                ? `Kaltura Media Gallery · ${courseMediaContext.galleryTitle}`
+                : "Kaltura Media Gallery";
 
               if (!seenCandidateIds.has(contentId)) {
                 seenCandidateIds.add(contentId);
@@ -1351,9 +992,7 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
               const shouldDownload = requestedIds.has(contentId) || shouldAutoImport;
               if (!shouldDownload || downloadedIds.has(contentId)) continue;
 
-              const text = attachment.transport === "caption_api"
-                ? await fetchTranscriptTextFile(attachment.url, attachment.fileName)
-                : await fetchPlainTextFile(attachment.url);
+              const text = await fetchPlainTextFile(attachment.url);
               if (text.length < 100) continue;
 
               downloadedIds.add(contentId);
