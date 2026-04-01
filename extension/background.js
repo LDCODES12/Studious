@@ -486,25 +486,6 @@ function normalizeKalturaServiceUrl(value) {
     .replace(/\/+$/, "");
 }
 
-function normalizeKalturaKs(value) {
-  const decoded = maybeDecodeURIComponent(String(value || "").replace(/\\\//g, "/"));
-  const cleaned = decoded.replace(/^["']|["']$/g, "").trim();
-  return cleaned.length >= 20 ? cleaned : null;
-}
-
-function coerceKalturaTimestamp(value) {
-  if (value == null || value === "") return null;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return new Date(value > 1e12 ? value : value * 1000).toISOString();
-  }
-  if (/^\d{10,13}$/.test(String(value).trim())) {
-    const numeric = Number(value);
-    return new Date(String(value).trim().length >= 13 ? numeric : numeric * 1000).toISOString();
-  }
-  const parsed = Date.parse(String(value));
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : String(value);
-}
-
 function pickFirst(values, predicate = () => true) {
   for (const value of values ?? []) {
     if (predicate(value)) return value;
@@ -782,110 +763,92 @@ async function captureMediaGalleryContext(tabId) {
   };
 }
 
-async function callKalturaApi(context, service, action, params = {}) {
-  const serviceUrl = normalizeKalturaServiceUrl(context?.serviceUrl);
-  const ks = normalizeKalturaKs(context?.ks);
-  if (!serviceUrl || !ks) {
-    throw new Error("Missing Kaltura API context");
-  }
+async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entry) {
+  if (!tabId || !context?.selectedFrameId || !entry?.mediaId) return [];
 
-  const url = `${serviceUrl}/api_v3/index.php?service=${encodeURIComponent(service)}&action=${encodeURIComponent(action)}`;
-  const attempts = ["1", "3", null];
-  let lastError = null;
+  const [frameResult] = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [context.selectedFrameId] },
+    world: "MAIN",
+    args: [entry.mediaId],
+    func: (mediaId) => {
+      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const parseDate = (value) => {
+        const parsed = Date.parse(String(value || "").trim());
+        return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+      };
+      const parseSize = (value) => {
+        const text = clean(value);
+        const match = text.match(/^([\d.]+)\s*(bytes?|kb|mb|gb)$/i);
+        if (!match) return null;
+        const amount = Number(match[1]);
+        if (!Number.isFinite(amount)) return null;
+        const unit = match[2].toLowerCase();
+        if (unit === "byte" || unit === "bytes") return Math.round(amount);
+        if (unit === "kb") return Math.round(amount * 1024);
+        if (unit === "mb") return Math.round(amount * 1024 * 1024);
+        if (unit === "gb") return Math.round(amount * 1024 * 1024 * 1024);
+        return null;
+      };
 
-  for (const format of attempts) {
-    const body = new URLSearchParams();
-    body.set("ks", ks);
-    body.set("clientTag", "study-circle-extension");
-    if (format) body.set("format", format);
-    for (const [key, value] of Object.entries(params)) {
-      if (value == null || value === "") continue;
-      body.set(key, String(value));
-    }
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", `/attachments/index/index/entryid/${encodeURIComponent(mediaId)}/entryView/1?format=ajax`, false);
+      xhr.withCredentials = true;
+      xhr.send(null);
 
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          Accept: "application/json, text/plain, */*",
-        },
-        credentials: "include",
-        body: body.toString(),
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      if (xhr.status !== 200) {
+        throw new Error(`Attachments endpoint failed (${xhr.status}) for ${mediaId}`);
       }
 
-      const trimmed = text.trim();
-      if (/^https?:\/\//i.test(trimmed)) {
-        return trimmed;
+      const payload = JSON.parse(xhr.responseText || "{}");
+      const html = Array.isArray(payload?.content)
+        ? payload.content
+          .map((item) => (typeof item?.content === "string" ? item.content : ""))
+          .join("\n")
+        : "";
+      if (!html.trim()) return [];
+
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const attachments = [];
+
+      for (const row of Array.from(doc.querySelectorAll("tbody tr"))) {
+        const cells = row.querySelectorAll("td");
+        const fileName = clean(cells[0]?.querySelector("[title]")?.getAttribute("title") || cells[0]?.textContent);
+        const uploadedAtText = clean(cells[4]?.textContent);
+        const downloadLink = row.querySelector("a.js-download-attachment-link[href]");
+        const href = clean(downloadLink?.getAttribute("href") || downloadLink?.href);
+
+        if (!fileName || !href || !/\.txt(?:$|[?#])/i.test(fileName)) continue;
+
+        attachments.push({
+          attachmentId: clean(downloadLink?.getAttribute("data-attachment-id")) || null,
+          entryId: clean(downloadLink?.getAttribute("data-entry-id")) || mediaId,
+          fileName,
+          url: href,
+          uploadedAt: parseDate(uploadedAtText),
+          size: parseSize(cells[3]?.textContent),
+          transport: "attachments_ajax",
+        });
       }
 
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && typeof parsed === "object" && parsed.code && parsed.message) {
-          throw new Error(`${parsed.code}: ${parsed.message}`);
-        }
-        return parsed;
-      } catch (parseErr) {
-        lastError = parseErr;
-      }
-    } catch (err) {
-      lastError = err;
-    }
-  }
+      const ranked = attachments
+        .filter((attachment) => !/chat\s+file/i.test(attachment.fileName))
+        .sort((a, b) => {
+          const aPid = /pid\s+\d+/i.test(a.fileName) ? 1 : 0;
+          const bPid = /pid\s+\d+/i.test(b.fileName) ? 1 : 0;
+          if (aPid !== bPid) return bPid - aPid;
+          const aSize = Number(a.size) || 0;
+          const bSize = Number(b.size) || 0;
+          if (aSize !== bSize) return bSize - aSize;
+          const aTime = a.uploadedAt ? Date.parse(a.uploadedAt) : 0;
+          const bTime = b.uploadedAt ? Date.parse(b.uploadedAt) : 0;
+          return bTime - aTime;
+        });
 
-  throw lastError ?? new Error(`Kaltura ${service}.${action} returned an unreadable response`);
-}
-
-async function listKalturaAttachmentTranscriptAssets(context, entry) {
-  if (!context?.entryId && !entry?.mediaId) return [];
-
-  const entryContext = {
-    ...context,
-    entryId: entry?.mediaId ?? context?.entryId ?? null,
-  };
-
-  const response = await callKalturaApi(entryContext, "attachment_attachmentasset", "list", {
-    "filter:entryIdEqual": entryContext.entryId,
-    "filter:statusEqual": 2,
-    "pager:pageSize": 200,
+      return ranked.length > 0 ? [ranked[0]] : [];
+    },
   });
-  const assets = Array.isArray(response?.objects) ? response.objects : [];
-  const transcriptAssets = [];
 
-  for (const asset of assets) {
-    const fileName = String(asset?.filename || asset?.title || "").trim();
-    const looksLikeTranscript =
-      asset?.objectType === "KalturaTranscriptAsset" ||
-      Number(asset?.format) === 1 ||
-      /\.txt$/i.test(fileName);
-    if (!looksLikeTranscript) continue;
-
-    let url = null;
-    try {
-      const downloadUrl = await callKalturaApi(entryContext, "attachment_attachmentasset", "getUrl", {
-        id: asset.id,
-      });
-      if (typeof downloadUrl === "string") url = downloadUrl;
-    } catch {
-      continue;
-    }
-    if (!url) continue;
-
-    transcriptAssets.push({
-      assetId: asset.id,
-      fileName: fileName || "transcript.txt",
-      url,
-      uploadedAt: coerceKalturaTimestamp(asset.updatedAt ?? asset.createdAt),
-      size: asset.size ?? null,
-      transport: "attachment_api",
-    });
-  }
-
-  return transcriptAssets;
+  return Array.isArray(frameResult?.result) ? frameResult.result : [];
 }
 
 async function listMediaGalleryEntriesFromFrame(tabId, context) {
@@ -1043,9 +1006,10 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
         }
 
         const categoryCandidates = getMediaGalleryCategoryCandidates(courseMediaContext);
-        if (!courseMediaContext?.serviceUrl || !courseMediaContext?.ks || categoryCandidates.length === 0) {
+        if (!courseMediaContext?.selectedFrameId) {
           syncLog("media_api_context_missing", {
             course: course.name,
+            hasSelectedFrame: Boolean(courseMediaContext?.selectedFrameId),
             hasServiceUrl: Boolean(courseMediaContext?.serviceUrl),
             hasKs: Boolean(courseMediaContext?.ks),
             hasCategoryId: categoryCandidates.length > 0,
@@ -1102,7 +1066,7 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
 
         for (const entry of galleryEntries) {
           try {
-            const attachments = await listKalturaAttachmentTranscriptAssets(resolvedMediaContext, entry).catch((err) => {
+            const attachments = await listMediaEntryTranscriptAttachmentsFromFrame(mediaTabId, resolvedMediaContext, entry).catch((err) => {
               syncLog("media_entry_api_err", {
                 course: course.name,
                 title: entry.title,
@@ -1116,7 +1080,7 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
             syncLog("media_entry_source", {
               course: course.name,
               title: entry.title,
-              source: "kaltura_api",
+              source: attachments[0]?.transport ?? "attachments_ajax",
               attachments: attachments.length,
               mediaId: entry.mediaId,
             });
