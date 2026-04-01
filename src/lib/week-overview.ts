@@ -88,6 +88,13 @@ function hasBreakSignal(week: CourseContextSnapshot["currentWeek"]): boolean {
   return false;
 }
 
+function hasSubstantiveWeekEvidence(week: CourseContextSnapshot["currentWeek"]): boolean {
+  if (!week) return false;
+  if (week.topics.length > 0 || week.readings.length > 0) return true;
+  if (week.notes && !hasBreakSignal(week)) return true;
+  return false;
+}
+
 function isExplicitBreakWeek(week: CourseContextSnapshot["currentWeek"]): boolean {
   if (!week) return false;
   if (!hasBreakSignal(week)) return false;
@@ -144,11 +151,19 @@ export function applyDetectedTermBreaks(
       Boolean(nextStart && nextStart > breakStart);
     const startsOnBreak = currentStart === breakStart;
     const breakMentioned = hasBreakSignal(currentWeek);
+    const hasMeaningfulEvidence = hasSubstantiveWeekEvidence(currentWeek);
     const lowConfidenceInferredWeek =
       (currentWeek.dateConfidence === "low" || currentWeek.scheduleMode === "inferred") &&
       !currentWeek.startDate;
 
     if (!startsOnBreak && !spansBreakGap && !lowConfidenceInferredWeek) {
+      return bundle;
+    }
+
+    // A term-level break should only override weak/ambiguous rows. If a course
+    // already has substantive week content for this Monday, keep the canonical
+    // currentWeek and let break rows stay course-specific.
+    if (startsOnBreak && hasMeaningfulEvidence && !breakMentioned) {
       return bundle;
     }
 
