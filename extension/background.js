@@ -522,14 +522,6 @@ function uniqueNonEmpty(values) {
   );
 }
 
-function chunkArray(values, size) {
-  const chunks = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
-}
-
 function getMediaGalleryCategoryCandidates(context) {
   return uniqueNonEmpty([context?.categoryId, ...(context?.categoryIds ?? [])]);
 }
@@ -894,65 +886,6 @@ async function listKalturaAttachmentTranscriptAssets(context, entry) {
   }
 
   return transcriptAssets;
-}
-
-async function listMediaGalleryCategoryMemberships(context, categoryId) {
-  if (!categoryId || !context?.serviceUrl || !context?.ks) {
-    return [];
-  }
-
-  const PAGE_SIZE = 100;
-  const memberships = [];
-  const seen = new Set();
-
-  for (let pageIndex = 1; pageIndex < 1000; pageIndex++) {
-    const response = await callKalturaApi(context, "categoryentry", "list", {
-      "filter:categoryIdEqual": categoryId,
-      "filter:statusEqual": 2,
-      "pager:pageSize": PAGE_SIZE,
-      "pager:pageIndex": pageIndex,
-      "filter:orderBy": "-createdAt",
-    });
-    const objects = Array.isArray(response?.objects) ? response.objects : [];
-    if (objects.length === 0) break;
-
-    let addedThisPage = 0;
-    for (const membership of objects) {
-      const entryId = String(membership?.entryId || "").trim();
-      if (!entryId || seen.has(entryId)) continue;
-      seen.add(entryId);
-      addedThisPage++;
-      memberships.push({
-        entryId,
-        categoryId: String(membership?.categoryId ?? categoryId),
-        categoryFullIds: String(membership?.categoryFullIds || "").trim() || null,
-        createdAt: coerceKalturaTimestamp(membership?.createdAt),
-      });
-    }
-
-    const totalCount = Number(response?.totalCount);
-    if (Number.isFinite(totalCount) && seen.size >= totalCount) break;
-    if (objects.length < PAGE_SIZE) break;
-    if (addedThisPage === 0) break;
-  }
-
-  return memberships;
-}
-
-async function getKalturaEntriesByIds(context, entryIds) {
-  const entryIdList = uniqueNonEmpty(entryIds);
-  if (entryIdList.length === 0) return [];
-
-  const entries = [];
-  for (const chunk of chunkArray(entryIdList, 50)) {
-    const response = await callKalturaApi(context, "baseentry", "getByIds", {
-      entryIds: chunk.join(","),
-    });
-    if (Array.isArray(response)) {
-      entries.push(...response);
-    }
-  }
-  return entries;
 }
 
 async function listMediaGalleryEntriesFromFrame(tabId, context) {
