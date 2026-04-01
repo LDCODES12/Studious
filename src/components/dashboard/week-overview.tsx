@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import { format, parseISO, startOfWeek, addDays, isValid } from "date-fns";
-import { formatAcademicDueDateShort } from "@/lib/academic-deadlines";
+import { formatAcademicDueDateWithWeekday } from "@/lib/academic-deadlines";
 import type { WeekOverviewData, WeekCourseData } from "@/lib/week-overview";
 
 interface WeekOverviewProps {
@@ -116,7 +116,7 @@ export function WeekOverview({ overview, courses }: WeekOverviewProps) {
                         {dl.title}
                       </span>
                       {browserReady && (
-                        <span className="text-muted-foreground/60"> · {formatAcademicDueDateShort(dl.dueDate)}</span>
+                        <span className="text-muted-foreground/60"> · {formatAcademicDueDateWithWeekday(dl.dueDate)}</span>
                       )}
                     </span>
                   ))}

@@ -30,6 +30,16 @@ export function formatAcademicDueDateShort(dueDate: string): string {
   return format(due, "MMM d");
 }
 
+export function formatAcademicDueDateWithWeekday(dueDate: string): string {
+  const due = parseISO(dueDate);
+  if (!Number.isFinite(due.getTime())) return "";
+  const planning = effectivePlanningDate(dueDate);
+  if (isMidnightDeadline(dueDate)) {
+    return `${format(planning, "EEE")} · ${format(planning, "MMM d")} (midnight)`;
+  }
+  return `${format(due, "EEE")} · ${format(due, "MMM d")}`;
+}
+
 export function formatAcademicMidnightLabel(dueDate: string): string | null {
   const due = parseISO(dueDate);
   if (!Number.isFinite(due.getTime()) || !isMidnightDeadline(dueDate)) return null;
