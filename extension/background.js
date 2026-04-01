@@ -537,6 +537,7 @@ function getMediaGalleryCategoryCandidates(context) {
 async function captureMediaGalleryContext(tabId) {
   const frameResults = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
+    world: "MAIN",
     func: () => {
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const categoryIds = new Set();
@@ -692,6 +693,7 @@ async function captureMediaGalleryContext(tabId) {
 
       return {
         href: window.location.href,
+        host: window.location.host,
         categoryIds: Array.from(categoryIds),
         ksValues: Array.from(ksValues).sort((a, b) => b.length - a.length),
         serviceUrls: Array.from(serviceUrls),
@@ -701,6 +703,26 @@ async function captureMediaGalleryContext(tabId) {
     },
   });
 
+  const scoreFrameContext = (result) => {
+    const href = String(result?.href || "");
+    const host = String(result?.host || "");
+    let score = 0;
+
+    if (result?.serviceUrls?.length) score += 12;
+    if (result?.ksValues?.length) score += 12;
+    if (result?.categoryIds?.length) score += 6;
+    if (result?.galleryTitles?.length) score += 2;
+
+    if (/kaltura|instructuremedia/i.test(host)) score += 10;
+    if (/\/canvas\/index\/launch\/target\/course-gallery/i.test(href)) score += 8;
+
+    if (/wustl\.instructure\.com/i.test(host)) score -= 6;
+    if (/\/external_tools\//i.test(href)) score -= 8;
+    if (/^about:blank$/i.test(href)) score -= 12;
+
+    return score;
+  };
+
   const merged = {
     categoryIds: new Set(),
     ksValues: new Set(),
@@ -708,6 +730,7 @@ async function captureMediaGalleryContext(tabId) {
     partnerIds: new Set(),
     galleryTitles: new Set(),
   };
+  const contexts = [];
 
   for (const frame of frameResults) {
     const result = frame?.result;
@@ -717,15 +740,53 @@ async function captureMediaGalleryContext(tabId) {
     for (const value of result.serviceUrls ?? []) merged.serviceUrls.add(value);
     for (const value of result.partnerIds ?? []) merged.partnerIds.add(value);
     for (const value of result.galleryTitles ?? []) merged.galleryTitles.add(value);
+    contexts.push({
+      frameId: frame.frameId ?? null,
+      href: result.href ?? null,
+      host: result.host ?? null,
+      categoryIds: uniqueNonEmpty(result.categoryIds),
+      ksValues: uniqueNonEmpty(result.ksValues),
+      serviceUrls: uniqueNonEmpty(result.serviceUrls),
+      partnerIds: uniqueNonEmpty(result.partnerIds),
+      galleryTitles: uniqueNonEmpty(result.galleryTitles),
+      score: scoreFrameContext(result),
+    });
   }
 
+  contexts.sort((a, b) => b.score - a.score);
+  const preferredFrame =
+    contexts.find((context) => context.serviceUrls.length > 0 && context.ksValues.length > 0) ??
+    contexts[0] ??
+    null;
+
+  const categoryIds = preferredFrame
+    ? preferredFrame.categoryIds
+    : Array.from(merged.categoryIds);
+  const ksValues = preferredFrame?.ksValues?.length
+    ? preferredFrame.ksValues
+    : Array.from(merged.ksValues);
+  const serviceUrls = preferredFrame?.serviceUrls?.length
+    ? preferredFrame.serviceUrls
+    : Array.from(merged.serviceUrls);
+  const partnerIds = preferredFrame?.partnerIds?.length
+    ? preferredFrame.partnerIds
+    : Array.from(merged.partnerIds);
+  const galleryTitles = preferredFrame?.galleryTitles?.length
+    ? preferredFrame.galleryTitles
+    : Array.from(merged.galleryTitles);
+
   return {
-    categoryId: pickFirst(Array.from(merged.categoryIds)),
-    categoryIds: Array.from(merged.categoryIds),
-    ks: pickFirst(Array.from(merged.ksValues), (value) => String(value).length >= 20),
-    serviceUrl: pickFirst(Array.from(merged.serviceUrls), (value) => Boolean(normalizeKalturaServiceUrl(value))),
-    partnerId: pickFirst(Array.from(merged.partnerIds)),
-    galleryTitle: pickFirst(Array.from(merged.galleryTitles), (value) => String(value).length >= 4),
+    categoryId: pickFirst(categoryIds),
+    categoryIds,
+    ks: pickFirst(ksValues, (value) => String(value).length >= 20),
+    serviceUrl: pickFirst(serviceUrls, (value) => Boolean(normalizeKalturaServiceUrl(value))),
+    partnerId: pickFirst(partnerIds),
+    galleryTitle: pickFirst(galleryTitles, (value) => String(value).length >= 4),
+    selectedFrameId: preferredFrame?.frameId ?? null,
+    selectedFrameHref: preferredFrame?.href ?? null,
+    selectedFrameHost: preferredFrame?.host ?? null,
+    selectedFrameScore: preferredFrame?.score ?? null,
+    frameCount: contexts.length,
   };
 }
 
@@ -1007,7 +1068,11 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
             hasServiceUrl: Boolean(courseMediaContext?.serviceUrl),
             hasKs: Boolean(courseMediaContext?.ks),
             hasCategoryId: categoryCandidates.length > 0,
-            categoryCandidates: categoryCandidates.length,
+            categoryCandidates: categoryCandidates.join(",") || null,
+            selectedFrameHost: courseMediaContext?.selectedFrameHost ?? null,
+            selectedFrameHref: courseMediaContext?.selectedFrameHref ?? null,
+            selectedFrameScore: courseMediaContext?.selectedFrameScore ?? null,
+            frameCount: courseMediaContext?.frameCount ?? null,
           });
           continue;
         }
@@ -1030,6 +1095,10 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           syncLog("media_gallery_empty", {
             course: course.name,
             categoryCandidates: galleryResult?.categoryCandidates?.join(",") || categoryCandidates.join(",") || null,
+            selectedFrameHost: resolvedMediaContext?.selectedFrameHost ?? null,
+            selectedFrameHref: resolvedMediaContext?.selectedFrameHref ?? null,
+            selectedFrameScore: resolvedMediaContext?.selectedFrameScore ?? null,
+            frameCount: resolvedMediaContext?.frameCount ?? null,
           });
           continue;
         }
