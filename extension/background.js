@@ -458,13 +458,556 @@ async function fetchPendingCandidateIds(scUrl, apiToken, canvasCourseId) {
   }
 }
 
-async function fetchPlainTextFile(url) {
+async function fetchTextFile(url) {
   const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) return "";
+  if (!res.ok) {
+    return {
+      text: "",
+      contentType: res.headers.get("content-type") ?? "",
+    };
+  }
   const buf = await res.arrayBuffer();
   let text = new TextDecoder("utf-8").decode(buf);
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return text.trim();
+  return {
+    text: text.trim(),
+    contentType: res.headers.get("content-type") ?? "",
+  };
+}
+
+async function fetchPlainTextFile(url) {
+  const { text } = await fetchTextFile(url);
+  return text;
+}
+
+function normalizeTranscriptText(rawText, fileName = "", contentType = "") {
+  let text = String(rawText || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/^\uFEFF/, "");
+
+  const lowerName = String(fileName || "").toLowerCase();
+  const lowerType = String(contentType || "").toLowerCase();
+  const looksLikeWebVtt =
+    lowerName.endsWith(".vtt") ||
+    lowerType.includes("vtt") ||
+    /^\s*WEBVTT\b/i.test(text);
+  const looksLikeSrt =
+    lowerName.endsWith(".srt") ||
+    /\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(text);
+  const looksLikeXmlTranscript =
+    lowerName.endsWith(".ttml") ||
+    lowerName.endsWith(".dfxp") ||
+    lowerType.includes("xml") ||
+    /^\s*<\?xml\b/i.test(text) ||
+    /^\s*<tt\b/i.test(text);
+
+  if (looksLikeWebVtt) {
+    text = text
+      .replace(/^\s*WEBVTT[^\n]*\n+/i, "")
+      .replace(/^NOTE[\s\S]*?(?:\n{2,}|$)/gim, "\n")
+      .replace(
+        /^\s*\d{2}:\d{2}(?::\d{2})?\.\d{3}\s*-->\s*\d{2}:\d{2}(?::\d{2})?\.\d{3}[^\n]*$/gim,
+        ""
+      )
+      .replace(/^align:[^\n]*$/gim, "")
+      .replace(/<[^>]+>/g, " ");
+  } else if (looksLikeSrt) {
+    text = text
+      .replace(/^\s*\d+\s*$/gim, "")
+      .replace(
+        /^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}[^\n]*$/gim,
+        ""
+      )
+      .replace(/<[^>]+>/g, " ");
+  } else if (looksLikeXmlTranscript) {
+    text = text
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, "\"")
+      .replace(/&#39;/gi, "'");
+  }
+
+  return text
+    .replace(/^[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+async function fetchTranscriptTextFile(url, fileName = "") {
+  const { text, contentType } = await fetchTextFile(url);
+  return normalizeTranscriptText(text, fileName, contentType);
+}
+
+function maybeDecodeURIComponent(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeKalturaServiceUrl(value) {
+  const decoded = maybeDecodeURIComponent(String(value || "").replace(/\\\//g, "/"));
+  const match = decoded.match(/^https?:\/\/[^"'?#\s]+/i);
+  if (!match) return null;
+  return match[0]
+    .replace(/\/api_v3(?:\/index\.php)?(?:\/.*)?$/i, "")
+    .replace(/\/+$/, "");
+}
+
+function normalizeKalturaKs(value) {
+  const decoded = maybeDecodeURIComponent(String(value || "").replace(/\\\//g, "/"));
+  const cleaned = decoded.replace(/^["']|["']$/g, "").trim();
+  return cleaned.length >= 20 ? cleaned : null;
+}
+
+function coerceKalturaTimestamp(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value > 1e12 ? value : value * 1000).toISOString();
+  }
+  if (/^\d{10,13}$/.test(String(value).trim())) {
+    const numeric = Number(value);
+    return new Date(String(value).trim().length >= 13 ? numeric : numeric * 1000).toISOString();
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : String(value);
+}
+
+function pickFirst(values, predicate = () => true) {
+  for (const value of values ?? []) {
+    if (predicate(value)) return value;
+  }
+  return null;
+}
+
+function dedupeTranscriptAssets(items) {
+  const merged = [];
+  const seen = new Set();
+  for (const item of items ?? []) {
+    const key = `${item.fileName || ""}|${item.url || ""}|${item.assetId || ""}`;
+    if (!item?.url || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
+async function extractKalturaApiContext(tabId, fallbackEntry) {
+  const frameResults = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [fallbackEntry?.mediaId ?? null, fallbackEntry?.title ?? null],
+    func: (fallbackEntryId, fallbackTitle) => {
+      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const entryIds = new Set();
+      const categoryIds = new Set();
+      const ksValues = new Set();
+      const serviceUrls = new Set();
+      const partnerIds = new Set();
+      const titles = new Set();
+
+      const add = (set, value, normalizer = null) => {
+        if (value == null) return;
+        const normalized = normalizer ? normalizer(value) : clean(value);
+        if (!normalized) return;
+        set.add(normalized);
+      };
+
+      const maybeDecode = (value) => {
+        const raw = String(value || "").trim();
+        if (!raw) return "";
+        try {
+          return decodeURIComponent(raw);
+        } catch {
+          return raw;
+        }
+      };
+
+      const normalizeServiceUrl = (value) => {
+        const decoded = maybeDecode(String(value || "").replace(/\\\//g, "/"));
+        const match = decoded.match(/^https?:\/\/[^"'?#\s]+/i);
+        if (!match) return null;
+        return match[0]
+          .replace(/\/api_v3(?:\/index\.php)?(?:\/.*)?$/i, "")
+          .replace(/\/+$/, "");
+      };
+
+      const normalizeKs = (value) => {
+        const decoded = maybeDecode(String(value || "").replace(/\\\//g, "/"));
+        const cleaned = decoded.replace(/^["']|["']$/g, "").trim();
+        return cleaned.length >= 20 ? cleaned : null;
+      };
+
+      const scanText = (value) => {
+        const text = String(value || "");
+        if (!text) return;
+
+        for (const match of text.matchAll(/https?:\/\/[^"'?#\s]+\/api_v3(?:\/index\.php)?/gi)) {
+          add(serviceUrls, match[0], normalizeServiceUrl);
+        }
+        for (const match of text.matchAll(/\b(?:serviceUrl|service_url)["']?\s*[:=]\s*["']([^"']+)/gi)) {
+          add(serviceUrls, match[1], normalizeServiceUrl);
+        }
+        for (const match of text.matchAll(/[?&]ks=([^&#"'\\\s]+)/gi)) {
+          add(ksValues, match[1], normalizeKs);
+        }
+        for (const match of text.matchAll(/\bks["']?\s*[:=]\s*["']([^"']{20,})["']/gi)) {
+          add(ksValues, match[1], normalizeKs);
+        }
+        for (const match of text.matchAll(/\b(?:partnerId|partner_id|wid)["']?\s*[:=]\s*["']?_?(\d{4,})["']?/gi)) {
+          add(partnerIds, match[1]);
+        }
+        for (const match of text.matchAll(/[?&]wid=_?(\d{4,})/gi)) {
+          add(partnerIds, match[1]);
+        }
+        for (const match of text.matchAll(/\b(?:categoryId|category_id|channelId|channel_id)["']?\s*[:=]\s*["']?(\d{4,})["']?/gi)) {
+          add(categoryIds, match[1]);
+        }
+        for (const match of text.matchAll(/[?&](?:categoryId|category_id|channelId|channel_id)=([^&#"'\\\s]+)/gi)) {
+          add(categoryIds, match[1]);
+        }
+        for (const match of text.matchAll(/\/channel\/[^/]+\/(\d+)/gi)) {
+          add(categoryIds, match[1]);
+        }
+        for (const match of text.matchAll(/(?:\/media\/|[?&]entry_id=)([^&#"'\/\s]+)/gi)) {
+          add(entryIds, match[1]);
+        }
+        for (const match of text.matchAll(/\b(?:entryId|entry_id)["']?\s*[:=]\s*["']([^"']{6,})["']/gi)) {
+          add(entryIds, match[1]);
+        }
+      };
+
+      const visitObject = (value, depth = 0, seen = new WeakSet()) => {
+        if (!value || depth > 2 || typeof value !== "object") return;
+        if (seen.has(value)) return;
+        seen.add(value);
+
+        const entries = Array.isArray(value)
+          ? value.entries()
+          : Object.entries(value).slice(0, 80);
+
+        for (const [key, rawChild] of entries) {
+          const child = rawChild;
+          const lowerKey = String(key || "").toLowerCase();
+
+          if (typeof child === "string" || typeof child === "number") {
+            if (lowerKey.includes("serviceurl") || lowerKey === "service_url") {
+              add(serviceUrls, child, normalizeServiceUrl);
+            } else if (lowerKey === "ks" || lowerKey.endsWith("_ks")) {
+              add(ksValues, child, normalizeKs);
+            } else if (lowerKey === "partnerid" || lowerKey === "partner_id" || lowerKey === "wid") {
+              add(partnerIds, child);
+            } else if (
+              lowerKey === "categoryid" ||
+              lowerKey === "category_id" ||
+              lowerKey === "channelid" ||
+              lowerKey === "channel_id"
+            ) {
+              add(categoryIds, child);
+            } else if (lowerKey === "entryid" || lowerKey === "entry_id" || lowerKey === "mediaid") {
+              add(entryIds, child);
+            } else if (
+              lowerKey === "title" ||
+              lowerKey === "name" ||
+              lowerKey === "entryname" ||
+              lowerKey === "media_title"
+            ) {
+              add(titles, child);
+            }
+            if (typeof child === "string") scanText(child);
+          } else if (child && typeof child === "object") {
+            visitObject(child, depth + 1, seen);
+          }
+        }
+      };
+
+      add(entryIds, fallbackEntryId);
+      add(titles, fallbackTitle);
+      add(titles, document.querySelector("h1, [data-testid='page-title']")?.textContent);
+      add(titles, document.title);
+      scanText(window.location.href);
+
+      for (const el of Array.from(document.querySelectorAll("[href],[src],[data-entry-id],[data-entryid],[data-media-id],[data-partner-id],[data-partnerid],input[type='hidden']"))) {
+        for (const attr of Array.from(el.attributes ?? [])) {
+          if (!attr?.value) continue;
+          scanText(attr.value);
+          if (/entry[-_]?id|media[-_]?id/i.test(attr.name)) add(entryIds, attr.value);
+          if (/partner[-_]?id/i.test(attr.name)) add(partnerIds, attr.value);
+          if (/category[-_]?id|channel[-_]?id/i.test(attr.name)) add(categoryIds, attr.value);
+        }
+      }
+
+      for (const script of Array.from(document.scripts)) {
+        if (script.src) scanText(script.src);
+        if (script.textContent) scanText(script.textContent.slice(0, 250000));
+      }
+
+      for (const resource of performance.getEntriesByType("resource").slice(-400)) {
+        if (resource?.name) scanText(resource.name);
+      }
+
+      const windowCandidates = [
+        window.kalturaIframePackageData,
+        window.kalturaPackageData,
+        window.kalturaPageData,
+        window.kafData,
+        window.kafVars,
+        window.KalturaData,
+        window.__INITIAL_STATE__,
+        window.__NEXT_DATA__,
+        window.__APOLLO_STATE__,
+      ].filter(Boolean);
+
+      for (const candidate of windowCandidates) {
+        visitObject(candidate);
+      }
+
+      return {
+        href: window.location.href,
+        entryIds: Array.from(entryIds),
+        categoryIds: Array.from(categoryIds),
+        ksValues: Array.from(ksValues).sort((a, b) => b.length - a.length),
+        serviceUrls: Array.from(serviceUrls),
+        partnerIds: Array.from(partnerIds),
+        titles: Array.from(titles),
+      };
+    },
+  });
+
+  const merged = {
+    entryIds: new Set([fallbackEntry?.mediaId].filter(Boolean)),
+    categoryIds: new Set(),
+    ksValues: new Set(),
+    serviceUrls: new Set(),
+    partnerIds: new Set(),
+    titles: new Set([fallbackEntry?.title].filter(Boolean)),
+  };
+
+  for (const frame of frameResults) {
+    const result = frame?.result;
+    if (!result) continue;
+    for (const value of result.entryIds ?? []) merged.entryIds.add(value);
+    for (const value of result.categoryIds ?? []) merged.categoryIds.add(value);
+    for (const value of result.ksValues ?? []) merged.ksValues.add(value);
+    for (const value of result.serviceUrls ?? []) merged.serviceUrls.add(value);
+    for (const value of result.partnerIds ?? []) merged.partnerIds.add(value);
+    for (const value of result.titles ?? []) merged.titles.add(value);
+  }
+
+  return {
+    entryId: pickFirst(Array.from(merged.entryIds)),
+    categoryId: pickFirst(Array.from(merged.categoryIds)),
+    ks: pickFirst(Array.from(merged.ksValues), (value) => String(value).length >= 20),
+    serviceUrl: pickFirst(Array.from(merged.serviceUrls), (value) => Boolean(normalizeKalturaServiceUrl(value))),
+    partnerId: pickFirst(Array.from(merged.partnerIds)),
+    title: pickFirst(Array.from(merged.titles), (value) => String(value).length >= 4) ?? fallbackEntry?.title ?? null,
+  };
+}
+
+async function callKalturaApi(context, service, action, params = {}) {
+  const serviceUrl = normalizeKalturaServiceUrl(context?.serviceUrl);
+  const ks = normalizeKalturaKs(context?.ks);
+  if (!serviceUrl || !ks) {
+    throw new Error("Missing Kaltura API context");
+  }
+
+  const url = `${serviceUrl}/api_v3/index.php?service=${encodeURIComponent(service)}&action=${encodeURIComponent(action)}`;
+  const attempts = ["1", "3", null];
+  let lastError = null;
+
+  for (const format of attempts) {
+    const body = new URLSearchParams();
+    body.set("ks", ks);
+    body.set("clientTag", "study-circle-extension");
+    if (format) body.set("format", format);
+    for (const [key, value] of Object.entries(params)) {
+      if (value == null || value === "") continue;
+      body.set(key, String(value));
+    }
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          Accept: "application/json, text/plain, */*",
+        },
+        credentials: "include",
+        body: body.toString(),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+      }
+
+      const trimmed = text.trim();
+      if (/^https?:\/\//i.test(trimmed)) {
+        return trimmed;
+      }
+
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && parsed.code && parsed.message) {
+          throw new Error(`${parsed.code}: ${parsed.message}`);
+        }
+        return parsed;
+      } catch (parseErr) {
+        lastError = parseErr;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError ?? new Error(`Kaltura ${service}.${action} returned an unreadable response`);
+}
+
+async function listKalturaAttachmentTranscriptAssets(context) {
+  if (!context?.entryId) return [];
+
+  const response = await callKalturaApi(context, "attachment_attachmentasset", "list", {
+    "filter:entryIdEqual": context.entryId,
+    "filter:statusEqual": 2,
+    "pager:pageSize": 200,
+  });
+  const assets = Array.isArray(response?.objects) ? response.objects : [];
+  const transcriptAssets = [];
+
+  for (const asset of assets) {
+    const fileName = String(asset?.filename || asset?.title || "").trim();
+    const looksLikeTranscript =
+      asset?.objectType === "KalturaTranscriptAsset" ||
+      Number(asset?.format) === 1 ||
+      /\.txt$/i.test(fileName);
+    if (!looksLikeTranscript) continue;
+
+    let url = null;
+    try {
+      const downloadUrl = await callKalturaApi(context, "attachment_attachmentasset", "getUrl", {
+        id: asset.id,
+      });
+      if (typeof downloadUrl === "string") url = downloadUrl;
+    } catch {
+      continue;
+    }
+    if (!url) continue;
+
+    transcriptAssets.push({
+      assetId: asset.id,
+      fileName: fileName || "transcript.txt",
+      url,
+      uploadedAt: coerceKalturaTimestamp(asset.updatedAt ?? asset.createdAt),
+      size: asset.size ?? null,
+      transport: "attachment_api",
+    });
+  }
+
+  return transcriptAssets;
+}
+
+async function listKalturaCaptionTranscriptAssets(context) {
+  if (!context?.entryId) return [];
+
+  const response = await callKalturaApi(context, "caption_captionasset", "list", {
+    "filter:entryIdEqual": context.entryId,
+    "filter:statusEqual": 2,
+    "pager:pageSize": 50,
+  });
+  const assets = Array.isArray(response?.objects) ? response.objects : [];
+  if (assets.length === 0) return [];
+
+  const rankedAssets = [...assets].sort((a, b) => {
+    const score = (asset) => {
+      let points = 0;
+      if (Number(asset?.isDefault) === 1) points += 10;
+      if (/^en(-|$)/i.test(String(asset?.languageCode || ""))) points += 5;
+      if (/transcript/i.test(String(asset?.label || asset?.title || ""))) points += 2;
+      return points;
+    };
+    return score(b) - score(a);
+  });
+
+  const best = rankedAssets[0];
+  if (!best?.id) return [];
+
+  let url = null;
+  try {
+    const downloadUrl = await callKalturaApi(context, "caption_captionasset", "getUrl", {
+      id: best.id,
+    });
+    if (typeof downloadUrl === "string") url = downloadUrl;
+  } catch {
+    return [];
+  }
+  if (!url) return [];
+
+  const labelBits = [best.languageCode, best.label].filter(Boolean).join(" ").trim();
+  const friendly = labelBits ? `${labelBits} transcript.txt` : "transcript.txt";
+
+  return [{
+    assetId: best.id,
+    fileName: friendly,
+    url,
+    uploadedAt: coerceKalturaTimestamp(best.updatedAt ?? best.createdAt),
+    size: best.size ?? null,
+    transport: "caption_api",
+    isCaptionFallback: true,
+  }];
+}
+
+async function listMediaTranscriptAttachmentsViaApi(tabId, fallbackEntry) {
+  const context = await extractKalturaApiContext(tabId, fallbackEntry);
+  if (!context?.entryId || !context?.serviceUrl || !context?.ks) {
+    return { context, attachments: [] };
+  }
+
+  const [attachmentAssets, captionAssets] = await Promise.allSettled([
+    listKalturaAttachmentTranscriptAssets(context),
+    listKalturaCaptionTranscriptAssets(context),
+  ]);
+
+  return {
+    context,
+    attachments: dedupeTranscriptAssets(
+      (attachmentAssets.status === "fulfilled" && attachmentAssets.value.length > 0)
+        ? attachmentAssets.value
+        : (captionAssets.status === "fulfilled" ? captionAssets.value : [])
+    ),
+  };
+}
+
+async function listMediaGalleryEntriesViaApi(tabId) {
+  const context = await extractKalturaApiContext(tabId, {});
+  if (!context?.categoryId || !context?.serviceUrl || !context?.ks) {
+    return { context, entries: [] };
+  }
+
+  const response = await callKalturaApi(context, "baseentry", "list", {
+    "filter:categoryAncestorIdIn": context.categoryId,
+    "pager:pageSize": 100,
+    "filter:orderBy": "-createdAt",
+  });
+  const objects = Array.isArray(response?.objects) ? response.objects : [];
+
+  return {
+    context,
+    entries: objects
+      .filter((entry) => entry?.id && String(entry?.name || entry?.title || "").trim().length >= 3)
+      .map((entry) => ({
+        mediaId: entry.id,
+        url: null,
+        title: String(entry.name || entry.title || entry.id).trim(),
+        section: null,
+      })),
+  };
 }
 
 function buildMediaTranscriptContentId(mediaId, attachmentFileName, attachmentUrl) {
@@ -569,7 +1112,7 @@ async function collectMediaGalleryEntries(tabId) {
   return merged;
 }
 
-async function extractMediaTranscriptAttachments(tabId) {
+async function extractMediaTranscriptAttachmentsFromDom(tabId) {
   const frameResults = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     func: async () => {
@@ -710,7 +1253,16 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
         await chrome.tabs.update(mediaTabId, { url: course.mediaGalleryTabUrl });
         await waitForTabLoad(mediaTabId, 30_000);
 
-        const galleryEntries = await collectMediaGalleryEntries(mediaTabId);
+        const galleryApiResult = await listMediaGalleryEntriesViaApi(mediaTabId).catch((err) => {
+          syncLog("media_gallery_api_err", {
+            course: course.name,
+            error: err?.message ?? String(err),
+          });
+          return { context: null, entries: [] };
+        });
+        const galleryEntries = galleryApiResult.entries.length > 0
+          ? galleryApiResult.entries
+          : await collectMediaGalleryEntries(mediaTabId);
         if (galleryEntries.length === 0) {
           syncLog("media_gallery_empty", { course: course.name });
           continue;
@@ -726,15 +1278,57 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           course: course.name,
           entries: galleryEntries.length,
           inspecting: entriesToInspect.length,
+          source: galleryApiResult.entries.length > 0 ? "kaltura_api" : "dom_fallback",
         });
 
         for (const entry of entriesToInspect) {
           try {
-            await chrome.tabs.update(mediaTabId, { url: entry.url });
-            await waitForTabLoad(mediaTabId, 30_000);
+            let apiResult;
+            if (galleryApiResult.entries.length > 0 && galleryApiResult.context?.serviceUrl && galleryApiResult.context?.ks) {
+              apiResult = await listMediaTranscriptAttachmentsViaApi(mediaTabId, {
+                ...entry,
+                mediaId: entry.mediaId,
+                title: entry.title,
+              }).catch((err) => {
+                syncLog("media_entry_api_err", {
+                  course: course.name,
+                  title: entry.title,
+                  error: err?.message ?? String(err),
+                });
+                return { context: null, attachments: [] };
+              });
+            } else {
+              await chrome.tabs.update(mediaTabId, { url: entry.url });
+              await waitForTabLoad(mediaTabId, 30_000);
 
-            const attachments = await extractMediaTranscriptAttachments(mediaTabId);
+              apiResult = await listMediaTranscriptAttachmentsViaApi(mediaTabId, entry).catch((err) => {
+                syncLog("media_entry_api_err", {
+                  course: course.name,
+                  title: entry.title,
+                  error: err?.message ?? String(err),
+                });
+                return { context: null, attachments: [] };
+              });
+            }
+
+            let attachments = apiResult.attachments ?? [];
+            let attachmentSource = attachments.length > 0 ? "kaltura_api" : "dom_fallback";
+            if (attachments.length === 0 && entry.url) {
+              if (entry.url) {
+                await chrome.tabs.update(mediaTabId, { url: entry.url });
+                await waitForTabLoad(mediaTabId, 30_000);
+              }
+              attachments = await extractMediaTranscriptAttachmentsFromDom(mediaTabId);
+            }
             if (attachments.length === 0) continue;
+
+            syncLog("media_entry_source", {
+              course: course.name,
+              title: entry.title,
+              source: attachmentSource,
+              attachments: attachments.length,
+              hasApiContext: Boolean(apiResult?.context?.serviceUrl && apiResult?.context?.ks),
+            });
 
             for (const attachment of attachments) {
               const contentId = buildMediaTranscriptContentId(entry.mediaId, attachment.fileName, attachment.url);
@@ -757,7 +1351,9 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
               const shouldDownload = requestedIds.has(contentId) || shouldAutoImport;
               if (!shouldDownload || downloadedIds.has(contentId)) continue;
 
-              const text = await fetchPlainTextFile(attachment.url);
+              const text = attachment.transport === "caption_api"
+                ? await fetchTranscriptTextFile(attachment.url, attachment.fileName)
+                : await fetchPlainTextFile(attachment.url);
               if (text.length < 100) continue;
 
               downloadedIds.add(contentId);
