@@ -17,9 +17,21 @@ export interface RecentCourseActivityItem {
 
 const HIGH_SIGNAL_TYPES = new Set(["lecture_notes", "lecture_slides", "textbook", "problem_set"]);
 const RECENT_ACTIVITY_MAX_PER_COURSE = 4;
+const RECENT_ACTIVITY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function formatFreshnessLabel(value: Date): string {
   return format(value, "MMM d");
+}
+
+function parseFreshness(value: string | Date | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function isRecentFreshness(value: string | Date | null | undefined, cutoff: number): boolean {
+  const parsed = parseFreshness(value);
+  return Boolean(parsed && parsed.getTime() >= cutoff);
 }
 
 function isUpdatedMaterial(material: {
@@ -137,6 +149,7 @@ function activityPriority(item: RecentCourseActivityItem): number {
 
 export async function getRecentCourseActivity(courseIds: string[]): Promise<Record<string, RecentCourseActivityItem[]>> {
   if (courseIds.length === 0) return {};
+  const cutoff = Date.now() - RECENT_ACTIVITY_LOOKBACK_MS;
 
   const [materials, candidates] = await Promise.all([
     db.courseMaterial.findMany({
@@ -185,6 +198,7 @@ export async function getRecentCourseActivity(courseIds: string[]): Promise<Reco
     }
     const item = buildMaterialActivity(material);
     if (!item) continue;
+    if (!isRecentFreshness(item.freshnessAt, cutoff)) continue;
     const bucket = grouped.get(item.courseId) ?? [];
     bucket.push(item);
     grouped.set(item.courseId, bucket);
@@ -193,6 +207,7 @@ export async function getRecentCourseActivity(courseIds: string[]): Promise<Reco
   for (const candidate of candidates) {
     const item = buildCandidateActivity(candidate);
     if (!item) continue;
+    if (!isRecentFreshness(item.freshnessAt, cutoff)) continue;
     const bucket = grouped.get(item.courseId) ?? [];
     bucket.push(item);
     grouped.set(item.courseId, bucket);

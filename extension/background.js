@@ -262,13 +262,15 @@ async function startScout(trigger = "manual") {
 async function handleCanvasData(payload) {
   try {
     const { scUrl, apiToken, canvasUrl } = await chrome.storage.local.get(["scUrl", "apiToken", "canvasUrl"]);
+    const syncContext = await chrome.storage.session.get(["syncMode", "syncSelectedIds", "syncTrigger"]);
+    const scoutMode = syncContext.syncMode === "scout";
 
     // ── Step 1: Resolve Gradescope course IDs from Canvas LTI tab URLs ───────
     // content.js stores gradescopeTabUrl (absolute Canvas URL) for courses with
     // a Gradescope navigation tab. We navigate to each URL — Canvas LTI redirects
     // to gradescope.com/courses/XXXX — and read the resulting URL to get the ID.
 
-    const coursesNeedingResolve = payload.courses.filter(
+    const coursesNeedingResolve = scoutMode ? [] : payload.courses.filter(
       (c) => !c.gradescopeCourseId && c.gradescopeTabUrl,
     );
 
@@ -447,9 +449,6 @@ async function handleCanvasData(payload) {
     }
 
     syncLog("canvas_import_done", { status: res.status });
-    const syncContext = await chrome.storage.session.get(["syncMode", "syncSelectedIds", "syncTrigger"]);
-    const scoutMode = syncContext.syncMode === "scout";
-
     // ── Step 4: Scrape Gradescope assignments for linked courses ─────────────
     // Only scrapes courses where we successfully resolved a Gradescope ID.
     const gsLinkedCourses = scoutMode ? [] : payload.courses.filter((c) => c.gradescopeCourseId);

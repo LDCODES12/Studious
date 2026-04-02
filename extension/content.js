@@ -235,10 +235,6 @@ function extractScheduleSection(html) {
 
   // ── Phase 2: fetch full data for selected courses only ────────────────────
   try {
-    const selectedSet = Array.isArray(selectedIds) && selectedIds.length > 0
-      ? new Set(selectedIds.map(String))
-      : null;
-
     progress(10, "Fetching your courses…");
 
     // Include syllabus_body + enrollment grades in the bulk course fetch.
@@ -249,8 +245,23 @@ function extractScheduleSection(html) {
       `&include[]=enrollments&include[]=total_scores&per_page=100`
     );
 
-    const courses = rawCourses
-      .filter((c) => c.name && !c.access_restricted_by_date && (!selectedSet || selectedSet.has(String(c.id))))
+    const activeCourses = rawCourses.filter((c) => c.name && !c.access_restricted_by_date);
+    let scopedCourses = activeCourses;
+    let selectedSet = Array.isArray(selectedIds) && selectedIds.length > 0
+      ? new Set(selectedIds.map(String))
+      : null;
+
+    if (selectedSet) {
+      scopedCourses = activeCourses.filter((c) => selectedSet.has(String(c.id)));
+      if (scoutMode && scopedCourses.length === 0 && activeCourses.length > 0) {
+        console.log("[scout] stored course scope is stale; falling back to all active courses");
+        selectedSet = null;
+        scopedCourses = activeCourses;
+        await chrome.storage.local.remove(["lastSelectedCourseIds"]);
+      }
+    }
+
+    const courses = scopedCourses
       .map((c) => ({
         id: c.id,
         name: c.name,
