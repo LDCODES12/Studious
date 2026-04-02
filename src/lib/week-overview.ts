@@ -11,9 +11,15 @@ import { modelConfig } from "@/lib/ai-models";
 import { z } from "zod";
 import crypto from "crypto";
 import { db } from "@/lib/db";
-import { getISOWeek, getISOWeekYear, startOfWeek, addDays, format, parseISO, isValid, getDay } from "date-fns";
+import { getISOWeek, getISOWeekYear, startOfWeek, addDays, format, parseISO, isValid } from "date-fns";
 import type { CourseContextSnapshot } from "@/lib/course-context";
 import type { LearningSignals } from "@/lib/learning-signals";
+import {
+  buildEvidenceFingerprintFragment,
+  buildWeeklyEvidencePromptBlock,
+  resolveWeeklyEvidence,
+  type ResolvedWeeklyEvidence,
+} from "@/lib/source-aware-evidence";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +66,7 @@ type CourseContextBundle = {
   context: CourseContextSnapshot;
 };
 
-const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-04-01-local-deadline-v4";
+const WEEK_OVERVIEW_FINGERPRINT_VERSION = "2026-04-02-transcript-enrichment-v1";
 
 // ── Week key ─────────────────────────────────────────────────────────────────
 
@@ -298,6 +304,7 @@ const weekOverviewSchema = z.object({
 
 async function generateOverview(
   courseContexts: CourseContextBundle[],
+  evidenceByCourse: Map<string, ResolvedWeeklyEvidence>,
   signals: LearningSignals | null,
   now: Date,
 ): Promise<{ summary: string; courseNotes: { courseName: string; note: string }[] }> {
@@ -337,6 +344,12 @@ async function generateOverview(
       parts.push(`Due: ${dlStr}`);
     }
 
+    const evidence = evidenceByCourse.get(course.id);
+    const evidenceBlock = evidence ? buildWeeklyEvidencePromptBlock(evidence) : "";
+    if (evidenceBlock) {
+      parts.push(`Supplemental learning evidence: ${evidenceBlock}`);
+    }
+
     return parts.join(" | ");
   });
 
@@ -362,7 +375,14 @@ async function generateOverview(
   const { object } = await generateObject({
     ...modelConfig("medium"),
     schema: weekOverviewSchema,
-    system: `You write brief weekly learning overviews for a college student. Focus on CONTENT — what topics they're learning, what readings matter, what assignments to prioritize. Do NOT mention class times or schedules. Be specific — reference actual topic names, assignment names, and readings. Keep the summary to 2-3 sentences. Keep each course note to one concise sentence about what to focus on. Be encouraging but honest about heavy workloads.`,
+    system: `You write brief weekly learning overviews for a college student. Focus on CONTENT — what topics they're learning, what readings matter, what assignments to prioritize. Do NOT mention class times or schedules. Be specific — reference actual topic names, assignment names, readings, and lecture emphasis when it is supported by supplemental evidence.
+
+Important policy:
+- Structured course data (week labels, topics, readings, deadlines) is authoritative.
+- Supplemental learning evidence from notes or transcripts may enrich the explanation, but must never override dates, week structure, or official topic framing.
+- If transcript evidence conflicts with the structured course data, trust the structured data.
+
+Keep the summary to 2-3 sentences. Keep each course note to one concise sentence about what to focus on. Be encouraging but honest about heavy workloads.`,
     prompt: `Today is ${dayOfWeek}, ${format(now, "MMMM d")}.
 
 Courses this week:
@@ -377,6 +397,7 @@ Write a learning-focused week overview with a summary and a note for each course
 
 function buildWeekOverviewFingerprint(
   courseContexts: CourseContextBundle[],
+  evidenceByCourse: Map<string, ResolvedWeeklyEvidence>,
   signals: LearningSignals | null,
 ): string {
   const payload = {
@@ -402,6 +423,23 @@ function buildWeekOverviewFingerprint(
         dueDate: a.dueDate,
         status: a.status,
       })),
+      evidence: buildEvidenceFingerprintFragment(
+        evidenceByCourse.get(course.id) ?? {
+          structuralContext: {
+            courseId: course.id,
+            courseName: course.name,
+            weekLabel: null,
+            topics: [],
+            readings: [],
+            notes: null,
+            deadlines: [],
+            nextAssessmentTitle: null,
+          },
+          canonicalMaterials: [],
+          transcriptMaterials: [],
+          transcriptDigest: null,
+        }
+      ),
     })),
     signals: signals
       ? {
@@ -430,7 +468,19 @@ export async function getOrCreateWeekOverview(
   if (courseContexts.length === 0) return null;
 
   const weekKey = getCurrentWeekKey(now);
-  const sourceFingerprint = buildWeekOverviewFingerprint(courseContexts, signals);
+  const weeklyEvidenceEntries = await Promise.all(
+    courseContexts.map(async ({ course, context }) => [
+      course.id,
+      await resolveWeeklyEvidence({
+        courseId: course.id,
+        courseName: course.name,
+        context,
+        now,
+      }),
+    ] as const)
+  );
+  const evidenceByCourse = new Map(weeklyEvidenceEntries);
+  const sourceFingerprint = buildWeekOverviewFingerprint(courseContexts, evidenceByCourse, signals);
 
   // Check cache
   const cached = await db.learningEvent.findFirst({
@@ -454,7 +504,7 @@ export async function getOrCreateWeekOverview(
 
   // Generate new overview
   try {
-    const result = await generateOverview(courseContexts, signals, now);
+    const result = await generateOverview(courseContexts, evidenceByCourse, signals, now);
 
     const data: WeekOverviewData = {
       weekKey,

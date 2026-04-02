@@ -5,6 +5,7 @@ import { apiLogger } from "@/lib/logger";
 import { generateObject } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { z } from "zod";
+import { formatGenerationEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
 
 const quizSchema = z.object({
   questions: z.array(
@@ -74,30 +75,21 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   });
   if (!course) return log.respond(NextResponse.json({ error: "Not found" }, { status: 404 }));
 
-  // Fetch study materials — optionally filtered to specific file IDs
-  const materials = await db.courseMaterial.findMany({
-    where: {
-      courseId,
-      storedForAI: true,
-      ...(materialIds && materialIds.length > 0 ? { id: { in: materialIds } } : {}),
-    },
-    select: { rawText: true, fileName: true, detectedType: true },
+  const evidence = await resolveStudyEvidence({
+    courseId,
+    courseName: course.name,
+    materialIds,
+    storedForAIOnly: true,
   });
 
-  if (materials.length === 0) {
+  if (evidence.canonicalMaterials.length === 0 && evidence.transcriptMaterials.length === 0) {
     return log.respond(NextResponse.json(
       { error: "No study materials uploaded yet. Upload lecture notes or slides first." },
       { status: 400 }
     ));
   }
 
-  // Concatenate rawText up to 60k chars
-  let combinedText = "";
-  for (const m of materials) {
-    if (combinedText.length >= 60000) break;
-    combinedText += `\n\n--- ${m.fileName} ---\n${m.rawText}`;
-  }
-  combinedText = combinedText.slice(0, 60000);
+  const materialPrompt = formatGenerationEvidenceForPrompt(evidence, "quiz");
 
   let questions: { question: string; options: string[]; correctIndex: number; explanation: string | null }[];
   try {
@@ -112,8 +104,11 @@ Rules:
 - Only one option is correct
 - Include a brief explanation of why the answer is correct
 - Vary difficulty (2 easy, 4 medium, 2 hard)
-- Do NOT ask about page numbers, dates, or administrative details`,
-      prompt: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
+- Do NOT ask about page numbers, dates, or administrative details
+- Use canonical course content as the main conceptual backbone when it exists
+- Use lecture transcript evidence to add instructor emphasis, likely-tested nuances, examples, and review-session details
+- If transcripts are the only strong source, use them fully rather than withholding value`,
+      prompt: `Course: ${course.name}\n\n${materialPrompt}`,
       abortSignal: AbortSignal.timeout(45_000),
     });
     questions = object.questions;

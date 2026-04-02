@@ -3,29 +3,14 @@ import { streamText, convertToModelMessages } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
-import { generateEmbedding, getMaterialsByIds, searchMaterials } from "@/lib/embeddings";
 import { buildStudyContext } from "@/lib/course-context";
 import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
 import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
+import { formatStudyEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
 
 export const maxDuration = 60;
-
-type RetrievedMaterial = { id: string; fileName: string; rawText: string };
-
-function mergeMaterials(
-  preferred: RetrievedMaterial[],
-  semantic: RetrievedMaterial[],
-  limit: number
-): RetrievedMaterial[] {
-  const merged = new Map<string, RetrievedMaterial>();
-  for (const material of [...preferred, ...semantic]) {
-    if (!merged.has(material.id)) merged.set(material.id, material);
-    if (merged.size >= limit) break;
-  }
-  return [...merged.values()];
-}
 
 // ── Learning-aligned system prompt instructions ──────────────────────────────
 
@@ -38,6 +23,8 @@ Your role:
 - If something is due soon, help them prioritize and plan realistic study sessions.
 - When tutoring, use the "what do you already know?" → "let's build on that" → "try this" pattern.
 - Suggest the review → work → preview cycle: review what was just covered, work on current assignments, preview what's coming next.
+- Prefer canonical materials for the clean conceptual backbone and use lecture transcripts for instructor emphasis, examples, clarifications, and review-session details.
+- If the student asks what happened in lecture or what the professor emphasized, transcript evidence may be the primary source for that part of the answer.
 - Be concise. Use plain text with line breaks — no markdown formatting.
 - Be supportive, not judgmental. Never moralize about study habits.
 
@@ -144,69 +131,19 @@ export async function POST(request: NextRequest) {
     return new Response(JSON.stringify({ error: "Course not found" }), { status: 404 });
   }
 
-  let targetContext = "";
-  if (targetEvidence) {
-    const lines: string[] = [];
-    if (targetEvidence.weekLabel) lines.push(`Selected study target comes from: ${targetEvidence.weekLabel}`);
-    if (targetEvidence.readings.length > 0) lines.push(`Related readings: ${targetEvidence.readings.join(", ")}`);
-    if (targetEvidence.materials.length > 0) {
-      lines.push(`Most relevant imported materials: ${targetEvidence.materials.map((material) => material.fileName).join(", ")}`);
-    }
-    if (targetEvidence.candidates.length > 0) {
-      lines.push(`Nearby Canvas modules: ${[...new Set(targetEvidence.candidates.map((candidate) => candidate.moduleName))].join(" | ")}`);
-    }
-    if (lines.length > 0) {
-      targetContext = `\n\nSelected study target evidence:\n${lines.map((line) => `- ${line}`).join("\n")}`;
-    }
-  }
-
-  // RAG: embed last user message for single-course mode
   let materialContext = "";
   if (courseId) {
     const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
     const lastUserText = extractTextFromParts(lastUserMsg?.parts);
-    const evidenceTerms = [
-      ...(targetEvidence?.readings ?? []),
-      ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
-      targetEvidence?.weekLabel ?? "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
-    const ragQueryBase = topicName
-      ? (lastUserText ? `${topicName}: ${lastUserText}` : topicName)
-      : lastUserText;
-    const ragQuery = ragQueryBase
-      ? [ragQueryBase, evidenceTerms].filter(Boolean).join(" | ")
-      : evidenceTerms || null;
-
-    if (ragQuery) {
-      try {
-        const [preferredMaterials, semanticMaterials] = await Promise.all([
-          targetEvidence?.materials?.length
-            ? getMaterialsByIds(courseId, targetEvidence.materials.map((material) => material.id).slice(0, 3))
-            : Promise.resolve([]),
-          (async () => {
-            const vector = await generateEmbedding(ragQuery);
-            return searchMaterials(courseId, vector, 5);
-          })(),
-        ]);
-
-        const materials = mergeMaterials(preferredMaterials, semanticMaterials, 3);
-        if (materials.length > 0) {
-          materialContext =
-            "\n\nRelevant course material:\n" +
-            materials
-              .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 500)}`)
-              .join("\n\n");
-        } else if (targetEvidence?.candidates?.length) {
-          materialContext =
-            "\n\nRelevant Canvas files exist for this topic, but their contents are not imported yet:\n" +
-            targetEvidence.candidates.slice(0, 5).map((candidate) => `- ${candidate.fileName}`).join("\n") +
-            "\nUse the week and reading context you do have, and be honest that you cannot quote from those files yet.";
-        }
-      } catch { /* RAG failure is non-fatal */ }
-    }
-    if (!materialContext) {
+    try {
+      const evidence = await resolveStudyEvidence({
+        courseId,
+        topicName,
+        questionText: lastUserText,
+        targetEvidence,
+      });
+      materialContext = `\n\nSource-aware study evidence:\n${formatStudyEvidenceForPrompt(evidence)}`;
+    } catch {
       materialContext = "\n\nNote: No course materials were found. If the student asks about specific documents, be honest that you don't have access to them.";
     }
   }
@@ -239,7 +176,7 @@ export async function POST(request: NextRequest) {
 
 Today is ${today}.
 ${adaptiveRules}
-${promptText}${targetContext}${materialContext}`;
+${promptText}${materialContext}`;
 
   // ── Responses API conversation chaining ──────────────────────────────────
   // previousResponseId comes from the client (round-tripped via message metadata).

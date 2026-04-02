@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { generateObject } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { z } from "zod";
+import { formatGenerationEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
 
 const flashcardSchema = z.object({
   cards: z.array(z.object({ front: z.string(), back: z.string() })),
@@ -63,28 +64,21 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const body = await request.json().catch(() => ({}));
   const { materialIds, title } = body as { materialIds?: string[]; title?: string };
 
-  const materials = await db.courseMaterial.findMany({
-    where: {
-      courseId,
-      storedForAI: true,
-      ...(materialIds && materialIds.length > 0 ? { id: { in: materialIds } } : {}),
-    },
-    select: { rawText: true, fileName: true },
+  const evidence = await resolveStudyEvidence({
+    courseId,
+    courseName: course.name,
+    materialIds,
+    storedForAIOnly: true,
   });
 
-  if (materials.length === 0) {
+  if (evidence.canonicalMaterials.length === 0 && evidence.transcriptMaterials.length === 0) {
     return NextResponse.json(
       { error: "No study materials available. Upload lecture notes or slides first." },
       { status: 400 }
     );
   }
 
-  let combinedText = "";
-  for (const m of materials) {
-    if (combinedText.length >= 40000) break;
-    combinedText += `\n\n--- ${m.fileName} ---\n${m.rawText}`;
-  }
-  combinedText = combinedText.slice(0, 40000);
+  const materialPrompt = formatGenerationEvidenceForPrompt(evidence, "flashcards");
 
   let cards: { front: string; back: string }[];
   try {
@@ -100,8 +94,11 @@ Rules:
 - Mix difficulty: definitions, conceptual understanding, application
 - Include key formulas/equations where relevant (use plain text notation)
 - Avoid trivial facts like page numbers or dates
-- Make the front side specific enough to have ONE clear answer`,
-      prompt: `Course: ${course.name}\n\nMaterial:\n${combinedText}`,
+- Make the front side specific enough to have ONE clear answer
+- Use canonical course content as the main conceptual backbone when it exists
+- Use lecture transcript evidence to sharpen emphasis, examples, clarifications, and likely confusions
+- If transcripts are the only strong source, use them fully rather than withholding value`,
+      prompt: `Course: ${course.name}\n\n${materialPrompt}`,
       abortSignal: AbortSignal.timeout(45_000),
     });
     cards = object.cards;

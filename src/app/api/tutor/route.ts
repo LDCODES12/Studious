@@ -3,29 +3,14 @@ import { streamText, convertToModelMessages } from "ai";
 import { modelConfig } from "@/lib/ai-models";
 import { auth } from "@/lib/auth";
 import { apiLogger } from "@/lib/logger";
-import { generateEmbedding, getMaterialsByIds, searchMaterials } from "@/lib/embeddings";
 import { buildStudyContext } from "@/lib/course-context";
 import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
 import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
+import { formatStudyEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
 
 export const maxDuration = 60;
-
-type RetrievedMaterial = { id: string; fileName: string; rawText: string };
-
-function mergeMaterials(
-  preferred: RetrievedMaterial[],
-  semantic: RetrievedMaterial[],
-  limit: number
-): RetrievedMaterial[] {
-  const merged = new Map<string, RetrievedMaterial>();
-  for (const material of [...preferred, ...semantic]) {
-    if (!merged.has(material.id)) merged.set(material.id, material);
-    if (merged.size >= limit) break;
-  }
-  return [...merged.values()];
-}
 
 const SOCRATIC_INSTRUCTIONS = `You are a Socratic tutor. Your job is to help the student discover understanding through questions — NOT by explaining.
 
@@ -37,6 +22,8 @@ Core rules:
 - If they're stuck, give a small hint (a nudge, not the answer) and ask again.
 - If they've genuinely tried 3+ times and are still stuck, give a brief explanation (2-3 sentences max), then immediately ask a follow-up question to check they understood.
 - Reference their course materials and readings when relevant — "Your textbook covers this in Chapter 5" etc.
+- Prefer canonical materials for clean explanations and use lecture transcripts for instructor emphasis, examples, clarifications, and review-session details.
+- If the student asks what happened in lecture or what the professor emphasized, transcript evidence may be the primary source for that part of the answer.
 - Keep your responses SHORT. 1-3 sentences, usually ending with a question.
 - Be warm, encouraging, and patient. Never condescending. Celebrate when they get it.
 - Use plain text with line breaks — no markdown formatting.
@@ -106,70 +93,18 @@ export async function POST(request: NextRequest) {
   // Build course context
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
-  let targetContext = "";
-  if (targetEvidence) {
-    const lines: string[] = [];
-    if (targetEvidence.weekLabel) lines.push(`Selected study target comes from: ${targetEvidence.weekLabel}`);
-    if (targetEvidence.readings.length > 0) lines.push(`Related readings: ${targetEvidence.readings.join(", ")}`);
-    if (targetEvidence.materials.length > 0) lines.push(`Most relevant imported materials: ${targetEvidence.materials.map((material) => material.fileName).join(", ")}`);
-    if (targetEvidence.candidates.length > 0) {
-      lines.push(`Nearby Canvas modules: ${[...new Set(targetEvidence.candidates.map((candidate) => candidate.moduleName))].join(" | ")}`);
-    }
-    if (lines.length > 0) {
-      targetContext = `\n\nSelected study target evidence:\n${lines.map((line) => `- ${line}`).join("\n")}`;
-    }
-  }
-
-  // RAG: use topic name for initial search, then last user message for follow-ups
   let materialContext = "";
   if (courseId) {
     try {
       const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
       const lastUserText = extractTextFromParts(lastUserMsg?.parts);
-
-      const evidenceTerms = [
-        ...(targetEvidence?.readings ?? []),
-        ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
-        targetEvidence?.weekLabel ?? "",
-      ]
-        .filter(Boolean)
-        .join(" | ");
-
-      const ragQueryBase = userMessages.length <= 1 && topicName
-        ? topicName
-        : (lastUserText ? (topicName ? `${topicName}: ${lastUserText}` : lastUserText) : topicName ?? null);
-
-      const ragQuery = ragQueryBase
-        ? [ragQueryBase, evidenceTerms].filter(Boolean).join(" | ")
-        : evidenceTerms || null;
-
-      if (ragQuery) {
-        const [preferredMaterials, semanticMaterials] = await Promise.all([
-          targetEvidence?.materials?.length
-            ? getMaterialsByIds(courseId, targetEvidence.materials.map((material) => material.id).slice(0, 3))
-            : Promise.resolve([]),
-          (async () => {
-            const vector = await generateEmbedding(ragQuery);
-            return searchMaterials(courseId, vector, 5);
-          })(),
-        ]);
-
-        const materials = mergeMaterials(preferredMaterials, semanticMaterials, 3);
-        if (materials.length > 0) {
-          materialContext =
-            "\n\nCourse materials you have access to (reference these when helpful):\n" +
-            materials
-              .map((m) => `${m.fileName}:\n${m.rawText.slice(0, 800)}`)
-              .join("\n\n");
-        } else if (targetEvidence?.candidates?.length) {
-          materialContext =
-            "\n\nRelevant Canvas files exist for this topic, but their contents are not imported yet:\n" +
-            targetEvidence.candidates.slice(0, 5).map((candidate) => `- ${candidate.fileName}`).join("\n") +
-            "\nUse the week and reading context you do have, and be honest that you cannot quote from those files yet.";
-        } else {
-          materialContext = "\n\nNote: No course materials were found for this topic. Be honest about this — do not claim you can see documents you cannot. If the student asks about specific documents, tell them you don't have access to those materials.";
-        }
-      }
+      const evidence = await resolveStudyEvidence({
+        courseId,
+        topicName,
+        questionText: lastUserText,
+        targetEvidence,
+      });
+      materialContext = `\n\nSource-aware study evidence:\n${formatStudyEvidenceForPrompt(evidence)}`;
     } catch {
       materialContext = "\n\nNote: Could not search course materials. If the student asks about specific documents, be honest that you cannot access them right now.";
     }
@@ -202,7 +137,7 @@ export async function POST(request: NextRequest) {
   const system = `${SOCRATIC_INSTRUCTIONS}
 
 Today is ${today}.${topicContext}${adaptiveRules}
-${promptText}${targetContext}${materialContext}`;
+${promptText}${materialContext}`;
 
   // ── Responses API conversation chaining ──────────────────────────────────
   const config = modelConfig("high");
