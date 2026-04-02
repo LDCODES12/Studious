@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { courseColors } from "@/lib/constants";
 import type { WeekPosition, DeadlineItem } from "@/lib/course-context";
+import type { RecentCourseActivityItem } from "@/lib/recent-course-activity";
 
 interface CourseCardProps {
   course: {
@@ -16,6 +17,7 @@ interface CourseCardProps {
     upcomingAssignments: DeadlineItem[];
     nextClassMeeting: string | null;
   };
+  recentItems: RecentCourseActivityItem[];
 }
 
 function formatNextDue(item: DeadlineItem): string {
@@ -26,9 +28,10 @@ function formatNextDue(item: DeadlineItem): string {
   return `${days}d`;
 }
 
-export function CourseCard({ course, context }: CourseCardProps) {
+export function CourseCard({ course, context, recentItems }: CourseCardProps) {
   const colors = courseColors[course.color];
   const { currentWeek } = context;
+  const recentItem = recentItems[0] ?? null;
 
   // First not-started assignment due soonest
   const nextDue =
@@ -86,6 +89,18 @@ export function CourseCard({ course, context }: CourseCardProps) {
           <div className="mt-3 flex items-center gap-1.5 text-[12px] text-muted-foreground">
             <span className="truncate">{nextDue.title}</span>
             <span className="shrink-0">· {formatNextDue(nextDue)}</span>
+          </div>
+        )}
+
+        {recentItem && (
+          <div className="mt-3 rounded-md bg-accent/40 px-2.5 py-2">
+            <p className="text-[11px] font-medium text-foreground/90">
+              {recentItem.label}
+            </p>
+            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {recentItem.title}
+              <span className="text-muted-foreground/60"> · {recentItem.freshnessLabel}</span>
+            </p>
           </div>
         )}
       </div>

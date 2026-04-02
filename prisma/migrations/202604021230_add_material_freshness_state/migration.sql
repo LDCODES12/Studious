@@ -1,0 +1,2 @@
+ALTER TABLE "CourseMaterial"
+ADD COLUMN IF NOT EXISTS "sourceUpdatedAt" TIMESTAMP(3);

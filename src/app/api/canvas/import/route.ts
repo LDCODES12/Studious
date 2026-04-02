@@ -11,7 +11,6 @@ import {
   scheduleScore,
   bestWindow,
   detectSourceFormat,
-  type ParsedTopic,
   type ExtractedClassSchedule,
 } from "@/lib/parse-syllabus";
 import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
@@ -22,6 +21,8 @@ import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-ma
 import {
   effectiveStoredForAI,
   hashMaterialText,
+  isRemoteSourceNewer,
+  normalizeSourceUpdatedAt,
   updateMaterialEmbedding,
   type MaterialSourceKind,
 } from "@/lib/material-sync";
@@ -160,6 +161,7 @@ interface CanvasAssignmentGroup {
 }
 
 interface ImportPayload {
+  syncMode?: "manual" | "scout";
   courses: CanvasCourse[];
   assignments: CanvasAssignment[];
   modules: CanvasModule[];
@@ -336,6 +338,25 @@ function resolveCanvasSourceKey(
   return `filename:${sourceKind}:${fileName.trim().toLowerCase()}`;
 }
 
+function materialStateKey(sourceKind: MaterialSourceKind, sourceKey: string): string {
+  return `${sourceKind}:${sourceKey}`;
+}
+
+function deriveCandidateStatus(args: {
+  requested: boolean;
+  importedMaterial: {
+    sourceUpdatedAt: Date | null;
+  } | null;
+  remoteUpdatedAt?: string | null;
+}): "discovered" | "requested" | "imported" | "stale" {
+  if (args.requested) return "requested";
+  if (!args.importedMaterial) return "discovered";
+  if (isRemoteSourceNewer(args.remoteUpdatedAt ?? null, args.importedMaterial.sourceUpdatedAt)) {
+    return "stale";
+  }
+  return "imported";
+}
+
 async function findExistingSyncedMaterial(
   courseId: string,
   sourceKind: MaterialSourceKind,
@@ -347,6 +368,7 @@ async function findExistingSyncedMaterial(
     select: {
       id: true,
       contentHash: true,
+      sourceUpdatedAt: true,
       detectedType: true,
       sourceRole: true,
       summary: true,
@@ -363,6 +385,7 @@ async function findExistingSyncedMaterial(
     select: {
       id: true,
       contentHash: true,
+      sourceUpdatedAt: true,
       detectedType: true,
       sourceRole: true,
       summary: true,
@@ -389,6 +412,7 @@ async function findExistingSyncedMaterial(
       select: {
         id: true,
         contentHash: true,
+        sourceUpdatedAt: true,
         detectedType: true,
         sourceRole: true,
         summary: true,
@@ -418,12 +442,14 @@ async function saveSyncedMaterial(args: {
   relatedTopics: string[];
   rawText: string;
   contentHash: string;
+  sourceUpdatedAt?: string | Date | null;
   autoStoredForAI: boolean;
 }) {
   const storedForAI = effectiveStoredForAI(
     args.autoStoredForAI,
     args.existing?.userStoredForAIOverride,
   );
+  const sourceUpdatedAt = normalizeSourceUpdatedAt(args.sourceUpdatedAt);
 
   if (args.existing) {
     return db.courseMaterial.update({
@@ -440,6 +466,7 @@ async function saveSyncedMaterial(args: {
         storedForAI,
         autoStoredForAI: args.autoStoredForAI,
         contentHash: args.contentHash,
+        sourceUpdatedAt,
         lastSyncedAt: new Date(),
         syncStatus: "ready",
       },
@@ -461,6 +488,7 @@ async function saveSyncedMaterial(args: {
       storedForAI,
       autoStoredForAI: args.autoStoredForAI,
       contentHash: args.contentHash,
+      sourceUpdatedAt,
       lastSyncedAt: new Date(),
       syncStatus: "ready",
     },
@@ -568,9 +596,17 @@ export async function POST(request: NextRequest) {
 
   // 2. Parse payload
   const payload: ImportPayload = await request.json();
-  const { courses = [], assignments = [], modules = [], announcements = [], assignmentGroups: rawGroups = [] } = payload;
+  const {
+    syncMode = "manual",
+    courses = [],
+    assignments = [],
+    modules = [],
+    announcements = [],
+    assignmentGroups: rawGroups = [],
+  } = payload;
 
   log.info("sync started", {
+    syncMode,
     courses: courses.length,
     assignments: assignments.length,
     modules: modules.length,
@@ -861,7 +897,7 @@ export async function POST(request: NextRequest) {
   // the extension receives it.
   after(async () => {
     const bgLog = apiLogger("POST /api/canvas/import [after]", user.id);
-    bgLog.info("background AI processing started", { courses: courses.length });
+    bgLog.info("background AI processing started", { courses: courses.length, syncMode });
     await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: new Date() } });
 
   try {
@@ -1029,6 +1065,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
             relatedTopics: [],
             rawText: storedText,
             contentHash,
+            sourceUpdatedAt: st.remoteUpdatedAt ?? null,
             autoStoredForAI: pdfClassification.storedForAI,
           });
           if (!existing) syllabusFilesImported++;
@@ -1048,8 +1085,6 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
       // These are NOT used for syllabus topic extraction — only for the
       // Materials tab display and quiz generation.
       const materialTexts = c.materialTexts ?? [];
-      const importedCandidateIds = new Set<string>();
-
       if (materialTexts.length > 0) {
         const courseTopicLabels = await db.courseTopic.findMany({
           where: { courseId: scCourseId },
@@ -1082,14 +1117,12 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                     relatedTopics: existing.relatedTopics,
                     rawText: pdfText.slice(0, 25_000),
                     contentHash,
+                    sourceUpdatedAt: mt.remoteUpdatedAt ?? existing.sourceUpdatedAt ?? null,
                     autoStoredForAI:
                       existing.userStoredForAIOverride == null
                         ? existing.autoStoredForAI || existing.storedForAI
                         : existing.autoStoredForAI,
                   });
-                  if ((sourceKind === "canvas_module" || sourceKind === "canvas_media") && mt.sourceKey) {
-                    importedCandidateIds.add(mt.sourceKey);
-                  }
                   dbg.materials.push({ fileName: mt.fileName, detectedType: existing.detectedType, chars: pdfText.length });
                   return;
                 }
@@ -1121,11 +1154,9 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                   relatedTopics: analysis.relatedTopics,
                   rawText: pdfText.slice(0, 25_000),
                   contentHash,
+                  sourceUpdatedAt: mt.remoteUpdatedAt ?? null,
                   autoStoredForAI,
                 });
-                if ((sourceKind === "canvas_module" || sourceKind === "canvas_media") && mt.sourceKey) {
-                  importedCandidateIds.add(mt.sourceKey);
-                }
                 try {
                   await updateMaterialEmbedding(material.id, pdfText);
                 } catch { /* embedding failure never blocks import */ }
@@ -1137,21 +1168,69 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
         );
       }
 
-      // ── b3) Material candidates — upsert all, then prune imported ones ────
-      // Candidates are all PDF metadata from non-orientation modules. They let
-      // students see and request files without downloading everything up front.
+      // ── b3) Material candidates — upsert all and preserve freshness state ──
+      // Candidates remain in the database even after import so future scouts can
+      // compare remote metadata against imported CourseMaterial freshness.
       const materialCandidates = c.materialCandidates ?? [];
       if (materialCandidates.length > 0) {
         try {
+          const [importedMaterials, existingCandidates] = await Promise.all([
+            db.courseMaterial.findMany({
+              where: {
+                courseId: scCourseId,
+                sourceKind: { in: ["canvas_module", "canvas_media"] },
+                sourceKey: { in: materialCandidates.map((candidate) => candidate.contentId) },
+              },
+              select: {
+                sourceKind: true,
+                sourceKey: true,
+                sourceUpdatedAt: true,
+              },
+            }),
+            db.canvasMaterialCandidate.findMany({
+              where: {
+                courseId: scCourseId,
+                contentId: { in: materialCandidates.map((candidate) => candidate.contentId) },
+              },
+              select: {
+                contentId: true,
+                requested: true,
+              },
+            }),
+          ]);
+          const importedMaterialMap = new Map(
+            importedMaterials
+              .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
+              .map((material) => [
+                materialStateKey(material.sourceKind as MaterialSourceKind, material.sourceKey),
+                { sourceUpdatedAt: material.sourceUpdatedAt },
+              ]),
+          );
+          const existingCandidateMap = new Map(
+            existingCandidates.map((candidate) => [candidate.contentId, candidate]),
+          );
+
           for (const candidate of materialCandidates) {
+            const sourceKind = candidate.sourceKind ?? "canvas_module";
+            const candidateKey = materialStateKey(sourceKind, candidate.contentId);
+            const importedMaterial = importedMaterialMap.get(candidateKey) ?? null;
+            const requested = importedMaterial
+              ? false
+              : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
             await db.canvasMaterialCandidate.upsert({
               where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
               update: {
                 fileName: candidate.fileName,
                 moduleName: candidate.moduleName,
-                sourceKind: candidate.sourceKind ?? "canvas_module",
+                sourceKind,
                 remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
                 remoteSize: candidate.remoteSize ?? null,
+                requested,
+                status: deriveCandidateStatus({
+                  requested,
+                  importedMaterial,
+                  remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                }),
                 lastSeenAt: new Date(),
               },
               create: {
@@ -1159,28 +1238,29 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                 fileName: candidate.fileName,
                 moduleName: candidate.moduleName,
                 contentId: candidate.contentId,
-                sourceKind: candidate.sourceKind ?? "canvas_module",
+                sourceKind,
                 remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
                 remoteSize: candidate.remoteSize ?? null,
-                requested: false,
-                status: "discovered",
+                requested,
+                status: deriveCandidateStatus({
+                  requested,
+                  importedMaterial,
+                  remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                }),
                 lastSeenAt: new Date(),
-              },
-            });
-          }
-
-          // Remove candidates that were just imported as full CourseMaterial records
-          if (importedCandidateIds.size > 0) {
-            await db.canvasMaterialCandidate.deleteMany({
-              where: {
-                courseId: scCourseId,
-                contentId: { in: Array.from(importedCandidateIds) },
               },
             });
           }
         } catch (candErr) {
           console.error(`[sync] ${c.name}: candidate upsert failed:`, candErr);
         }
+      }
+
+      if (syncMode === "scout") {
+        dbg.status = "scout:materials-only";
+        allCourseDebug.push(dbg);
+        console.log(`[sync] ${c.name}: scout-only refresh | materials=${dbg.materials.length} | candidates=${materialCandidates.length}`);
+        return;
       }
 
       // Fallback: if client didn't send syllabus text, try stored CourseMaterial

@@ -33,6 +33,8 @@ const autoSyncInput   = document.getElementById("autoSync");
 const saveSettings    = document.getElementById("saveSettings");
 const saveConfirm     = document.getElementById("saveConfirm");
 const revokeBtn       = document.getElementById("revokeBtn");
+const DAILY_SCOUT_ALARM = "autoSyncDaily";
+const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -268,6 +270,7 @@ importBtn.addEventListener("click", () => {
 
 cancelPickerBtn.addEventListener("click", () => {
   coursePicker.style.display = "none";
+  chrome.storage.session.remove(["pendingCourses", "syncMode", "syncSelectedIds", "syncTrigger"]);
   chrome.storage.session.set({ syncRunning: false });
 });
 
@@ -295,8 +298,15 @@ saveSettings.addEventListener("click", async () => {
   if (newToken)  update.apiToken  = newToken;
 
   await chrome.storage.local.set(update);
-  await chrome.alarms.clear("autoSync");
-  if (autoSync) chrome.alarms.create("autoSync", { periodInMinutes: 1440 });
+  await Promise.all([
+    chrome.alarms.clear("autoSync"),
+    chrome.alarms.clear(DAILY_SCOUT_ALARM),
+    chrome.alarms.clear(CANVAS_OPEN_SCOUT_ALARM),
+  ]);
+  if (autoSync) {
+    chrome.alarms.create(DAILY_SCOUT_ALARM, { periodInMinutes: 1440 });
+    chrome.alarms.create(CANVAS_OPEN_SCOUT_ALARM, { periodInMinutes: 240 });
+  }
 
   settingsPanel.style.display = "none";
   saveConfirm.hidden   = false;

@@ -13,6 +13,7 @@ import { GradeBreakdown } from "./grade-breakdown";
 import { CourseOverview } from "./course-overview";
 import { CourseChat } from "./course-chat";
 import { FlashcardSection } from "./flashcard-section";
+import type { RecentCourseActivityItem } from "@/lib/recent-course-activity";
 
 interface Assignment {
   id: string;
@@ -91,13 +92,6 @@ interface CourseTask {
   source: string;
 }
 
-interface Announcement {
-  id: string;
-  title: string;
-  body: string;
-  postedAt: string;
-}
-
 interface MaterialCandidate {
   id: string;
   fileName: string;
@@ -117,6 +111,7 @@ interface CourseTabsProps {
   topics: CourseTopic[];
   materials: CourseMaterial[];
   materialCandidates?: MaterialCandidate[];
+  recentActivity?: RecentCourseActivityItem[];
   assignmentGroups: AssignmentGroupData[];
   currentGrade: string | null;
   currentScore: number | null;
@@ -125,7 +120,6 @@ interface CourseTabsProps {
   courseId: string;
   googleConnected: boolean;
   courseTasks: CourseTask[];
-  announcements: Announcement[];
   courseSignals?: CourseSignals;
 }
 
@@ -512,6 +506,7 @@ export function CourseTabs({
   topics: initialTopics,
   materials: initialMaterials,
   materialCandidates: initialCandidates = [],
+  recentActivity = [],
   assignmentGroups,
   currentGrade,
   currentScore,
@@ -520,7 +515,6 @@ export function CourseTabs({
   courseId,
   googleConnected,
   courseTasks,
-  announcements,
   courseSignals,
 }: CourseTabsProps) {
   const now = new Date();
@@ -784,6 +778,35 @@ export function CourseTabs({
       {/* ── Materials Tab ── */}
       <TabsContent value="materials">
         <div className="space-y-6">
+          {recentActivity.length > 0 && (
+            <div className="space-y-3">
+              <div>
+                <p className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Recent from Canvas
+                </p>
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
+                  The newest transcripts and changed files this course surfaced during scout syncs.
+                </p>
+              </div>
+              <div className="space-y-2">
+                {recentActivity.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-border bg-card px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-[13px] font-medium">{item.title}</p>
+                        {item.detail && (
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">{item.detail}</p>
+                        )}
+                      </div>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">{item.freshnessLabel}</span>
+                    </div>
+                    <p className="mt-2 text-[11px] font-medium text-foreground/80">{item.label}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Uploaded materials */}
           <div className="space-y-4">
             <div className="flex items-start justify-between gap-4">

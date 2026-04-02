@@ -16,9 +16,38 @@
  * no fuzzy name heuristics.
  */
 
+const DAILY_SCOUT_ALARM = "autoSyncDaily";
+const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
+
+async function syncAlarmConfiguration() {
+  const { autoSync } = await chrome.storage.local.get(["autoSync"]);
+  await Promise.all([
+    chrome.alarms.clear("autoSync"),
+    chrome.alarms.clear(DAILY_SCOUT_ALARM),
+    chrome.alarms.clear(CANVAS_OPEN_SCOUT_ALARM),
+  ]);
+  if (autoSync) {
+    chrome.alarms.create(DAILY_SCOUT_ALARM, { periodInMinutes: 1440 });
+    chrome.alarms.create(CANVAS_OPEN_SCOUT_ALARM, { periodInMinutes: 240 });
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  void syncAlarmConfiguration();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void syncAlarmConfiguration();
+});
+
 // ── Alarm for auto-sync ───────────────────────────────────────────────────────
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "autoSync") startPhase1();
+  if (alarm.name === "autoSync" || alarm.name === DAILY_SCOUT_ALARM) {
+    startScout("daily");
+  }
+  if (alarm.name === CANVAS_OPEN_SCOUT_ALARM) {
+    startScout("canvas-open");
+  }
 });
 
 // ── Message listener ──────────────────────────────────────────────────────────
@@ -66,6 +95,35 @@ async function getCanvasTabId() {
   });
 
   return tab.id;
+}
+
+async function hasOpenCanvasTab() {
+  const { canvasUrl } = await chrome.storage.local.get(["canvasUrl"]);
+  if (!canvasUrl) return false;
+  const tabs = await chrome.tabs.query({ url: `https://${canvasUrl}/*` });
+  return tabs.length > 0;
+}
+
+async function setSyncContext(context) {
+  await chrome.storage.session.set({
+    syncRunning: true,
+    syncMode: context.mode,
+    syncSelectedIds: context.selectedIds ?? null,
+    syncTrigger: context.trigger ?? null,
+  });
+}
+
+async function clearSyncContext() {
+  await chrome.storage.session.remove(["pendingCourses", "syncMode", "syncSelectedIds", "syncTrigger"]);
+  await chrome.storage.session.set({ syncRunning: false });
+}
+
+async function injectSyncConfig(tabId, config) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (syncConfig) => { window.__sc_syncConfig = syncConfig; },
+    args: [config],
+  });
 }
 
 // ── Offscreen document management ────────────────────────────────────────────
@@ -124,7 +182,7 @@ function parsePdfViaOffscreen(url, messageId) {
 
 // ── Phase 1: fetch course list ────────────────────────────────────────────────
 async function startPhase1() {
-  await chrome.storage.session.set({ syncRunning: true });
+  await setSyncContext({ mode: "manual-picker", selectedIds: null, trigger: "manual" });
   try {
     const { canvasUrl, scUrl, apiToken } =
       await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken"]);
@@ -140,7 +198,7 @@ async function startPhase1() {
     });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (err) {
-    await chrome.storage.session.set({ syncRunning: false });
+    await clearSyncContext();
     handleError(err.message ?? String(err));
   }
 }
@@ -155,18 +213,47 @@ async function handleCourseList(courses) {
 // ── Phase 2: fetch full data for selected courses ─────────────────────────────
 async function startPhase2(selectedIds) {
   try {
+    await setSyncContext({ mode: "manual", selectedIds, trigger: "manual" });
     const tabId = await getCanvasTabId();
     broadcastToPopup({ type: "SYNC_PROGRESS", percent: 10, label: "Syncing selected courses…" });
 
-    // Pass selected IDs to content.js via window variable, then inject
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (ids) => { window.__sc_selectedIds = ids; },
-      args: [selectedIds],
-    });
+    // Pass selected IDs + sync mode to content.js, then inject
+    await injectSyncConfig(tabId, { mode: "manual", selectedIds });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
   } catch (err) {
-    await chrome.storage.session.set({ syncRunning: false });
+    await clearSyncContext();
+    handleError(err.message ?? String(err));
+  }
+}
+
+async function startScout(trigger = "manual") {
+  const session = await chrome.storage.session.get(["syncRunning"]);
+  if (session.syncRunning) return;
+
+  try {
+    const { canvasUrl, scUrl, apiToken, lastSelectedCourseIds } =
+      await chrome.storage.local.get(["canvasUrl", "scUrl", "apiToken", "lastSelectedCourseIds"]);
+    if (!canvasUrl || !scUrl || !apiToken) return;
+
+    if (trigger === "canvas-open" && !(await hasOpenCanvasTab())) return;
+
+    const selectedIds = Array.isArray(lastSelectedCourseIds) && lastSelectedCourseIds.length > 0
+      ? lastSelectedCourseIds
+      : null;
+
+    await setSyncContext({ mode: "scout", selectedIds, trigger });
+
+    const tabId = await getCanvasTabId();
+    broadcastToPopup({
+      type: "SYNC_PROGRESS",
+      percent: 8,
+      label: trigger === "daily" ? "Running daily scout…" : "Checking for course updates…",
+    });
+    await injectSyncConfig(tabId, { mode: "scout", selectedIds });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+  } catch (err) {
+    await clearSyncContext();
+    syncLog("scout_start_err", { trigger, error: err?.message ?? String(err) });
     handleError(err.message ?? String(err));
   }
 }
@@ -360,10 +447,12 @@ async function handleCanvasData(payload) {
     }
 
     syncLog("canvas_import_done", { status: res.status });
+    const syncContext = await chrome.storage.session.get(["syncMode", "syncSelectedIds", "syncTrigger"]);
+    const scoutMode = syncContext.syncMode === "scout";
 
     // ── Step 4: Scrape Gradescope assignments for linked courses ─────────────
     // Only scrapes courses where we successfully resolved a Gradescope ID.
-    const gsLinkedCourses = payload.courses.filter((c) => c.gradescopeCourseId);
+    const gsLinkedCourses = scoutMode ? [] : payload.courses.filter((c) => c.gradescopeCourseId);
     if (gsLinkedCourses.length > 0) {
       syncLog("gs_scrape_start", { count: gsLinkedCourses.length });
       try {
@@ -377,12 +466,23 @@ async function handleCanvasData(payload) {
         console.warn("[worker] Gradescope sync failed (non-fatal):", err?.message ?? err);
       }
     } else {
-      syncLog("gs_skipped", { reason: "no linked courses" });
+      syncLog("gs_skipped", { reason: scoutMode ? "scout_mode" : "no linked courses" });
     }
 
     await flushSyncLog(scUrl, apiToken);
-    await chrome.storage.session.set({ syncRunning: false });
-    await chrome.storage.session.remove(["pendingCourses"]);
+    const localUpdate = {};
+    if (syncContext.syncMode === "manual" && Array.isArray(syncContext.syncSelectedIds) && syncContext.syncSelectedIds.length > 0) {
+      localUpdate.lastSelectedCourseIds = syncContext.syncSelectedIds;
+      localUpdate.lastManualSyncAt = Date.now();
+    }
+    if (syncContext.syncMode === "scout") {
+      localUpdate.lastScoutAt = Date.now();
+      localUpdate.lastScoutTrigger = syncContext.syncTrigger ?? null;
+    }
+    if (Object.keys(localUpdate).length > 0) {
+      await chrome.storage.local.set(localUpdate);
+    }
+    await clearSyncContext();
     broadcastToPopup({ type: "SYNC_COMPLETE", result });
 
   } catch (err) {
@@ -392,7 +492,7 @@ async function handleCanvasData(payload) {
       if (u && t) await flushSyncLog(u, t);
     } catch { /* best-effort */ }
     await closeOffscreen();
-    await chrome.storage.session.set({ syncRunning: false });
+    await clearSyncContext();
     handleError(err.message ?? String(err));
   }
 }
@@ -444,18 +544,67 @@ async function resolveGradescopeCourseId(tabId, canvasTabUrl) {
   return null;
 }
 
-async function fetchPendingCandidateIds(scUrl, apiToken, canvasCourseId) {
+function buildMaterialStateKey(sourceKind, sourceKey) {
+  return `${sourceKind}:${sourceKey}`;
+}
+
+function normalizeRemoteUpdatedAt(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function isRemoteNewer(remoteUpdatedAt, knownUpdatedAt) {
+  const remote = normalizeRemoteUpdatedAt(remoteUpdatedAt);
+  if (!remote) return false;
+  const known = normalizeRemoteUpdatedAt(knownUpdatedAt);
+  if (!known) return true;
+  return remote.getTime() > known.getTime() + 1000;
+}
+
+function createEmptyMaterialState() {
+  return {
+    materials: new Map(),
+    candidates: new Map(),
+    requestedIds: new Set(),
+  };
+}
+
+async function fetchMaterialState(scUrl, apiToken, canvasCourseId) {
   try {
     const res = await fetch(
-      `https://${scUrl}/api/canvas/materials/pending?canvasCourseId=${canvasCourseId}`,
+      `https://${scUrl}/api/canvas/materials/state?canvasCourseId=${canvasCourseId}`,
       { headers: { Authorization: `Bearer ${apiToken}` } }
     );
-    if (!res.ok) return new Set();
+    if (!res.ok) return createEmptyMaterialState();
     const data = await res.json();
-    return new Set((data.candidates ?? []).map((candidate) => String(candidate.contentId)));
+    return {
+      materials: new Map(
+        (data.materials ?? [])
+          .filter((item) => item?.sourceKind && item?.sourceKey)
+          .map((item) => [buildMaterialStateKey(String(item.sourceKind), String(item.sourceKey)), item]),
+      ),
+      candidates: new Map(
+        (data.candidates ?? [])
+          .filter((item) => item?.contentId)
+          .map((item) => [String(item.contentId), item]),
+      ),
+      requestedIds: new Set(
+        (data.candidates ?? [])
+          .filter((item) => item?.requested)
+          .map((item) => String(item.contentId)),
+      ),
+    };
   } catch {
-    return new Set();
+    return createEmptyMaterialState();
   }
+}
+
+function shouldImportRemoteSource(materialState, sourceKind, sourceKey, remoteUpdatedAt) {
+  const existing = materialState.materials.get(buildMaterialStateKey(sourceKind, sourceKey));
+  if (!existing) return true;
+  if (existing.syncStatus && existing.syncStatus !== "ready") return true;
+  return isRemoteNewer(remoteUpdatedAt, existing.sourceUpdatedAt ?? existing.lastSyncedAt ?? null);
 }
 
 async function fetchPlainTextFile(url) {
@@ -1060,7 +1209,6 @@ function buildMediaTranscriptDisplayName(mediaTitle, attachmentFileName) {
 }
 
 async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
-  const MAX_AUTO_IMPORTS_PER_COURSE = 8;
   const mediaContextCache = new Map();
 
   const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
@@ -1069,7 +1217,8 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
 
   try {
     for (const course of courses) {
-      const requestedIds = await fetchPendingCandidateIds(scUrl, apiToken, course.id);
+      const materialState = await fetchMaterialState(scUrl, apiToken, course.id);
+      const requestedIds = materialState.requestedIds;
       course.materialCandidates = course.materialCandidates ?? [];
       course.materialTexts = course.materialTexts ?? [];
 
@@ -1140,7 +1289,6 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
 
         const seenCandidateIds = new Set(course.materialCandidates.map((candidate) => candidate.contentId));
         const downloadedIds = new Set(course.materialTexts.map((material) => material.sourceKey).filter(Boolean));
-        let autoImportedCount = 0;
         let transcriptCount = 0;
 
         syncLog("media_gallery_found", {
@@ -1194,8 +1342,14 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
                 });
               }
 
-              const shouldAutoImport = autoImportedCount < MAX_AUTO_IMPORTS_PER_COURSE;
-              const shouldDownload = requestedIds.has(contentId) || shouldAutoImport;
+              const shouldDownload =
+                requestedIds.has(contentId) ||
+                shouldImportRemoteSource(
+                  materialState,
+                  "canvas_media",
+                  contentId,
+                  attachment.uploadedAt ?? null,
+                );
               if (!shouldDownload || downloadedIds.has(contentId)) continue;
 
               const text = await fetchPlainTextFile(attachment.url);
@@ -1211,7 +1365,6 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
                 remoteUpdatedAt: attachment.uploadedAt ?? null,
               });
               transcriptCount++;
-              if (!requestedIds.has(contentId)) autoImportedCount++;
             }
           } catch (err) {
             syncLog("media_entry_err", {

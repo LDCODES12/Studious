@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { CourseCard } from "./course-card";
 import type { CourseContextSnapshot } from "@/lib/course-context";
+import type { RecentCourseActivityItem } from "@/lib/recent-course-activity";
 
 interface CourseWithContext {
   course: {
@@ -13,7 +14,13 @@ interface CourseWithContext {
   context: CourseContextSnapshot;
 }
 
-export function CourseGrid({ courses }: { courses: CourseWithContext[] }) {
+export function CourseGrid({
+  courses,
+  recentActivityByCourse,
+}: {
+  courses: CourseWithContext[];
+  recentActivityByCourse: Record<string, RecentCourseActivityItem[]>;
+}) {
   if (courses.length === 0) {
     return (
       <div>
@@ -36,7 +43,12 @@ export function CourseGrid({ courses }: { courses: CourseWithContext[] }) {
       <h2 className="mb-4 text-[14px] font-semibold">Courses</h2>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         {courses.map(({ course, context }) => (
-          <CourseCard key={course.id} course={course} context={context} />
+          <CourseCard
+            key={course.id}
+            course={course}
+            context={context}
+            recentItems={recentActivityByCourse[course.id] ?? []}
+          />
         ))}
       </div>
     </div>

@@ -138,7 +138,7 @@ model CourseMaterial {
   fileName                String
   detectedType            String
   sourceRole              String                       @default("unknown") // timeline | content | mixed | unknown
-  sourceKind              String                       @default("legacy") // canvas_syllabus | canvas_module | manual_upload | auto_route | legacy
+  sourceKind              String                       @default("legacy") // canvas_syllabus | canvas_module | canvas_media | manual_upload | auto_route | legacy
   sourceKey               String?
   summary                 String
   relatedTopics           String[]
@@ -147,6 +147,7 @@ model CourseMaterial {
   autoStoredForAI         Boolean                      @default(false)
   userStoredForAIOverride Boolean?
   contentHash             String?
+  sourceUpdatedAt         DateTime?
   lastSyncedAt            DateTime?
   syncStatus              String                       @default("ready") // ready | stale | failed
   uploadedAt              DateTime                     @default(now())
@@ -279,7 +280,7 @@ model CanvasMaterialCandidate {
   remoteUpdatedAt String?
   remoteSize      Int?
   requested       Boolean  @default(false)
-  status          String   @default("discovered") // discovered | requested | stale
+  status          String   @default("discovered") // discovered | requested | imported | stale
   lastSeenAt      DateTime @default(now())
   createdAt       DateTime @default(now())
   course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)

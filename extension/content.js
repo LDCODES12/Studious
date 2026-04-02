@@ -96,6 +96,74 @@ function extractScheduleSection(html) {
     }
   }
 
+  function buildMaterialStateKey(sourceKind, sourceKey) {
+    return `${sourceKind}:${sourceKey}`;
+  }
+
+  function normalizeRemoteUpdatedAt(value) {
+    if (!value) return null;
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+
+  function isRemoteNewer(remoteUpdatedAt, knownUpdatedAt) {
+    const remote = normalizeRemoteUpdatedAt(remoteUpdatedAt);
+    if (!remote) return false;
+    const known = normalizeRemoteUpdatedAt(knownUpdatedAt);
+    if (!known) return true;
+    return remote.getTime() > known.getTime() + 1000;
+  }
+
+  function createEmptyMaterialState() {
+    return {
+      materials: new Map(),
+      candidates: new Map(),
+      requestedIds: new Set(),
+    };
+  }
+
+  async function fetchMaterialState(scUrl, apiToken, canvasCourseId) {
+    if (!scUrl || !apiToken) return createEmptyMaterialState();
+    try {
+      const res = await fetch(
+        `https://${scUrl}/api/canvas/materials/state?canvasCourseId=${canvasCourseId}`,
+        { headers: { Authorization: `Bearer ${apiToken}` } }
+      );
+      if (!res.ok) return createEmptyMaterialState();
+
+      const data = await res.json();
+      const materials = new Map(
+        (data.materials ?? [])
+          .filter((item) => item?.sourceKind && item?.sourceKey)
+          .map((item) => [
+            buildMaterialStateKey(String(item.sourceKind), String(item.sourceKey)),
+            item,
+          ])
+      );
+      const candidates = new Map(
+        (data.candidates ?? [])
+          .filter((item) => item?.contentId)
+          .map((item) => [String(item.contentId), item])
+      );
+      const requestedIds = new Set(
+        (data.candidates ?? [])
+          .filter((item) => item?.requested)
+          .map((item) => String(item.contentId))
+      );
+
+      return { materials, candidates, requestedIds };
+    } catch {
+      return createEmptyMaterialState();
+    }
+  }
+
+  function shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt) {
+    const existing = materialState.materials.get(buildMaterialStateKey(sourceKind, sourceKey));
+    if (!existing) return true;
+    if (existing.syncStatus && existing.syncStatus !== "ready") return true;
+    return isRemoteNewer(remoteUpdatedAt, existing.sourceUpdatedAt ?? existing.lastSyncedAt ?? null);
+  }
+
   /**
    * Peek at the first 64 KB of a PDF via an HTTP Range request and return
    * true if it looks like a syllabus. PDFs embed text as semi-readable byte
@@ -126,11 +194,15 @@ function extractScheduleSection(html) {
   }
 
   // ── Check phase via window variable (set by background before injection) ──
-  const selectedIds = window.__sc_selectedIds ?? null;
+  const syncConfig = window.__sc_syncConfig ?? null;
+  const selectedIds = syncConfig?.selectedIds ?? window.__sc_selectedIds ?? null;
+  const syncMode = syncConfig?.mode ?? (selectedIds ? "manual" : "picker");
+  const scoutMode = syncMode === "scout";
+  delete window.__sc_syncConfig;
   delete window.__sc_selectedIds;
 
   // ── Phase 1: fetch course list and let user pick ──────────────────────────
-  if (!selectedIds) {
+  if (syncMode === "picker" && !selectedIds) {
     try {
       progress(30, "Fetching your courses…");
 
@@ -163,7 +235,9 @@ function extractScheduleSection(html) {
 
   // ── Phase 2: fetch full data for selected courses only ────────────────────
   try {
-    const selectedSet = new Set(selectedIds.map(String));
+    const selectedSet = Array.isArray(selectedIds) && selectedIds.length > 0
+      ? new Set(selectedIds.map(String))
+      : null;
 
     progress(10, "Fetching your courses…");
 
@@ -176,7 +250,7 @@ function extractScheduleSection(html) {
     );
 
     const courses = rawCourses
-      .filter((c) => c.name && !c.access_restricted_by_date && selectedSet.has(String(c.id)))
+      .filter((c) => c.name && !c.access_restricted_by_date && (!selectedSet || selectedSet.has(String(c.id))))
       .map((c) => ({
         id: c.id,
         name: c.name,
@@ -210,7 +284,7 @@ function extractScheduleSection(html) {
         calendarEvents: [],
       }));
 
-    const payload = { courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
+    const payload = { syncMode, courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
 
     // Read extension config once — used in Source 3 to fetch requested candidates
     const { scUrl: extScUrl = null, apiToken: extApiToken = null } = await new Promise((resolve) => {
@@ -299,6 +373,8 @@ function extractScheduleSection(html) {
           }
         }
       } catch { /* restricted — skip */ }
+
+      const materialState = await fetchMaterialState(extScUrl, extApiToken, course.id);
 
       // ── Modules (fallback topic structure + source of file download URLs) ───
       // include[]=content_details gives us direct download URLs for File items —
@@ -647,7 +723,9 @@ function extractScheduleSection(html) {
         }
 
         // ── Collect syllabus URLs for offscreen document to fetch + extract ──
-        for (const { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of toFetch.slice(0, 3)) {
+        const syllabusImports = scoutMode ? [] : toFetch.slice(0, 3);
+        for (const { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of syllabusImports) {
+          if (!shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt)) continue;
           course.syllabusFileUrls.push({
             fileName: name,
             url,
@@ -670,24 +748,17 @@ function extractScheduleSection(html) {
         const materialSeenIds = new Set();
 
         // Step 1: fetch requested candidate contentIds from our API
-        const requestedContentIds = new Set();
-        if (extScUrl && extApiToken) {
-          try {
-            const pendingRes = await fetch(
-              `https://${extScUrl}/api/canvas/materials/pending?canvasCourseId=${course.id}`,
-              { headers: { Authorization: `Bearer ${extApiToken}` } }
-            );
-            if (pendingRes.ok) {
-              const pendingData = await pendingRes.json();
-              for (const item of (pendingData.candidates ?? [])) {
-                requestedContentIds.add(String(item.contentId));
-              }
-              if (requestedContentIds.size > 0) {
-                console.log(`[scout] ${course.name} | requested candidates: ${requestedContentIds.size}`);
-              }
-            }
-          } catch { /* API not reachable — skip */ }
+        const requestedContentIds = materialState.requestedIds;
+        if (requestedContentIds.size > 0) {
+          console.log(`[scout] ${course.name} | requested candidates: ${requestedContentIds.size}`);
         }
+
+        const nonOrientationModules = rawModules.filter((mod) => !SYLLABUS_MOD_RE.test(mod.name ?? ""));
+        const scoutPreferredModuleIds = new Set(
+          scoutMode
+            ? nonOrientationModules.slice(-2).map((mod) => mod.id)
+            : [],
+        );
 
         // Step 2: scan all non-orientation modules
         for (const mod of rawModules) {
@@ -699,6 +770,7 @@ function extractScheduleSection(html) {
           );
 
           let moduleAutoAdded = false;
+          const allowScoutAuto = !scoutMode || scoutPreferredModuleIds.has(mod.id);
 
           for (const item of items) {
             const cid = String(item.content_id);
@@ -735,7 +807,7 @@ function extractScheduleSection(html) {
             });
 
             const isRequested = requestedContentIds.has(cid);
-            const isAutoSelect = !moduleAutoAdded; // first PDF in this module
+            const isAutoSelect = !moduleAutoAdded && allowScoutAuto; // first PDF in selected module window
 
             if (isAutoSelect || isRequested) {
               try {
@@ -744,14 +816,16 @@ function extractScheduleSection(html) {
                 const name = fileInfo?.display_name ?? candidateFileName;
                 const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
                 const size = fileInfo?.size ?? 0;
-                if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000) {
+                const remoteUpdatedAt = fileInfo?.updated_at ?? details.updated_at ?? null;
+                const shouldImport = isRequested || shouldImportSource(materialState, "canvas_module", cid, remoteUpdatedAt);
+                if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000 && shouldImport) {
                   course.materialFileUrls.push({
                     fileName: name,
                     url: fileInfo.url,
                     sourceKey: cid,
                     sourceKind: "canvas_module",
                     remoteSize: size,
-                    remoteUpdatedAt: fileInfo.updated_at ?? details.updated_at ?? null,
+                    remoteUpdatedAt,
                   });
                   if (isAutoSelect) moduleAutoAdded = true;
                   console.log(`[scout] ${course.name} | ${isRequested ? "requested" : "auto"}: "${name}" (${Math.round(size / 1024)}KB)`);

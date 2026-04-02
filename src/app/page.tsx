@@ -14,10 +14,12 @@ import { SyncStatusBanner } from "@/components/dashboard/sync-status-banner";
 import { WeekOverview } from "@/components/dashboard/week-overview";
 import { getOrCreateWeekOverview, buildWeekCourses, applyDetectedTermBreaks } from "@/lib/week-overview";
 import type { ExtractedClassSchedule } from "@/lib/parse-syllabus";
+import { getRecentCourseActivity } from "@/lib/recent-course-activity";
 
 export default async function DashboardPage() {
   const session = await auth();
   const userId = session?.user?.id;
+  const now = new Date();
 
   const easternDateFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -31,11 +33,11 @@ export default async function DashboardPage() {
     return `${byType.year}-${byType.month}-${byType.day}`;
   };
 
-  const today = formatEasternDate(new Date());
-  const threeDaysFromNow = formatEasternDate(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+  const today = formatEasternDate(now);
+  const threeDaysFromNow = formatEasternDate(new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000));
   const dashboardCalendarNow = new Date(`${today}T12:00:00Z`);
 
-  const todayStart = new Date();
+  const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
 
   const [courses, tasks, learningSignals, interventionOutcomes, userStatus, todayPreClassReflections] = await Promise.all([
@@ -148,6 +150,7 @@ export default async function DashboardPage() {
   });
 
   const normalizedCourseContexts = applyDetectedTermBreaks(courseContexts, dashboardCalendarNow);
+  const recentActivityByCourse = await getRecentCourseActivity(courses.map((course) => course.id));
 
   // Week overview — AI-generated, cached per week
   const weekOverview = userId && normalizedCourseContexts.length > 0
@@ -184,7 +187,7 @@ export default async function DashboardPage() {
 
   const isSyncProcessing =
     !!userStatus?.bgSyncProcessingAt &&
-    Date.now() - new Date(userStatus.bgSyncProcessingAt).getTime() < 10 * 60 * 1000;
+    now.getTime() - new Date(userStatus.bgSyncProcessingAt).getTime() < 10 * 60 * 1000;
 
   return (
     <div className="space-y-7">
@@ -209,7 +212,7 @@ export default async function DashboardPage() {
       <TodayTasks initialTasks={dashboardTasks} />
 
       {/* Course grid with context-rich cards */}
-      <CourseGrid courses={normalizedCourseContexts} />
+      <CourseGrid courses={normalizedCourseContexts} recentActivityByCourse={recentActivityByCourse} />
 
       {/* Conditional learning nudge */}
       {learningSignals && <LearningPulse signals={learningSignals} />}
