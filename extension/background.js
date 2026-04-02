@@ -868,6 +868,10 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
     func: async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const parseExpectedCount = (label) => {
+        const match = String(label || "").match(/(\d+)\s+media/i);
+        return match ? Number(match[1]) : null;
+      };
       const extractEntryId = (href) => {
         const mediaMatch = String(href || "").match(/\/media\/t\/([^/?#]+)/i);
         if (mediaMatch) return mediaMatch[1];
@@ -883,10 +887,10 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
         const heading = playlistContainer.querySelector("h2");
         return clean(heading?.textContent);
       };
-      const getEntries = () => {
+      const collectEntriesFromRoot = (root) => {
         const entries = [];
         const seen = new Set();
-        for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+        for (const anchor of Array.from(root.querySelectorAll("a[href]"))) {
           const href = anchor.href || "";
           if (!/\/media\/t\/|\/playlist\/dedicated\//i.test(href)) continue;
           const mediaId = extractEntryId(href);
@@ -903,6 +907,33 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
           });
         }
         return entries;
+      };
+      const getEntries = () => collectEntriesFromRoot(document);
+      const mergeEntries = (baseEntries, newEntries) => {
+        const seen = new Set(baseEntries.map((entry) => entry.mediaId));
+        for (const entry of newEntries) {
+          if (seen.has(entry.mediaId)) continue;
+          seen.add(entry.mediaId);
+          baseEntries.push(entry);
+        }
+      };
+      const fetchPagedEntries = async (pageIndex) => {
+        const url = new URL(window.location.href);
+        url.searchParams.set("format", "ajax");
+        url.searchParams.set("page", String(pageIndex));
+        const res = await fetch(url.toString(), { credentials: "include" });
+        if (!res.ok) {
+          throw new Error(`Media page ${pageIndex} failed (${res.status})`);
+        }
+        const payload = await res.json();
+        const html = Array.isArray(payload?.content)
+          ? payload.content
+            .map((item) => (typeof item?.content === "string" ? item.content : ""))
+            .join("\n")
+          : "";
+        if (!html.trim()) return [];
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        return collectEntriesFromRoot(doc);
       };
 
       const mediaTab = document.querySelector("[data-id='media-tab']");
@@ -928,10 +959,30 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
       window.scrollTo(0, 0);
 
       const mediaTabLabel = clean(mediaTab?.textContent);
+      const expectedCount = parseExpectedCount(mediaTabLabel);
+      const entries = getEntries();
+      const perPage = entries.length > 0 ? entries.length : 15;
+      const maxPages = expectedCount ? Math.max(1, Math.ceil(expectedCount / Math.max(perPage, 1))) : 1;
+
+      if (maxPages > 1) {
+        for (let pageIndex = 2; pageIndex <= maxPages; pageIndex++) {
+          try {
+            const pageEntries = await fetchPagedEntries(pageIndex);
+            if (pageEntries.length === 0) break;
+            mergeEntries(entries, pageEntries);
+            if (expectedCount && entries.length >= expectedCount) break;
+          } catch {
+            break;
+          }
+        }
+      }
+
       return {
         href: window.location.href,
         mediaTabLabel: mediaTabLabel || null,
-        entries: getEntries(),
+        entries,
+        expectedCount,
+        pagedCount: entries.length,
       };
     },
   });
@@ -944,6 +995,8 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
     mediaTabLabel: result.mediaTabLabel ?? null,
     discoveredCount: Array.isArray(result.entries) ? result.entries.length : 0,
     frameHref: result.href ?? context?.selectedFrameHref ?? null,
+    expectedCount: Number.isFinite(result.expectedCount) ? result.expectedCount : null,
+    pagedCount: Number.isFinite(result.pagedCount) ? result.pagedCount : null,
   };
 }
 
@@ -1046,6 +1099,8 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
             frameCount: resolvedMediaContext?.frameCount ?? null,
             mediaTabLabel: galleryResult?.mediaTabLabel ?? null,
             discoveredCount: galleryResult?.discoveredCount ?? 0,
+            expectedCount: galleryResult?.expectedCount ?? null,
+            pagedCount: galleryResult?.pagedCount ?? null,
           });
           continue;
         }
@@ -1062,6 +1117,8 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           categoryId: resolvedMediaContext.categoryId,
           categoryCandidates: galleryResult?.categoryCandidates?.length ?? categoryCandidates.length,
           mediaTabLabel: galleryResult?.mediaTabLabel ?? null,
+          expectedCount: galleryResult?.expectedCount ?? null,
+          pagedCount: galleryResult?.pagedCount ?? null,
         });
 
         for (const entry of galleryEntries) {
