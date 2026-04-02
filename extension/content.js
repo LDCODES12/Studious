@@ -114,8 +114,9 @@ function extractScheduleSection(html) {
     return remote.getTime() > known.getTime() + 1000;
   }
 
-  function createEmptyMaterialState() {
+  function createEmptyMaterialState(available = false) {
     return {
+      available,
       materials: new Map(),
       candidates: new Map(),
       requestedIds: new Set(),
@@ -123,15 +124,16 @@ function extractScheduleSection(html) {
   }
 
   async function fetchMaterialState(scUrl, apiToken, canvasCourseId) {
-    if (!scUrl || !apiToken) return createEmptyMaterialState();
+    if (!scUrl || !apiToken) return createEmptyMaterialState(false);
     try {
       const res = await fetch(
         `https://${scUrl}/api/canvas/materials/state?canvasCourseId=${canvasCourseId}`,
         { headers: { Authorization: `Bearer ${apiToken}` } }
       );
-      if (!res.ok) return createEmptyMaterialState();
+      if (!res.ok) return createEmptyMaterialState(false);
 
       const data = await res.json();
+      const knownCourse = data?.knownCourse !== false;
       const materials = new Map(
         (data.materials ?? [])
           .filter((item) => item?.sourceKind && item?.sourceKey)
@@ -151,17 +153,40 @@ function extractScheduleSection(html) {
           .map((item) => String(item.contentId))
       );
 
-      return { materials, candidates, requestedIds };
+      return { available: knownCourse, materials, candidates, requestedIds };
     } catch {
-      return createEmptyMaterialState();
+      return createEmptyMaterialState(false);
     }
   }
 
-  function shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt) {
+  function hasRemoteMetadataChanged(candidateState, remoteUpdatedAt, remoteSize) {
+    if (!candidateState) return false;
+    if (isRemoteNewer(remoteUpdatedAt, candidateState.remoteUpdatedAt ?? candidateState.lastSeenAt ?? null)) {
+      return true;
+    }
+    if (
+      typeof remoteSize === "number" &&
+      remoteSize > 0 &&
+      typeof candidateState.remoteSize === "number" &&
+      candidateState.remoteSize > 0 &&
+      candidateState.remoteSize !== remoteSize
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt, remoteSize = null, contentId = sourceKey) {
+    if (!materialState.available) return !scoutMode;
     const existing = materialState.materials.get(buildMaterialStateKey(sourceKind, sourceKey));
-    if (!existing) return true;
+    const candidateState = contentId ? materialState.candidates.get(String(contentId)) : null;
+    if (!existing) {
+      if (candidateState?.requested || candidateState?.status === "stale") return true;
+      return true;
+    }
     if (existing.syncStatus && existing.syncStatus !== "ready") return true;
-    return isRemoteNewer(remoteUpdatedAt, existing.sourceUpdatedAt ?? existing.lastSyncedAt ?? null);
+    if (isRemoteNewer(remoteUpdatedAt, existing.sourceUpdatedAt ?? existing.lastSyncedAt ?? null)) return true;
+    return hasRemoteMetadataChanged(candidateState, remoteUpdatedAt, remoteSize);
   }
 
   /**
@@ -736,7 +761,7 @@ function extractScheduleSection(html) {
         // ── Collect syllabus URLs for offscreen document to fetch + extract ──
         const syllabusImports = scoutMode ? [] : toFetch.slice(0, 3);
         for (const { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of syllabusImports) {
-          if (!shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt)) continue;
+          if (!shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt, remoteSize ?? null, sourceKey)) continue;
           course.syllabusFileUrls.push({
             fileName: name,
             url,
@@ -828,7 +853,14 @@ function extractScheduleSection(html) {
                 const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
                 const size = fileInfo?.size ?? 0;
                 const remoteUpdatedAt = fileInfo?.updated_at ?? details.updated_at ?? null;
-                const shouldImport = isRequested || shouldImportSource(materialState, "canvas_module", cid, remoteUpdatedAt);
+                const shouldImport = isRequested || shouldImportSource(
+                  materialState,
+                  "canvas_module",
+                  cid,
+                  remoteUpdatedAt,
+                  size,
+                  cid,
+                );
                 if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000 && shouldImport) {
                   course.materialFileUrls.push({
                     fileName: name,
@@ -840,10 +872,6 @@ function extractScheduleSection(html) {
                   });
                   if (isAutoSelect) moduleAutoAdded = true;
                   console.log(`[scout] ${course.name} | ${isRequested ? "requested" : "auto"}: "${name}" (${Math.round(size / 1024)}KB)`);
-                } else if (isAutoSelect) {
-                  // File resolved but not a valid PDF — still mark as auto-attempted
-                  // so we don't try the next item in the same module
-                  moduleAutoAdded = true;
                 }
               } catch { /* skip */ }
             }

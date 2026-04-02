@@ -33,14 +33,14 @@ export async function GET(request: NextRequest) {
 
   const canvasCourseId = request.nextUrl.searchParams.get("canvasCourseId");
   if (!canvasCourseId) {
-    return withCors(NextResponse.json({ materials: [], candidates: [] }));
+    return withCors(NextResponse.json({ knownCourse: false, materials: [], candidates: [] }));
   }
 
   const course = await db.course.findFirst({
     where: { userId: user.id, canvasCourseId },
     select: { id: true },
   });
-  if (!course) return withCors(NextResponse.json({ materials: [], candidates: [] }));
+  if (!course) return withCors(NextResponse.json({ knownCourse: false, materials: [], candidates: [] }));
 
   const [materials, candidates] = await Promise.all([
     db.courseMaterial.findMany({
@@ -65,6 +65,7 @@ export async function GET(request: NextRequest) {
         requested: true,
         status: true,
         remoteUpdatedAt: true,
+        remoteSize: true,
         lastSeenAt: true,
       },
     }),
@@ -72,6 +73,7 @@ export async function GET(request: NextRequest) {
 
   return withCors(
     NextResponse.json({
+      knownCourse: true,
       materials: materials.map((material) => ({
         sourceKind: material.sourceKind,
         sourceKey: material.sourceKey,
@@ -85,6 +87,7 @@ export async function GET(request: NextRequest) {
         requested: candidate.requested,
         status: candidate.status,
         remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+        remoteSize: candidate.remoteSize ?? null,
         lastSeenAt: candidate.lastSeenAt.toISOString(),
       })),
     }),

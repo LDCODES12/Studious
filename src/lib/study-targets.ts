@@ -43,12 +43,17 @@ export interface StudyTargetCourseInput
     id: string;
     fileName: string;
     detectedType: string;
+    sourceKind: string;
     relatedTopics: string[];
+    sourceUpdatedAt?: Date | string | null;
+    uploadedAt?: Date | string | null;
   }[];
   materialCandidates?: {
     id: string;
     fileName: string;
     moduleName: string;
+    remoteUpdatedAt?: Date | string | null;
+    lastSeenAt?: Date | string | null;
     requested?: boolean;
   }[];
 }
@@ -272,10 +277,27 @@ function countAnchorOverlap(anchors: Set<string>, value: string): number {
   return count;
 }
 
+function parseFreshness(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function freshnessBoost(value: Date | string | null | undefined, now: Date): number {
+  const parsed = parseFreshness(value);
+  if (!parsed) return 0;
+  const daysOld = (now.getTime() - parsed.getTime()) / (24 * 60 * 60 * 1000);
+  if (daysOld <= 3) return 6;
+  if (daysOld <= 7) return 4;
+  if (daysOld <= 14) return 2;
+  return 0;
+}
+
 function buildTargetEvidence(
   target: RankedTarget,
   course: StudyTargetCourseInput,
-  nearbyTerms: Set<string>
+  nearbyTerms: Set<string>,
+  now: Date,
 ): StudyTargetEvidence {
   const targetTerms = new Set([
     ...tokenize(target.label),
@@ -304,7 +326,8 @@ function buildTargetEvidence(
         countSharedTokens(nearbyTerms, material.fileName),
         0
       );
-      const score = relatedScore * 4 + fileScore * 3 + anchorScore * 4 + nearbyScore;
+      const recencyScore = freshnessBoost(material.sourceUpdatedAt ?? material.uploadedAt ?? null, now);
+      const score = relatedScore * 4 + fileScore * 3 + anchorScore * 4 + nearbyScore + recencyScore;
       return { material, score, strongMatch: relatedScore > 0 || fileScore > 0 || anchorScore > 0 };
     })
     .filter((entry) => entry.strongMatch && entry.score > 0)
@@ -323,9 +346,10 @@ function buildTargetEvidence(
         countSharedTokens(nearbyTerms, candidate.moduleName) +
         countSharedTokens(nearbyTerms, candidate.fileName);
       const requestedBoost = candidate.requested ? 1 : 0;
+      const recencyScore = freshnessBoost(candidate.remoteUpdatedAt ?? candidate.lastSeenAt ?? null, now);
       return {
         candidate,
-        score: moduleScore * 3 + fileScore * 4 + anchorScore + nearbyScore + requestedBoost,
+        score: moduleScore * 3 + fileScore * 4 + anchorScore + nearbyScore + requestedBoost + recencyScore,
         strongMatch: moduleScore > 0 || fileScore > 0 || anchorScore > 0,
       };
     })
@@ -438,7 +462,7 @@ export function buildStudyTargets(
       courseColor: course.color,
       topicName: target.label,
       readings: target.readings,
-      evidence: buildTargetEvidence(target, course, nearbyTerms),
+      evidence: buildTargetEvidence(target, course, nearbyTerms, now),
       source: target.source,
     }));
 }

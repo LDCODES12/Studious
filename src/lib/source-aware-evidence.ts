@@ -1,4 +1,4 @@
-import { addDays, format, isValid, parseISO, startOfWeek } from "date-fns";
+import { addDays, differenceInCalendarDays, format, isValid, parseISO, startOfWeek, subDays } from "date-fns";
 import { db } from "@/lib/db";
 import { generateEmbedding } from "@/lib/embeddings";
 import type { CourseContextSnapshot, DeadlineItem } from "@/lib/course-context";
@@ -9,6 +9,7 @@ export type MaterialSourceRole = "canonical" | "transcript" | "structural";
 interface MaterialRecord {
   id: string;
   courseId: string;
+  courseName: string | null;
   fileName: string;
   detectedType: string;
   sourceKind: string;
@@ -18,6 +19,7 @@ interface MaterialRecord {
   rawText: string;
   storedForAI: boolean;
   contentHash: string | null;
+  sourceUpdatedAt: Date | null;
   uploadedAt: Date;
 }
 
@@ -29,6 +31,7 @@ export interface SelectionCandidate extends EvidenceMaterial {
 export interface EvidenceMaterial {
   id: string;
   fileName: string;
+  courseName?: string | null;
   detectedType: string;
   sourceKind: string;
   sourceRole: string;
@@ -37,6 +40,7 @@ export interface EvidenceMaterial {
   rawText: string;
   storedForAI: boolean;
   contentHash: string | null;
+  sourceUpdatedAt?: string | null;
   uploadedAt: string;
   materialSourceRole: Exclude<MaterialSourceRole, "structural">;
 }
@@ -116,6 +120,12 @@ interface StudyEvidenceInput {
   selectionCaps?: Partial<SelectionCaps>;
 }
 
+interface CrossCourseStudyEvidenceInput {
+  userId: string;
+  questionText?: string | null;
+  selectionCaps?: Partial<SelectionCaps>;
+}
+
 const DEFAULT_WEEKLY_CAPS: SelectionCaps = {
   maxCanonical: 2,
   maxTranscript: 2,
@@ -173,6 +183,8 @@ const REVIEW_SIGNAL_RX = /\b(review|exam|quiz|midterm|final|practice exam|practi
 const WORKED_EXAMPLE_RX = /\b(example|examples|practice|walkthrough|worked|calculation|calculating|interpret|interpreting|problem|problems)\b/i;
 const CLARIFICATION_RX = /\b(focuses on|introduced?|covers|explains?|clarif(?:y|ies|ied)|connects?|relates?|how to|how .* relates?|demonstrates?)\b/i;
 const LECTURE_SPECIFIC_RX = /\b(lecture|in class|class|professor|prof|in lecture|covered|say|said|emphasized|review session)\b/i;
+const WEAK_CANONICAL_RX = /\b(syllabus|schedule|calendar|welcome|orientation|announcement|policy|rubric|attendance|chat file|transcript|recording|zoom|media gallery)\b/i;
+const CANONICAL_BACKBONE_TYPES = new Set(["lecture_notes", "lecture_slides", "textbook", "problem_set"]);
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -222,16 +234,42 @@ function transcriptPriority(material: EvidenceMaterial): number {
   return 1;
 }
 
+function materialFreshnessPriority(material: Pick<EvidenceMaterial, "sourceUpdatedAt" | "uploadedAt">): number {
+  const freshnessRaw = material.sourceUpdatedAt ?? material.uploadedAt;
+  if (!freshnessRaw) return 0;
+  const freshness = new Date(freshnessRaw);
+  if (!Number.isFinite(freshness.getTime())) return 0;
+  const daysOld = differenceInCalendarDays(new Date(), freshness);
+  if (daysOld <= 3) return 4;
+  if (daysOld <= 7) return 3;
+  if (daysOld <= 14) return 2;
+  if (daysOld <= 21) return 1;
+  return 0;
+}
+
 export function classifyMaterialSourceRole(
   material: Pick<MaterialRecord | EvidenceMaterial, "sourceKind">
 ): Exclude<MaterialSourceRole, "structural"> {
   return material.sourceKind === "canvas_media" ? "transcript" : "canonical";
 }
 
+function isCanonicalBackboneMaterial(
+  material: Pick<EvidenceMaterial, "detectedType" | "fileName" | "summary" | "sourceKind" | "sourceRole">
+): boolean {
+  if (material.sourceKind === "canvas_syllabus") return false;
+  if (material.sourceRole === "timeline") return false;
+  if (CANONICAL_BACKBONE_TYPES.has(material.detectedType)) return true;
+  if (material.detectedType === "other") {
+    return !WEAK_CANONICAL_RX.test(`${material.fileName} ${material.summary}`);
+  }
+  return false;
+}
+
 function toEvidenceMaterial(material: MaterialRecord, matchScore: number, preferred: boolean): SelectionCandidate {
   return {
     id: material.id,
     fileName: material.fileName,
+    courseName: material.courseName,
     detectedType: material.detectedType,
     sourceKind: material.sourceKind,
     sourceRole: material.sourceRole,
@@ -240,6 +278,7 @@ function toEvidenceMaterial(material: MaterialRecord, matchScore: number, prefer
     rawText: material.rawText,
     storedForAI: material.storedForAI,
     contentHash: material.contentHash,
+    sourceUpdatedAt: material.sourceUpdatedAt?.toISOString() ?? null,
     uploadedAt: material.uploadedAt.toISOString(),
     materialSourceRole: classifyMaterialSourceRole(material),
     matchScore,
@@ -261,6 +300,7 @@ async function fetchMaterialDetails(
     select: {
       id: true,
       courseId: true,
+      course: { select: { name: true } },
       fileName: true,
       detectedType: true,
       sourceKind: true,
@@ -270,9 +310,15 @@ async function fetchMaterialDetails(
       rawText: true,
       storedForAI: true,
       contentHash: true,
+      sourceUpdatedAt: true,
       uploadedAt: true,
     },
-  });
+  }).then((materials) =>
+    materials.map(({ course, ...material }) => ({
+      ...material,
+      courseName: course?.name ?? null,
+    }))
+  );
 }
 
 async function searchMaterialIds(courseId: string, query: string, limit: number): Promise<string[]> {
@@ -288,6 +334,92 @@ async function searchMaterialIds(courseId: string, query: string, limit: number)
     LIMIT ${limit}
   `;
   return rows.map((row) => row.id);
+}
+
+async function fetchUserMaterialDetails(
+  userId: string,
+  ids: string[],
+): Promise<MaterialRecord[]> {
+  if (ids.length === 0) return [];
+  return db.courseMaterial.findMany({
+    where: {
+      id: { in: ids },
+      course: { userId },
+    },
+    select: {
+      id: true,
+      courseId: true,
+      course: { select: { name: true } },
+      fileName: true,
+      detectedType: true,
+      sourceKind: true,
+      sourceRole: true,
+      summary: true,
+      relatedTopics: true,
+      rawText: true,
+      storedForAI: true,
+      contentHash: true,
+      sourceUpdatedAt: true,
+      uploadedAt: true,
+    },
+  }).then((materials) =>
+    materials.map(({ course, ...material }) => ({
+      ...material,
+      courseName: course?.name ?? null,
+    }))
+  );
+}
+
+async function searchUserMaterialIds(userId: string, query: string, limit: number): Promise<string[]> {
+  if (!query.trim()) return [];
+  const vector = await generateEmbedding(query);
+  const vectorStr = JSON.stringify(vector);
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT cm.id
+    FROM "CourseMaterial" cm
+    INNER JOIN "Course" c ON c.id = cm."courseId"
+    WHERE c."userId" = ${userId}
+      AND cm.embedding IS NOT NULL
+    ORDER BY cm.embedding <=> ${vectorStr}::vector
+    LIMIT ${limit}
+  `;
+  return rows.map((row) => row.id);
+}
+
+async function fetchRecentUserMaterials(userId: string, limit: number): Promise<MaterialRecord[]> {
+  const cutoff = subDays(new Date(), 10);
+  return db.courseMaterial.findMany({
+    where: {
+      course: { userId },
+      OR: [
+        { sourceUpdatedAt: { gte: cutoff } },
+        { uploadedAt: { gte: cutoff } },
+      ],
+    },
+    select: {
+      id: true,
+      courseId: true,
+      course: { select: { name: true } },
+      fileName: true,
+      detectedType: true,
+      sourceKind: true,
+      sourceRole: true,
+      summary: true,
+      relatedTopics: true,
+      rawText: true,
+      storedForAI: true,
+      contentHash: true,
+      sourceUpdatedAt: true,
+      uploadedAt: true,
+    },
+    orderBy: [{ sourceUpdatedAt: "desc" }, { uploadedAt: "desc" }],
+    take: limit,
+  }).then((materials) =>
+    materials.map(({ course, ...material }) => ({
+      ...material,
+      courseName: course?.name ?? null,
+    }))
+  );
 }
 
 function mergeRankedMaterials(
@@ -318,11 +450,21 @@ export function selectSourceAwareMaterials(
   canonicalMaterials: EvidenceMaterial[];
   transcriptMaterials: EvidenceMaterial[];
 } {
-  const canonical = materials
-    .filter((material) => material.materialSourceRole === "canonical")
+  const strongCanonical = materials
+    .filter((material) => material.materialSourceRole === "canonical" && isCanonicalBackboneMaterial(material))
     .sort((a, b) => {
       const delta = Number(b.preferred) - Number(a.preferred)
         || canonicalPriority(b) - canonicalPriority(a)
+        || materialFreshnessPriority(b) - materialFreshnessPriority(a)
+        || b.matchScore - a.matchScore;
+      return delta || a.fileName.localeCompare(b.fileName);
+    });
+
+  const weakCanonical = materials
+    .filter((material) => material.materialSourceRole === "canonical" && !isCanonicalBackboneMaterial(material))
+    .sort((a, b) => {
+      const delta = Number(b.preferred) - Number(a.preferred)
+        || materialFreshnessPriority(b) - materialFreshnessPriority(a)
         || b.matchScore - a.matchScore;
       return delta || a.fileName.localeCompare(b.fileName);
     });
@@ -332,11 +474,16 @@ export function selectSourceAwareMaterials(
     .sort((a, b) => {
       const delta = Number(b.preferred) - Number(a.preferred)
         || transcriptPriority(b) - transcriptPriority(a)
+        || materialFreshnessPriority(b) - materialFreshnessPriority(a)
         || b.matchScore - a.matchScore;
       return delta || a.fileName.localeCompare(b.fileName);
     });
 
-  const selectedCanonical = canonical.slice(0, caps.maxCanonical).map(stripRankFields);
+  const canonicalPool =
+    strongCanonical.length > 0 || transcripts.length > 0
+      ? strongCanonical
+      : weakCanonical;
+  const selectedCanonical = canonicalPool.slice(0, caps.maxCanonical).map(stripRankFields);
   const selectedTranscript = transcripts
     .slice(0, selectedCanonical.length > 0 ? caps.maxTranscript : caps.transcriptOnlyMax)
     .map(stripRankFields);
@@ -505,6 +652,10 @@ function summarizeMaterial(material: EvidenceMaterial): string {
   return material.fileName;
 }
 
+function formatMaterialLabel(material: Pick<EvidenceMaterial, "fileName" | "courseName">): string {
+  return material.courseName ? `${material.courseName} — ${material.fileName}` : material.fileName;
+}
+
 function clipText(rawText: string, maxChars: number): string {
   return normalizeWhitespace(rawText).slice(0, maxChars);
 }
@@ -624,6 +775,43 @@ export async function resolveStudyEvidence({
   };
 }
 
+export async function resolveCrossCourseStudyEvidence({
+  userId,
+  questionText = null,
+  selectionCaps,
+}: CrossCourseStudyEvidenceInput): Promise<ResolvedStudyEvidence> {
+  const caps = resolveCaps(selectionCaps, DEFAULT_STUDY_CAPS);
+  const lectureSpecific = questionText ? LECTURE_SPECIFIC_RX.test(questionText) : false;
+  const semanticMaterials = questionText
+    ? await (async () => {
+        const semanticIds = await searchUserMaterialIds(userId, questionText, 10);
+        return semanticIds.length > 0 ? fetchUserMaterialDetails(userId, semanticIds) : [];
+      })()
+    : [];
+  const recentMaterials = lectureSpecific ? await fetchRecentUserMaterials(userId, 8) : [];
+  const rankedMaterials = mergeRankedMaterials(recentMaterials, semanticMaterials);
+  const selection = selectSourceAwareMaterials(rankedMaterials, caps);
+  const transcriptDigest = buildTranscriptDigest(
+    selection.transcriptMaterials,
+    questionText ? [questionText] : [],
+  );
+
+  return {
+    structuralContext: {
+      courseId: "cross-course",
+      courseName: null,
+      topicName: lectureSpecific ? "Recent lecture coverage" : null,
+      weekLabel: null,
+      readings: [],
+    },
+    canonicalMaterials: selection.canonicalMaterials,
+    transcriptMaterials: selection.transcriptMaterials,
+    transcriptDigest,
+    pendingCandidates: [],
+    lectureSpecific,
+  };
+}
+
 export function formatStudyEvidenceForPrompt(
   evidence: ResolvedStudyEvidence,
   options?: {
@@ -666,7 +854,7 @@ export function formatStudyEvidenceForPrompt(
         evidence.canonicalMaterials
           .map((material) => {
             const excerpt = clipText(material.rawText, canonicalExcerptChars);
-            return `- ${material.fileName}\n  Summary: ${summarizeMaterial(material)}\n  Excerpt: ${excerpt}`;
+            return `- ${formatMaterialLabel(material)}\n  Summary: ${summarizeMaterial(material)}\n  Excerpt: ${excerpt}`;
           })
           .join("\n")
     );
@@ -683,7 +871,7 @@ export function formatStudyEvidenceForPrompt(
     transcriptLines.push(
       ...evidence.transcriptMaterials.map((material) => {
         const excerpt = clipText(material.rawText, transcriptChars);
-        return `- ${material.fileName}\n  Summary: ${summarizeMaterial(material)}\n  Excerpt: ${excerpt}`;
+        return `- ${formatMaterialLabel(material)}\n  Summary: ${summarizeMaterial(material)}\n  Excerpt: ${excerpt}`;
       })
     );
 
@@ -727,7 +915,7 @@ export function formatGenerationEvidenceForPrompt(
     let canonicalText = "";
     for (const material of evidence.canonicalMaterials) {
       if (canonicalText.length >= canonicalCharBudget) break;
-      canonicalText += `\n\n--- ${material.fileName} ---\n${material.rawText}`;
+      canonicalText += `\n\n--- ${formatMaterialLabel(material)} ---\n${material.rawText}`;
     }
     sections.push(`Canonical course content:\n${canonicalText.slice(0, canonicalCharBudget)}`);
   }
@@ -745,7 +933,7 @@ export function formatGenerationEvidenceForPrompt(
       for (const material of evidence.transcriptMaterials) {
         if (remaining <= 0) break;
         const body = clipText(material.rawText, Math.min(remaining, 1_200));
-        const block = `--- ${material.fileName} ---\nSummary: ${summarizeMaterial(material)}\nExcerpt: ${body}`;
+        const block = `--- ${formatMaterialLabel(material)} ---\nSummary: ${summarizeMaterial(material)}\nExcerpt: ${body}`;
         transcriptSnippets.push(block);
         remaining -= block.length + 2;
       }
@@ -756,7 +944,7 @@ export function formatGenerationEvidenceForPrompt(
       let transcriptBody = "";
       for (const material of evidence.transcriptMaterials) {
         if (transcriptBody.length >= transcriptOnlyBudget) break;
-        transcriptBody += `\n\n--- ${material.fileName} ---\n${material.rawText}`;
+        transcriptBody += `\n\n--- ${formatMaterialLabel(material)} ---\n${material.rawText}`;
       }
       transcriptText += `${transcriptText ? "\n\n" : ""}${transcriptBody.slice(0, transcriptOnlyBudget)}`;
     }
@@ -777,7 +965,7 @@ export function buildWeeklyEvidencePromptBlock(evidence: ResolvedWeeklyEvidence)
   if (evidence.canonicalMaterials.length > 0) {
     parts.push(
       `Canonical materials: ${evidence.canonicalMaterials
-        .map((material) => `${material.fileName} (${summarizeMaterial(material)})`)
+        .map((material) => `${formatMaterialLabel(material)} (${summarizeMaterial(material)})`)
         .join("; ")}`
     );
   }

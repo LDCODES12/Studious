@@ -291,17 +291,10 @@ async function handleCanvasData(payload) {
       syncLog("gs_resolve_start", { count: coursesNeedingResolve.length });
 
       let resolveTabId = null;
-      let createdResolveTab = false;
       try {
-        const existingTabs = await chrome.tabs.query({ url: `https://${canvasUrl}/*` });
-        if (existingTabs.length > 0) {
-          resolveTabId = existingTabs[0].id;
-        } else {
-          const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
-          createdResolveTab = true;
-          resolveTabId = tab.id;
-          await waitForTabLoad(resolveTabId);
-        }
+        const tab = await chrome.tabs.create({ url: `https://${canvasUrl}`, active: false });
+        resolveTabId = tab.id;
+        await waitForTabLoad(resolveTabId);
 
         for (const course of coursesNeedingResolve) {
           try {
@@ -316,11 +309,12 @@ async function handleCanvasData(payload) {
             syncLog("gs_resolve_err", { canvas: course.name, error: err?.message });
           }
         }
-        if (createdResolveTab) {
-          try { await chrome.tabs.remove(resolveTabId); } catch { /* already closed */ }
-        }
       } catch (err) {
         syncLog("gs_resolve_tab_err", { error: err?.message });
+      } finally {
+        if (resolveTabId) {
+          try { await chrome.tabs.remove(resolveTabId); } catch { /* already closed */ }
+        }
       }
     }
 
@@ -1400,18 +1394,9 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
 async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
   broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Syncing Gradescope grades…" });
 
-  let gsTabId = null;
-  let createdTab = false;
-
-  const tabs = await chrome.tabs.query({ url: "https://www.gradescope.com/*" });
-  if (tabs.length > 0) {
-    gsTabId = tabs[0].id;
-  } else {
-    const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
-    createdTab = true;
-    gsTabId = tab.id;
-    await waitForTabLoad(gsTabId);
-  }
+  const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
+  const gsTabId = tab.id;
+  await waitForTabLoad(gsTabId);
 
   try {
     const allCourses = [];
@@ -1861,9 +1846,7 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
     syncLog("gs_api_ok", gsResult);
     return gsResult;
   } finally {
-    if (createdTab && gsTabId) {
-      try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
-    }
+    try { await chrome.tabs.remove(gsTabId); } catch { /* already closed */ }
   }
 }
 

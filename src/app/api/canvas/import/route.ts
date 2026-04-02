@@ -348,10 +348,21 @@ function deriveCandidateStatus(args: {
     sourceUpdatedAt: Date | null;
   } | null;
   remoteUpdatedAt?: string | null;
+  remoteSize?: number | null;
+  previousRemoteSize?: number | null;
 }): "discovered" | "requested" | "imported" | "stale" {
   if (args.requested) return "requested";
   if (!args.importedMaterial) return "discovered";
   if (isRemoteSourceNewer(args.remoteUpdatedAt ?? null, args.importedMaterial.sourceUpdatedAt)) {
+    return "stale";
+  }
+  if (
+    typeof args.remoteSize === "number" &&
+    args.remoteSize > 0 &&
+    typeof args.previousRemoteSize === "number" &&
+    args.previousRemoteSize > 0 &&
+    args.remoteSize !== args.previousRemoteSize
+  ) {
     return "stale";
   }
   return "imported";
@@ -380,22 +391,30 @@ async function findExistingSyncedMaterial(
   });
   if (byKey) return byKey;
 
-  const byCanvasFileName = await db.courseMaterial.findFirst({
-    where: { courseId, sourceKind, fileName },
-    select: {
-      id: true,
-      contentHash: true,
-      sourceUpdatedAt: true,
-      detectedType: true,
-      sourceRole: true,
-      summary: true,
-      relatedTopics: true,
-      storedForAI: true,
-      autoStoredForAI: true,
-      userStoredForAIOverride: true,
-    },
-  });
-  if (byCanvasFileName) return byCanvasFileName;
+  if (sourceKind === "canvas_module" || sourceKind === "canvas_media") {
+    const keylessMatches = await db.courseMaterial.findMany({
+      where: {
+        courseId,
+        sourceKind,
+        fileName,
+        sourceKey: null,
+      },
+      select: {
+        id: true,
+        contentHash: true,
+        sourceUpdatedAt: true,
+        detectedType: true,
+        sourceRole: true,
+        summary: true,
+        relatedTopics: true,
+        storedForAI: true,
+        autoStoredForAI: true,
+        userStoredForAIOverride: true,
+      },
+      take: 2,
+    });
+    if (keylessMatches.length === 1) return keylessMatches[0];
+  }
 
   if (sourceKind === "canvas_syllabus") {
     return db.courseMaterial.findFirst({
@@ -1195,6 +1214,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
               select: {
                 contentId: true,
                 requested: true,
+                remoteSize: true,
               },
             }),
           ]);
@@ -1217,6 +1237,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
             const requested = importedMaterial
               ? false
               : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
+            const previousCandidate = existingCandidateMap.get(candidate.contentId) ?? null;
             await db.canvasMaterialCandidate.upsert({
               where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
               update: {
@@ -1230,6 +1251,8 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                   requested,
                   importedMaterial,
                   remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                  remoteSize: candidate.remoteSize ?? null,
+                  previousRemoteSize: previousCandidate?.remoteSize ?? null,
                 }),
                 lastSeenAt: new Date(),
               },
@@ -1246,6 +1269,8 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                   requested,
                   importedMaterial,
                   remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                  remoteSize: candidate.remoteSize ?? null,
+                  previousRemoteSize: previousCandidate?.remoteSize ?? null,
                 }),
                 lastSeenAt: new Date(),
               },

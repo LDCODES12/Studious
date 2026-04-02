@@ -13,6 +13,7 @@ function makeMaterial(
   const base: EvidenceMaterial = {
     id: "material-1",
     fileName: "Lecture Notes.pdf",
+    courseName: null,
     detectedType: "lecture_notes",
     sourceKind: "canvas_module",
     sourceRole: "content",
@@ -21,6 +22,7 @@ function makeMaterial(
     rawText: "Equilibrium concepts and reaction conditions.",
     storedForAI: true,
     contentHash: "hash-1",
+    sourceUpdatedAt: "2026-04-02T00:00:00.000Z",
     uploadedAt: new Date("2026-04-02T00:00:00.000Z").toISOString(),
     materialSourceRole: "canonical",
   };
@@ -68,6 +70,32 @@ test("selectSourceAwareMaterials falls back to transcript-only when canonical ma
 
   assert.equal(selected.canonicalMaterials.length, 0);
   assert.equal(selected.transcriptMaterials.length, 3);
+});
+
+test("selectSourceAwareMaterials does not let weak canonical docs block transcript-only fallback", () => {
+  const selected = selectSourceAwareMaterials(
+    [
+      makeMaterial({
+        id: "weak-1",
+        fileName: "Course Syllabus.pdf",
+        detectedType: "other",
+        summary: "Course calendar, policies, and attendance expectations.",
+        materialSourceRole: "canonical",
+        matchScore: 95,
+      }),
+      makeMaterial({
+        id: "tx-1",
+        fileName: "Lecture 30 transcript.txt",
+        sourceKind: "canvas_media",
+        materialSourceRole: "transcript",
+        matchScore: 90,
+      }),
+    ],
+    { maxCanonical: 2, maxTranscript: 2, transcriptOnlyMax: 3 },
+  );
+
+  assert.equal(selected.canonicalMaterials.length, 0);
+  assert.deepEqual(selected.transcriptMaterials.map((material) => material.id), ["tx-1"]);
 });
 
 test("buildTranscriptDigest keeps concepts, worked examples, review cues, and clarifications", () => {

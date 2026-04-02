@@ -8,7 +8,11 @@ import { db } from "@/lib/db";
 import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
 import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
-import { formatStudyEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
+import {
+  formatStudyEvidenceForPrompt,
+  resolveCrossCourseStudyEvidence,
+  resolveStudyEvidence,
+} from "@/lib/source-aware-evidence";
 
 export const maxDuration = 60;
 
@@ -132,9 +136,9 @@ export async function POST(request: NextRequest) {
   }
 
   let materialContext = "";
+  const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
+  const lastUserText = extractTextFromParts(lastUserMsg?.parts);
   if (courseId) {
-    const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
-    const lastUserText = extractTextFromParts(lastUserMsg?.parts);
     try {
       const evidence = await resolveStudyEvidence({
         courseId,
@@ -145,6 +149,22 @@ export async function POST(request: NextRequest) {
       materialContext = `\n\nSource-aware study evidence:\n${formatStudyEvidenceForPrompt(evidence)}`;
     } catch {
       materialContext = "\n\nNote: No course materials were found. If the student asks about specific documents, be honest that you don't have access to them.";
+    }
+  } else if (lastUserText) {
+    try {
+      const evidence = await resolveCrossCourseStudyEvidence({
+        userId: session.user.id,
+        questionText: lastUserText,
+      });
+      if (evidence.canonicalMaterials.length > 0 || evidence.transcriptMaterials.length > 0) {
+        materialContext = `\n\nCross-course study evidence:\n${formatStudyEvidenceForPrompt(evidence, {
+          canonicalExcerptChars: 650,
+          transcriptExcerptChars: 400,
+          transcriptOnlyChars: 1_200,
+        })}`;
+      }
+    } catch {
+      materialContext = "";
     }
   }
 
