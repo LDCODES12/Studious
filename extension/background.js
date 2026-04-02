@@ -868,6 +868,14 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
     func: async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const normalizeMediaTitle = (value) => {
+        const text = clean(value)
+          .replace(/^thumbnail for\s+/i, "")
+          .replace(/\s+\d+\s+of\s+\d+\s*$/i, "")
+          .replace(/\s+\d{1,2}:\d{2}(?::\d{2})?\s*duration.*$/i, "")
+          .trim();
+        return text;
+      };
       const parseExpectedCount = (label) => {
         const match = String(label || "").match(/(\d+)\s+media/i);
         return match ? Number(match[1]) : null;
@@ -887,6 +895,31 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
         const heading = playlistContainer.querySelector("h2");
         return clean(heading?.textContent);
       };
+      const extractTitle = (anchor) => {
+        const wrapper = anchor.closest(".photo-group, .thumb_wrapper, .galleryItem, li.galleryItem");
+        const candidates = [
+          anchor.getAttribute("title"),
+          anchor.getAttribute("aria-label"),
+          wrapper?.getAttribute?.("title"),
+          anchor.querySelector("img")?.getAttribute("alt"),
+          anchor.querySelector("[title]")?.getAttribute("title"),
+        ]
+          .map(normalizeMediaTitle)
+          .filter((value) => value && value.length >= 3);
+
+        if (candidates.length > 0) {
+          return candidates[0];
+        }
+
+        const raw = clean(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label"));
+        const duplicated = raw.match(/^(.*?)(?:\s+\d+\s+of\s+\d+)?\s+\d{1,2}:\d{2}(?::\d{2})?\s*duration.*?\s+\1$/i);
+        if (duplicated?.[1]) {
+          return normalizeMediaTitle(duplicated[1]);
+        }
+
+        const beforeOrdinal = raw.split(/\s+\d+\s+of\s+\d+\b/i)[0];
+        return normalizeMediaTitle(beforeOrdinal || raw);
+      };
       const collectEntriesFromRoot = (root) => {
         const entries = [];
         const seen = new Set();
@@ -896,7 +929,7 @@ async function listMediaGalleryEntriesFromFrame(tabId, context) {
           const mediaId = extractEntryId(href);
           if (!mediaId || seen.has(mediaId)) continue;
           seen.add(mediaId);
-          const title = clean(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label"));
+          const title = extractTitle(anchor);
           if (!title || title.length < 3) continue;
           entries.push({
             mediaId,
