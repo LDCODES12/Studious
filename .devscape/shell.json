@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "venture": {
+    "id": "25c16408-b95b-41b0-82fe-e1bb8d39bfa3",
+    "name": "tester"
+  },
+  "shell": {
+    "trustedFrame": "The shell owns money, membership, approvals, connected surfaces, and the canonical venture record.",
+    "editableInterior": "The interior can rewrite prompts, UI, agent structure, and venture code, but it should call back into the shell for trusted state changes.",
+    "shellUrl": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3",
+    "workspaceUrl": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/workspace",
+    "shellApiUrl": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell",
+    "interiorSource": {
+      "current": "devscape-db",
+      "future": "connected repo mirror",
+      "note": "Interior files live in Dev Scap today. Connected repos are execution surfaces and future mirror targets, not the source of truth yet."
+    },
+    "connectionPoints": [
+      {
+        "id": "treasury",
+        "label": "Treasury",
+        "summary": "Capital enters through the shell. The interior can read the pool and eventually request budget, but it cannot rewrite the ledger.",
+        "boundary": "shell-owned",
+        "shellSectionId": "treasury",
+        "actions": [
+          {
+            "label": "Read treasury",
+            "status": "active"
+          },
+          {
+            "label": "Fund venture",
+            "status": "active"
+          },
+          {
+            "label": "Request spend",
+            "status": "planned"
+          }
+        ],
+        "notes": [
+          "Money becomes venture-usable when the shell records it.",
+          "Reservations and payouts should remain shell-mediated."
+        ],
+        "shellHref": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3#treasury",
+        "shellApiHref": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell"
+      },
+      {
+        "id": "members",
+        "label": "Members",
+        "summary": "The shell keeps the roster and seats canonical. The interior can organize around people, but it cannot rewrite who belongs to the venture.",
+        "boundary": "shell-owned",
+        "shellSectionId": "members",
+        "actions": [
+          {
+            "label": "Read roster",
+            "status": "active"
+          },
+          {
+            "label": "Inspect seats",
+            "status": "active"
+          },
+          {
+            "label": "Invite through shell",
+            "status": "active"
+          }
+        ],
+        "notes": [
+          "Membership and identity stay trusted at the shell boundary."
+        ],
+        "shellHref": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3#members",
+        "shellApiHref": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell"
+      },
+      {
+        "id": "approvals",
+        "label": "Approvals",
+        "summary": "The interior can open decisions, but the shell owns the approval record and the final attributed outcome.",
+        "boundary": "shell-mediated",
+        "shellSectionId": "canonical-record",
+        "actions": [
+          {
+            "label": "Request approval",
+            "status": "active"
+          },
+          {
+            "label": "Read open decisions",
+            "status": "active"
+          }
+        ],
+        "notes": [
+          "Approvals should land in the canonical record, not only inside venture UI."
+        ],
+        "shellHref": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3#canonical-record",
+        "shellApiHref": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell"
+      },
+      {
+        "id": "canonicalRecord",
+        "label": "Canonical record",
+        "summary": "Work can happen anywhere. It becomes venture history only once it lands in the shell with provenance.",
+        "boundary": "shell-owned",
+        "shellSectionId": "canonical-record",
+        "actions": [
+          {
+            "label": "Read event history",
+            "status": "active"
+          },
+          {
+            "label": "Export record",
+            "status": "active"
+          }
+        ],
+        "notes": [
+          "Agents and members can create work, but the shell records what became real."
+        ],
+        "shellHref": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3#canonical-record",
+        "shellApiHref": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell"
+      },
+      {
+        "id": "repoSurfaces",
+        "label": "Repo surfaces",
+        "summary": "Connected repos are execution surfaces and future mirror targets. The shell keeps the attachment clear while the interior stays editable.",
+        "boundary": "shell-mediated",
+        "shellSectionId": "connected-surfaces",
+        "actions": [
+          {
+            "label": "Inspect connected repo",
+            "status": "active"
+          },
+          {
+            "label": "Link GitHub surface",
+            "status": "active"
+          },
+          {
+            "label": "Mirror interior to repo",
+            "status": "planned"
+          }
+        ],
+        "notes": [
+          "The connected repo is not the source of truth for the interior yet."
+        ],
+        "shellHref": "https://devscape-six.vercel.app/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3#connected-surfaces",
+        "shellApiHref": "https://devscape-six.vercel.app/api/ventures/25c16408-b95b-41b0-82fe-e1bb8d39bfa3/shell"
+      }
+    ]
+  }
+}
