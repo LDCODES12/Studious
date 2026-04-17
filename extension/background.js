@@ -18,6 +18,12 @@
 
 const DAILY_SCOUT_ALARM = "autoSyncDaily";
 const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
+const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
+const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
+const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
+const MEDIA_TRANSCRIPT_UPLOAD_CHAR_LIMIT = 12_000;
+const MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT = 4_000;
+const TRUNCATION_NOTICE = "\n\n[Study Circle truncated this extracted text before upload to keep sync payload within API limits.]";
 
 async function syncAlarmConfiguration() {
   const { autoSync } = await chrome.storage.local.get(["autoSync"]);
@@ -72,6 +78,105 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function truncateTextForUpload(text, maxChars) {
+  const value = String(text ?? "");
+  if (value.length <= maxChars) return value;
+  const keep = Math.max(0, maxChars - TRUNCATION_NOTICE.length);
+  return value.slice(0, keep).trimEnd() + TRUNCATION_NOTICE;
+}
+
+function importPayloadByteLength(payload) {
+  const json = JSON.stringify(payload);
+  try {
+    return new TextEncoder().encode(json).length;
+  } catch {
+    return json.length;
+  }
+}
+
+function prepareCanvasImportPayload(payload) {
+  const beforeBytes = importPayloadByteLength(payload);
+  let syllabusTrimmed = 0;
+  let materialTrimmed = 0;
+  let mediaTrimmed = 0;
+  let mediaDropped = 0;
+
+  for (const course of payload.courses ?? []) {
+    for (const syllabus of course.syllabusTexts ?? []) {
+      if (typeof syllabus.text === "string" && syllabus.text.length > SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT) {
+        syllabus.text = truncateTextForUpload(syllabus.text, SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT);
+        syllabusTrimmed++;
+      }
+    }
+
+    for (const material of course.materialTexts ?? []) {
+      const isMediaTranscript = material.sourceKind === "canvas_media";
+      const limit = isMediaTranscript
+        ? MEDIA_TRANSCRIPT_UPLOAD_CHAR_LIMIT
+        : MATERIAL_TEXT_UPLOAD_CHAR_LIMIT;
+      if (typeof material.text === "string" && material.text.length > limit) {
+        material.text = truncateTextForUpload(material.text, limit);
+        if (isMediaTranscript) mediaTrimmed++;
+        else materialTrimmed++;
+      }
+    }
+  }
+
+  let currentBytes = importPayloadByteLength(payload);
+  if (currentBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
+    for (const course of payload.courses ?? []) {
+      for (const material of course.materialTexts ?? []) {
+        if (
+          material.sourceKind === "canvas_media" &&
+          typeof material.text === "string" &&
+          material.text.length > MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT
+        ) {
+          material.text = truncateTextForUpload(material.text, MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT);
+          mediaTrimmed++;
+        }
+      }
+    }
+    currentBytes = importPayloadByteLength(payload);
+  }
+
+  if (currentBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
+    const mediaTexts = [];
+    for (const course of payload.courses ?? []) {
+      for (const material of course.materialTexts ?? []) {
+        if (material.sourceKind === "canvas_media") {
+          mediaTexts.push({ course, material, length: material.text?.length ?? 0 });
+        }
+      }
+    }
+
+    mediaTexts.sort((a, b) => {
+      const requestedBias = Number(Boolean(a.material.requested)) - Number(Boolean(b.material.requested));
+      return requestedBias || b.length - a.length;
+    });
+
+    for (const entry of mediaTexts) {
+      if (currentBytes <= IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) break;
+      const list = entry.course.materialTexts ?? [];
+      const index = list.indexOf(entry.material);
+      if (index === -1) continue;
+      list.splice(index, 1);
+      mediaDropped++;
+      currentBytes = importPayloadByteLength(payload);
+    }
+  }
+
+  const afterBytes = importPayloadByteLength(payload);
+  return {
+    beforeBytes,
+    afterBytes,
+    softLimitBytes: IMPORT_PAYLOAD_SOFT_LIMIT_BYTES,
+    syllabusTrimmed,
+    materialTrimmed,
+    mediaTrimmed,
+    mediaDropped,
+  };
+}
 
 async function getCanvasTabId() {
   const { canvasUrl } = await chrome.storage.local.get(["canvasUrl"]);
@@ -425,6 +530,22 @@ async function handleCanvasData(payload) {
         : "Saving to Study Circle…",
     });
 
+    const payloadPrep = prepareCanvasImportPayload(payload);
+    if (
+      payloadPrep.syllabusTrimmed > 0 ||
+      payloadPrep.materialTrimmed > 0 ||
+      payloadPrep.mediaTrimmed > 0 ||
+      payloadPrep.mediaDropped > 0
+    ) {
+      syncLog("payload_prepared", payloadPrep);
+      console.log(
+        "[worker] Prepared import payload:",
+        `${Math.round(payloadPrep.beforeBytes / 1024)}KB → ${Math.round(payloadPrep.afterBytes / 1024)}KB`,
+        `mediaTrimmed=${payloadPrep.mediaTrimmed}`,
+        `mediaDropped=${payloadPrep.mediaDropped}`,
+      );
+    }
+
     const res = await fetch(`https://${scUrl}/api/canvas/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
@@ -433,7 +554,8 @@ async function handleCanvasData(payload) {
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error ?? `Study Circle API error (${res.status})`);
+      const payloadHint = res.status === 413 ? " after transcript payload compaction" : "";
+      throw new Error(body.error ?? `Study Circle API error (${res.status})${payloadHint}`);
     }
 
     const result = await res.json();
@@ -1356,6 +1478,7 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
                 sourceKind: "canvas_media",
                 remoteSize: attachment.size ?? null,
                 remoteUpdatedAt: attachment.uploadedAt ?? null,
+                requested: requestedIds.has(contentId),
               });
               transcriptCount++;
             }
