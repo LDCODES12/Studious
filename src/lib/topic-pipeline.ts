@@ -907,6 +907,14 @@ function inferBreakStartDate(
     const monday = startOfWeek(explicit, { weekStartsOn: 1 });
     const mondayStr = monday.toISOString().slice(0, 10);
     if (mondayStr > topic.startDate) return mondayStr;
+    if (
+      mondayStr === topic.startDate &&
+      explicit > currentStart &&
+      /\bafter\b/i.test(segment) &&
+      FULL_BREAK_RX.test(segment)
+    ) {
+      return addDays(currentStart, 7).toISOString().slice(0, 10);
+    }
   }
 
   if (sawExplicitBreakDate) {

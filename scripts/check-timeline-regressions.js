@@ -63,6 +63,7 @@ async function main() {
           startDate: true,
           topics: true,
           readings: true,
+          notes: true,
           dateConfidence: true,
           scheduleMode: true,
           verificationStatus: true,
@@ -114,9 +115,12 @@ async function main() {
     fail("Anthropology is missing the explicit spring break week");
   }
   const anthroWeek12 = anthropology.topics.find((topic) => topic.weekNumber === 12);
+  const anthroWeek12Markers = anthroWeek12
+    ? [...anthroWeek12.topics, anthroWeek12.notes ?? ""]
+    : [];
   if (
     !anthroWeek12 ||
-    !anthroWeek12.topics.some((entry) => /exam 3/i.test(entry)) ||
+    !anthroWeek12Markers.some((entry) => /exam 3/i.test(entry)) ||
     !anthroWeek12.readings.includes("Latour")
   ) {
     fail("Anthropology week 12 lost its Exam 3 / Latour structure");

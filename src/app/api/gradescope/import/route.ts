@@ -141,6 +141,18 @@ function isMissingAssignment(
   return dbStatus === "not_started" && cutoff < now;
 }
 
+function isLikelyGradescopeTableArtifact(assignment: GradescopeAssignment): boolean {
+  return (
+    normalizeTitle(assignment.title) === "name" &&
+    !assignment.gradescopeAssignmentId?.trim() &&
+    !assignment.gradescopeFingerprint?.trim() &&
+    !assignment.dueDate &&
+    !assignment.dueAt &&
+    assignment.score === null &&
+    assignment.maxScore === null
+  );
+}
+
 export async function POST(request: NextRequest) {
   const user = await authedUser(request);
   if (!user) {
@@ -234,6 +246,7 @@ export async function POST(request: NextRequest) {
         gradescopeFingerprint,
       } = gsAssignment;
       if (!title?.trim()) continue;
+      if (isLikelyGradescopeTableArtifact(gsAssignment)) continue;
 
       const incomingGsId = gradescopeAssignmentId?.trim() || null;
       const normalizedDue = canonicalDueValue(dueAt ?? dueDate);
