@@ -19,10 +19,10 @@
 const DAILY_SCOUT_ALARM = "autoSyncDaily";
 const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
+const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
+const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
 const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
 const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
-const MEDIA_TRANSCRIPT_UPLOAD_CHAR_LIMIT = 12_000;
-const MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT = 4_000;
 const TRUNCATION_NOTICE = "\n\n[Study Circle truncated this extracted text before upload to keep sync payload within API limits.]";
 
 async function syncAlarmConfiguration() {
@@ -99,8 +99,6 @@ function prepareCanvasImportPayload(payload) {
   const beforeBytes = importPayloadByteLength(payload);
   let syllabusTrimmed = 0;
   let materialTrimmed = 0;
-  let mediaTrimmed = 0;
-  let mediaDropped = 0;
 
   for (const course of payload.courses ?? []) {
     for (const syllabus of course.syllabusTexts ?? []) {
@@ -111,58 +109,11 @@ function prepareCanvasImportPayload(payload) {
     }
 
     for (const material of course.materialTexts ?? []) {
-      const isMediaTranscript = material.sourceKind === "canvas_media";
-      const limit = isMediaTranscript
-        ? MEDIA_TRANSCRIPT_UPLOAD_CHAR_LIMIT
-        : MATERIAL_TEXT_UPLOAD_CHAR_LIMIT;
-      if (typeof material.text === "string" && material.text.length > limit) {
-        material.text = truncateTextForUpload(material.text, limit);
-        if (isMediaTranscript) mediaTrimmed++;
-        else materialTrimmed++;
+      if (material.sourceKind === "canvas_media") continue;
+      if (typeof material.text === "string" && material.text.length > MATERIAL_TEXT_UPLOAD_CHAR_LIMIT) {
+        material.text = truncateTextForUpload(material.text, MATERIAL_TEXT_UPLOAD_CHAR_LIMIT);
+        materialTrimmed++;
       }
-    }
-  }
-
-  let currentBytes = importPayloadByteLength(payload);
-  if (currentBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
-    for (const course of payload.courses ?? []) {
-      for (const material of course.materialTexts ?? []) {
-        if (
-          material.sourceKind === "canvas_media" &&
-          typeof material.text === "string" &&
-          material.text.length > MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT
-        ) {
-          material.text = truncateTextForUpload(material.text, MEDIA_TRANSCRIPT_AGGRESSIVE_CHAR_LIMIT);
-          mediaTrimmed++;
-        }
-      }
-    }
-    currentBytes = importPayloadByteLength(payload);
-  }
-
-  if (currentBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
-    const mediaTexts = [];
-    for (const course of payload.courses ?? []) {
-      for (const material of course.materialTexts ?? []) {
-        if (material.sourceKind === "canvas_media") {
-          mediaTexts.push({ course, material, length: material.text?.length ?? 0 });
-        }
-      }
-    }
-
-    mediaTexts.sort((a, b) => {
-      const requestedBias = Number(Boolean(a.material.requested)) - Number(Boolean(b.material.requested));
-      return requestedBias || b.length - a.length;
-    });
-
-    for (const entry of mediaTexts) {
-      if (currentBytes <= IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) break;
-      const list = entry.course.materialTexts ?? [];
-      const index = list.indexOf(entry.material);
-      if (index === -1) continue;
-      list.splice(index, 1);
-      mediaDropped++;
-      currentBytes = importPayloadByteLength(payload);
     }
   }
 
@@ -173,8 +124,193 @@ function prepareCanvasImportPayload(payload) {
     softLimitBytes: IMPORT_PAYLOAD_SOFT_LIMIT_BYTES,
     syllabusTrimmed,
     materialTrimmed,
-    mediaTrimmed,
-    mediaDropped,
+  };
+}
+
+function cloneCourseForMaterialBatch(course) {
+  const clone = {
+    id: course.id,
+    name: course.name,
+  };
+  for (const key of [
+    "courseCode",
+    "instructor",
+    "term",
+    "termStartAt",
+    "termEndAt",
+    "gradescopeCourseId",
+    "currentGrade",
+    "currentScore",
+    "gradingScheme",
+    "applyGroupWeights",
+  ]) {
+    if (course[key] !== undefined) clone[key] = course[key];
+  }
+  clone.materialTexts = [];
+  clone.materialCandidates = [];
+  return clone;
+}
+
+function mediaCandidateForMaterial(course, material) {
+  const sourceKey = material.sourceKey;
+  if (!sourceKey) return null;
+  const existing = (course.materialCandidates ?? []).find((candidate) => candidate.contentId === sourceKey);
+  if (existing) return { ...existing };
+  return {
+    fileName: material.fileName,
+    moduleName: "Kaltura Media Gallery",
+    contentId: sourceKey,
+    sourceKind: "canvas_media",
+    remoteSize: material.remoteSize ?? null,
+    remoteUpdatedAt: material.remoteUpdatedAt ?? null,
+  };
+}
+
+function buildMediaTranscriptPayload(entries) {
+  const courseMap = new Map();
+
+  for (const entry of entries) {
+    const key = String(entry.course.id);
+    let course = courseMap.get(key);
+    if (!course) {
+      course = cloneCourseForMaterialBatch(entry.course);
+      courseMap.set(key, course);
+    }
+
+    course.materialTexts.push(entry.material);
+
+    if (entry.candidate) {
+      const exists = course.materialCandidates.some((candidate) => candidate.contentId === entry.candidate.contentId);
+      if (!exists) course.materialCandidates.push(entry.candidate);
+    }
+  }
+
+  return {
+    syncMode: "scout",
+    courses: [...courseMap.values()],
+    assignments: [],
+    modules: [],
+    announcements: [],
+    assignmentGroups: [],
+  };
+}
+
+function splitOversizedMediaEntry(entry) {
+  const singleBytes = importPayloadByteLength(buildMediaTranscriptPayload([entry]));
+  if (singleBytes <= IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) return [entry];
+
+  const text = String(entry.material.text ?? "");
+  const chunks = [];
+  let part = 1;
+  for (let offset = 0; offset < text.length; offset += MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT) {
+    const suffix = `part:${part}`;
+    chunks.push({
+      course: entry.course,
+      candidate: part === 1 ? entry.candidate : null,
+      material: {
+        ...entry.material,
+        fileName: part === 1 ? entry.material.fileName : `${entry.material.fileName} (${suffix})`,
+        sourceKey: part === 1 ? entry.material.sourceKey : `${entry.material.sourceKey}:${suffix}`,
+        text: text.slice(offset, offset + MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT),
+      },
+    });
+    part++;
+  }
+
+  syncLog("media_transcript_split", {
+    course: entry.course.name,
+    fileName: entry.material.fileName,
+    parts: chunks.length,
+    originalBytes: singleBytes,
+  });
+
+  return chunks;
+}
+
+function extractMediaTranscriptEntries(payload) {
+  const entries = [];
+
+  for (const course of payload.courses ?? []) {
+    const keptMaterials = [];
+    for (const material of course.materialTexts ?? []) {
+      if (material.sourceKind !== "canvas_media") {
+        keptMaterials.push(material);
+        continue;
+      }
+
+      if (!material.sourceKey || typeof material.text !== "string" || material.text.length === 0) {
+        continue;
+      }
+
+      const entry = {
+        course,
+        material: { ...material },
+        candidate: mediaCandidateForMaterial(course, material),
+      };
+      entries.push(...splitOversizedMediaEntry(entry));
+    }
+    course.materialTexts = keptMaterials;
+  }
+
+  return entries;
+}
+
+function createMediaTranscriptBatches(entries) {
+  const batches = [];
+  let currentEntries = [];
+
+  for (const entry of entries) {
+    const trialEntries = [...currentEntries, entry];
+    const trialPayload = buildMediaTranscriptPayload(trialEntries);
+    const trialBytes = importPayloadByteLength(trialPayload);
+    const tooMany = trialEntries.length > MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS;
+    const tooLarge = trialBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES;
+
+    if (currentEntries.length > 0 && (tooMany || tooLarge)) {
+      const payload = buildMediaTranscriptPayload(currentEntries);
+      batches.push({
+        payload,
+        transcriptCount: currentEntries.length,
+        bytes: importPayloadByteLength(payload),
+      });
+      currentEntries = [entry];
+      continue;
+    }
+
+    currentEntries = trialEntries;
+  }
+
+  if (currentEntries.length > 0) {
+    const payload = buildMediaTranscriptPayload(currentEntries);
+    batches.push({
+      payload,
+      transcriptCount: currentEntries.length,
+      bytes: importPayloadByteLength(payload),
+    });
+  }
+
+  return batches;
+}
+
+async function postCanvasImportPayload(scUrl, apiToken, payload, contextLabel) {
+  const bytes = importPayloadByteLength(payload);
+  const res = await fetch(`https://${scUrl}/api/canvas/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const sizeHint = `${Math.round(bytes / 1024)}KB`;
+    const payloadHint = res.status === 413 ? ` while uploading ${contextLabel} (${sizeHint} request)` : "";
+    throw new Error(body.error ?? `Study Circle API error (${res.status})${payloadHint}`);
+  }
+
+  return {
+    result: await res.json(),
+    status: res.status,
+    bytes,
   };
 }
 
@@ -530,41 +666,71 @@ async function handleCanvasData(payload) {
         : "Saving to Study Circle…",
     });
 
+    const mediaTranscriptEntries = extractMediaTranscriptEntries(payload);
+    const mediaTranscriptBatches = createMediaTranscriptBatches(mediaTranscriptEntries);
+    if (mediaTranscriptEntries.length > 0) {
+      syncLog("media_batch_plan", {
+        transcripts: mediaTranscriptEntries.length,
+        batches: mediaTranscriptBatches.length,
+        batchBytes: mediaTranscriptBatches.map((batch) => batch.bytes),
+      });
+    }
+
     const payloadPrep = prepareCanvasImportPayload(payload);
     if (
       payloadPrep.syllabusTrimmed > 0 ||
-      payloadPrep.materialTrimmed > 0 ||
-      payloadPrep.mediaTrimmed > 0 ||
-      payloadPrep.mediaDropped > 0
+      payloadPrep.materialTrimmed > 0
     ) {
       syncLog("payload_prepared", payloadPrep);
       console.log(
         "[worker] Prepared import payload:",
         `${Math.round(payloadPrep.beforeBytes / 1024)}KB → ${Math.round(payloadPrep.afterBytes / 1024)}KB`,
-        `mediaTrimmed=${payloadPrep.mediaTrimmed}`,
-        `mediaDropped=${payloadPrep.mediaDropped}`,
+        `materialTrimmed=${payloadPrep.materialTrimmed}`,
       );
     }
 
-    const res = await fetch(`https://${scUrl}/api/canvas/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const payloadHint = res.status === 413 ? " after transcript payload compaction" : "";
-      throw new Error(body.error ?? `Study Circle API error (${res.status})${payloadHint}`);
-    }
-
-    const result = await res.json();
+    const canvasImport = await postCanvasImportPayload(scUrl, apiToken, payload, "main Canvas sync");
+    const result = canvasImport.result;
 
     if (result.debug) {
       await chrome.storage.local.set({ lastSyncDebug: result.debug });
     }
 
-    syncLog("canvas_import_done", { status: res.status });
+    syncLog("canvas_import_done", { status: canvasImport.status, bytes: canvasImport.bytes });
+
+    if (mediaTranscriptBatches.length > 0) {
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 94,
+        label: `Saving ${mediaTranscriptEntries.length} lecture transcript${mediaTranscriptEntries.length !== 1 ? "s" : ""}…`,
+      });
+
+      let uploadedTranscripts = 0;
+      for (let index = 0; index < mediaTranscriptBatches.length; index++) {
+        const batch = mediaTranscriptBatches[index];
+        const batchImport = await postCanvasImportPayload(
+          scUrl,
+          apiToken,
+          batch.payload,
+          `lecture transcript batch ${index + 1}/${mediaTranscriptBatches.length}`,
+        );
+        uploadedTranscripts += batch.transcriptCount;
+        syncLog("media_batch_done", {
+          batch: index + 1,
+          batches: mediaTranscriptBatches.length,
+          transcripts: batch.transcriptCount,
+          uploadedTranscripts,
+          status: batchImport.status,
+          bytes: batchImport.bytes,
+        });
+      }
+
+      result.mediaTranscripts = {
+        queued: mediaTranscriptEntries.length,
+        batches: mediaTranscriptBatches.length,
+      };
+    }
+
     // ── Step 4: Scrape Gradescope assignments for linked courses ─────────────
     // Only scrapes courses where we successfully resolved a Gradescope ID.
     const gsLinkedCourses = scoutMode ? [] : payload.courses.filter((c) => c.gradescopeCourseId);
