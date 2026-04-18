@@ -21,6 +21,7 @@ const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
 const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
 const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
+const LEGACY_MEDIA_TRANSCRIPT_RAW_TEXT_CHAR_LIMIT = 25_000;
 const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
 const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
 const TRUNCATION_NOTICE = "\n\n[Study Circle truncated this extracted text before upload to keep sync payload within API limits.]";
@@ -885,6 +886,12 @@ function shouldImportRemoteSource(materialState, sourceKind, sourceKey, remoteUp
   const existing = materialState.materials.get(buildMaterialStateKey(sourceKind, sourceKey));
   if (!existing) return true;
   if (existing.syncStatus && existing.syncStatus !== "ready") return true;
+  if (
+    sourceKind === "canvas_media" &&
+    Number(existing.rawTextLength ?? 0) === LEGACY_MEDIA_TRANSCRIPT_RAW_TEXT_CHAR_LIMIT
+  ) {
+    return true;
+  }
   return isRemoteNewer(remoteUpdatedAt, existing.sourceUpdatedAt ?? existing.lastSyncedAt ?? null);
 }
 

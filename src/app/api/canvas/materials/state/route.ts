@@ -52,6 +52,7 @@ export async function GET(request: NextRequest) {
       select: {
         sourceKind: true,
         sourceKey: true,
+        rawText: true,
         sourceUpdatedAt: true,
         lastSyncedAt: true,
         syncStatus: true,
@@ -77,6 +78,7 @@ export async function GET(request: NextRequest) {
       materials: materials.map((material) => ({
         sourceKind: material.sourceKind,
         sourceKey: material.sourceKey,
+        rawTextLength: material.rawText.length,
         sourceUpdatedAt: material.sourceUpdatedAt?.toISOString() ?? null,
         lastSyncedAt: material.lastSyncedAt?.toISOString() ?? null,
         syncStatus: material.syncStatus,

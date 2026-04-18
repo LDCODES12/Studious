@@ -906,7 +906,15 @@ function inferBreakStartDate(
     if (Number.isNaN(explicit.getTime())) continue;
     const monday = startOfWeek(explicit, { weekStartsOn: 1 });
     const mondayStr = monday.toISOString().slice(0, 10);
+    if (mondayStr < topic.startDate && FULL_BREAK_RX.test(segment)) return mondayStr;
     if (mondayStr > topic.startDate) return mondayStr;
+    if (
+      mondayStr === topic.startDate &&
+      /\bresum(?:e|es|ing)\b|\bclasses?\s+resume\b|\breturn(?:s|ing)?\b/i.test(segment) &&
+      FULL_BREAK_RX.test(segment)
+    ) {
+      return addDays(currentStart, -7).toISOString().slice(0, 10);
+    }
     if (
       mondayStr === topic.startDate &&
       explicit > currentStart &&
@@ -962,8 +970,11 @@ function splitMixedBreakWeeks(
 
     if (!existingBreakStarts.has(breakStart)) {
       existingBreakStarts.add(breakStart);
+      const breakSortNumber = topic.startDate && breakStart < topic.startDate
+        ? topic.weekNumber - 0.5
+        : topic.weekNumber + 0.5;
       result.push({
-        weekNumber: topic.weekNumber + 0.5,
+        weekNumber: breakSortNumber,
         weekLabel: inferBreakLabel(topic),
         startDate: breakStart,
         topics: [],
@@ -975,6 +986,57 @@ function splitMixedBreakWeeks(
   }
 
   return result;
+}
+
+function inferSpringBreakGapStart(previousDate: string, nextDate: string): string | null {
+  const previous = parseISO(`${previousDate}T12:00:00Z`);
+  const next = parseISO(`${nextDate}T12:00:00Z`);
+  if (Number.isNaN(previous.getTime()) || Number.isNaN(next.getTime())) return null;
+
+  const gapDays = (next.getTime() - previous.getTime()) / 86400_000;
+  if (gapDays < 10 || gapDays > 21) return null;
+
+  let cursor = startOfWeek(addDays(previous, 1), { weekStartsOn: 1 });
+  while (cursor < next) {
+    const candidate = cursor.toISOString().slice(0, 10);
+    const isMarch = cursor.getUTCMonth() === 2;
+    if (candidate > previousDate && candidate < nextDate && isMarch) return candidate;
+    cursor = addDays(cursor, 7);
+  }
+
+  return null;
+}
+
+function insertSpringBreakGapTopics(topics: ParsedTopic[], courseName: string): ParsedTopic[] {
+  if (topics.length < 8 || topics.some((topic) => isBreakTopic(topic))) return topics;
+
+  const dated = topics
+    .filter((topic): topic is ParsedTopic & { startDate: string } => Boolean(topic.startDate))
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  if (dated.length < 2) return topics;
+
+  const existingStarts = new Set(dated.map((topic) => topic.startDate));
+  const additions: ParsedTopic[] = [];
+  for (let i = 1; i < dated.length; i++) {
+    const breakStart = inferSpringBreakGapStart(dated[i - 1].startDate, dated[i].startDate);
+    if (!breakStart || existingStarts.has(breakStart)) continue;
+    existingStarts.add(breakStart);
+    additions.push({
+      weekNumber: dated[i - 1].weekNumber + 0.5,
+      weekLabel: "Spring Break — No Class",
+      startDate: breakStart,
+      topics: [],
+      readings: [],
+      notes: "Spring Break — no class/lab meetings.",
+      courseName,
+    });
+  }
+
+  if (additions.length > 0) {
+    console.log(`[pipeline] ${courseName}: inserted ${additions.length} spring break gap row(s)`);
+  }
+
+  return additions.length > 0 ? [...topics, ...additions] : topics;
 }
 
 function stripCarriedBreakNotes(
@@ -1969,8 +2031,11 @@ export function finalizeTimelineForPersistence(args: {
   }
   finalizedTopics = splitBreakTopics;
 
-  // No more date-gap break inference — only explicitly stated breaks survive.
-  // This is the "fail-closed" principle: gaps are shown as gaps, not fabricated breaks.
+  const springBreakGapTopics = insertSpringBreakGapTopics(finalizedTopics, args.courseName);
+  if (springBreakGapTopics.length > finalizedTopics.length) {
+    repairActionsApplied.push(`inserted_spring_break_gap:${springBreakGapTopics.length - finalizedTopics.length}`);
+  }
+  finalizedTopics = springBreakGapTopics;
 
   const collapsedTopics = collapseSameStartDateTopics(finalizedTopics, args.courseName);
   if (collapsedTopics.length < finalizedTopics.length) {

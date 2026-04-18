@@ -1119,6 +1119,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
               const sourceKind: MaterialSourceKind = mt.sourceKind ?? "canvas_module";
               const sourceKey = resolveCanvasSourceKey(sourceKind, mt.fileName, mt.sourceKey);
               const contentHash = hashMaterialText(pdfText);
+              const storedRawText = sourceKind === "canvas_media" ? pdfText : pdfText.slice(0, 25_000);
 
               try {
                 const existing = await findExistingSyncedMaterial(scCourseId, sourceKind, sourceKey, mt.fileName);
@@ -1134,7 +1135,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                     sourceKey,
                     summary: existing.summary,
                     relatedTopics: existing.relatedTopics,
-                    rawText: pdfText.slice(0, 25_000),
+                    rawText: storedRawText,
                     contentHash,
                     sourceUpdatedAt: mt.remoteUpdatedAt ?? existing.sourceUpdatedAt ?? null,
                     autoStoredForAI:
@@ -1171,7 +1172,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                   sourceKey,
                   summary,
                   relatedTopics: analysis.relatedTopics,
-                  rawText: pdfText.slice(0, 25_000),
+                  rawText: storedRawText,
                   contentHash,
                   sourceUpdatedAt: mt.remoteUpdatedAt ?? null,
                   autoStoredForAI,
