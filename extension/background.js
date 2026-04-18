@@ -23,6 +23,9 @@ const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
 const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
 const MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY = 12;
 const MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY = 10;
+const MEDIA_API_FETCH_TIMEOUT_MS = 12_000;
+const MEDIA_ATTACHMENT_LOOKUP_TIMEOUT_MS = 10_000;
+const MEDIA_TRANSCRIPT_DOWNLOAD_TIMEOUT_MS = 18_000;
 const LEGACY_MEDIA_TRANSCRIPT_RAW_TEXT_CHAR_LIMIT = 25_000;
 const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
 const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
@@ -111,6 +114,20 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   }));
 
   return results;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function prepareCanvasImportPayload(payload) {
@@ -819,7 +836,17 @@ async function handleCanvasData(payload) {
 // ── Gradescope helpers ────────────────────────────────────────────────────────
 
 /** Navigate a tab and wait for it to finish loading. */
-function waitForTabLoad(tabId, timeoutMs = 15_000) {
+async function waitForTabLoad(tabId, timeoutMs = 15_000) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.status === "complete") {
+      await sleep(600);
+      return;
+    }
+  } catch {
+    // Fall through to the update listener; chrome will reject if the tab is gone.
+  }
+
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
@@ -933,7 +960,7 @@ function shouldImportRemoteSource(materialState, sourceKind, sourceKey, remoteUp
 }
 
 async function fetchPlainTextFile(url) {
-  const res = await fetch(url, { credentials: "include" });
+  const res = await fetchWithTimeout(url, { credentials: "include" }, MEDIA_TRANSCRIPT_DOWNLOAD_TIMEOUT_MS);
   if (!res.ok) return "";
   const buf = await res.arrayBuffer();
   let text = new TextDecoder("utf-8").decode(buf);
@@ -979,6 +1006,64 @@ function uniqueNonEmpty(values) {
 
 function getMediaGalleryCategoryCandidates(context) {
   return uniqueNonEmpty([context?.categoryId, ...(context?.categoryIds ?? [])]);
+}
+
+function normalizeKalturaApiBaseUrl(context) {
+  const base = normalizeKalturaServiceUrl(context?.serviceUrl);
+  return base ? `${base}/api_v3` : null;
+}
+
+async function postKalturaApi(context, service, action, body = {}) {
+  const apiBase = normalizeKalturaApiBaseUrl(context);
+  if (!apiBase || !context?.ks) {
+    throw new Error("missing Kaltura API context");
+  }
+
+  const response = await fetchWithTimeout(
+    `${apiBase}/service/${service}/action/${action}`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        format: 1,
+        ks: context.ks,
+        ...body,
+      }),
+    },
+    MEDIA_API_FETCH_TIMEOUT_MS,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Kaltura ${service}.${action} failed (${response.status})`);
+  }
+
+  const payload = await response.json();
+  if (payload?.code && payload?.message) {
+    throw new Error(`Kaltura ${service}.${action}: ${payload.message}`);
+  }
+  return payload;
+}
+
+function kalturaAssetDate(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return new Date(numeric * 1000).toISOString();
+  }
+  return null;
+}
+
+function buildKalturaAttachmentServeUrl(context, attachmentAssetId) {
+  const apiBase = normalizeKalturaApiBaseUrl(context);
+  if (!apiBase || !attachmentAssetId) return "";
+  const params = new URLSearchParams({
+    attachmentAssetId: String(attachmentAssetId),
+    ks: String(context.ks ?? ""),
+  });
+  return `${apiBase}/service/attachment_attachmentasset/action/serve?${params.toString()}`;
 }
 
 async function captureMediaGalleryContext(tabId) {
@@ -1250,8 +1335,8 @@ async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entr
   const [frameResult] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [context.selectedFrameId] },
     world: "MAIN",
-    args: [mediaEntries, MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY],
-    func: async (mediaEntriesToInspect, concurrency) => {
+    args: [mediaEntries, MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY, MEDIA_ATTACHMENT_LOOKUP_TIMEOUT_MS],
+    func: async (mediaEntriesToInspect, concurrency, requestTimeoutMs) => {
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const parseDate = (value) => {
         const parsed = Date.parse(String(value || "").trim());
@@ -1287,9 +1372,12 @@ async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entr
       };
 
       const lookupAttachments = async (entry) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
         try {
           const response = await fetch(`/attachments/index/index/entryid/${encodeURIComponent(entry.mediaId)}/entryView/1?format=ajax`, {
             credentials: "include",
+            signal: controller.signal,
             headers: {
               Accept: "application/json, text/javascript, */*; q=0.01",
               "X-Requested-With": "XMLHttpRequest",
@@ -1354,6 +1442,8 @@ async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entr
             attachments: [],
             error: err?.message ?? String(err),
           };
+        } finally {
+          clearTimeout(timer);
         }
       };
 
@@ -1362,6 +1452,171 @@ async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entr
   });
 
   return Array.isArray(frameResult?.result) ? frameResult.result : [];
+}
+
+async function listMediaGalleryEntriesFromKalturaApi(context) {
+  const categoryCandidates = getMediaGalleryCategoryCandidates(context);
+  if (!context?.serviceUrl || !context?.ks || categoryCandidates.length === 0) {
+    return null;
+  }
+
+  let lastError = null;
+  for (const categoryId of categoryCandidates) {
+    const numericCategoryId = Number(categoryId);
+    if (!Number.isFinite(numericCategoryId)) continue;
+
+    try {
+      const categoryEntries = [];
+      for (let pageIndex = 1; pageIndex <= 5; pageIndex++) {
+        const response = await postKalturaApi(context, "categoryentry", "list", {
+          filter: {
+            objectType: "KalturaCategoryEntryFilter",
+            categoryIdEqual: numericCategoryId,
+            statusEqual: 2,
+            orderBy: "+createdAt",
+          },
+          pager: {
+            objectType: "KalturaFilterPager",
+            pageSize: 500,
+            pageIndex,
+          },
+        });
+        const objects = Array.isArray(response?.objects) ? response.objects : [];
+        categoryEntries.push(...objects);
+        if (objects.length < 500 || categoryEntries.length >= Number(response?.totalCount ?? 0)) break;
+      }
+
+      const mediaIds = uniqueNonEmpty(categoryEntries.map((entry) => entry.entryId));
+      if (mediaIds.length === 0) continue;
+
+      let entryDetails = [];
+      try {
+        const detailsResponse = await postKalturaApi(context, "baseentry", "list", {
+          filter: {
+            objectType: "KalturaBaseEntryFilter",
+            idIn: mediaIds.join(","),
+          },
+          pager: {
+            objectType: "KalturaFilterPager",
+            pageSize: Math.min(500, mediaIds.length),
+            pageIndex: 1,
+          },
+        });
+        entryDetails = Array.isArray(detailsResponse?.objects) ? detailsResponse.objects : [];
+      } catch (err) {
+        syncLog("media_gallery_api_detail_err", {
+          categoryId,
+          error: err?.message ?? String(err),
+        });
+      }
+
+      const detailsById = new Map(entryDetails.map((entry) => [String(entry.id), entry]));
+      return {
+        categoryId: String(categoryId),
+        entries: mediaIds.map((mediaId) => {
+          const details = detailsById.get(String(mediaId)) ?? {};
+          return {
+            mediaId,
+            title: String(details.name || details.title || mediaId),
+            createdAt: kalturaAssetDate(details.createdAt),
+            updatedAt: kalturaAssetDate(details.updatedAt),
+            section: null,
+            href: null,
+          };
+        }),
+        categoryCandidates,
+        mediaTabLabel: `${mediaIds.length} Media`,
+        discoveredCount: mediaIds.length,
+        expectedCount: Number(categoryEntries.length),
+        pagedCount: mediaIds.length,
+        transport: "kaltura_api",
+      };
+    } catch (err) {
+      lastError = err;
+      syncLog("media_gallery_api_fast_err", {
+        categoryId,
+        error: err?.message ?? String(err),
+      });
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+}
+
+async function listMediaEntryTranscriptAttachmentsFromKalturaApi(context, entries) {
+  const mediaEntries = (Array.isArray(entries) ? entries : [entries])
+    .map((entry, index) => ({
+      index,
+      mediaId: String(entry?.mediaId || ""),
+      title: String(entry?.title || ""),
+    }))
+    .filter((entry) => entry.mediaId);
+  if (!context?.serviceUrl || !context?.ks || mediaEntries.length === 0) return null;
+
+  const results = mediaEntries.map((entry) => ({ ...entry, attachments: [], error: null }));
+  const resultByMediaId = new Map(results.map((result) => [result.mediaId, result]));
+
+  for (let start = 0; start < mediaEntries.length; start += 100) {
+    const batch = mediaEntries.slice(start, start + 100);
+    const response = await postKalturaApi(context, "attachment_attachmentasset", "list", {
+      filter: {
+        objectType: "KalturaAttachmentAssetFilter",
+        entryIdIn: batch.map((entry) => entry.mediaId).join(","),
+        statusEqual: 2,
+      },
+      pager: {
+        objectType: "KalturaFilterPager",
+        pageSize: 500,
+        pageIndex: 1,
+      },
+    });
+
+    const assets = Array.isArray(response?.objects) ? response.objects : [];
+    for (const asset of assets) {
+      const entryId = String(asset.entryId || "");
+      const result = resultByMediaId.get(entryId);
+      if (!result) continue;
+
+      const fileName = String(asset.filename || asset.fileName || asset.title || "transcript.txt").trim();
+      const looksText =
+        /\.txt(?:$|[?#])/i.test(fileName) ||
+        /transcript/i.test(String(asset.objectType || asset.tags || asset.description || "")) ||
+        Number(asset.format) === 1;
+      if (!looksText || /chat\s+file/i.test(fileName)) continue;
+
+      const attachmentId = String(asset.id || "").trim();
+      const url = buildKalturaAttachmentServeUrl(context, attachmentId);
+      if (!attachmentId || !url) continue;
+
+      result.attachments.push({
+        attachmentId,
+        entryId,
+        fileName,
+        url,
+        uploadedAt: kalturaAssetDate(asset.updatedAt ?? asset.createdAt),
+        size: Number.isFinite(Number(asset.size)) ? Number(asset.size) : null,
+        transport: "kaltura_api",
+      });
+    }
+  }
+
+  for (const result of results) {
+    result.attachments.sort((a, b) => {
+      const aPid = /pid\s+\d+/i.test(a.fileName) ? 1 : 0;
+      const bPid = /pid\s+\d+/i.test(b.fileName) ? 1 : 0;
+      if (aPid !== bPid) return bPid - aPid;
+      const aSize = Number(a.size) || 0;
+      const bSize = Number(b.size) || 0;
+      if (aSize !== bSize) return bSize - aSize;
+      const aTime = a.uploadedAt ? Date.parse(a.uploadedAt) : 0;
+      const bTime = b.uploadedAt ? Date.parse(b.uploadedAt) : 0;
+      return bTime - aTime;
+    });
+    result.attachments = result.attachments.length > 0 ? [result.attachments[0]] : [];
+  }
+
+  return results;
 }
 
 async function listMediaGalleryEntriesFromFrame(tabId, context) {
@@ -1621,13 +1876,22 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           continue;
         }
 
-        const galleryResult = await listMediaGalleryEntriesFromFrame(mediaTabId, courseMediaContext).catch((err) => {
-          syncLog("media_gallery_api_err", {
+        let galleryResult = await listMediaGalleryEntriesFromKalturaApi(courseMediaContext).catch((err) => {
+          syncLog("media_gallery_fast_err", {
             course: course.name,
             error: err?.message ?? String(err),
           });
-          return { categoryId: null, entries: [], categoryCandidates, mediaTabLabel: null, discoveredCount: 0 };
+          return null;
         });
+        if (!galleryResult?.entries?.length) {
+          galleryResult = await listMediaGalleryEntriesFromFrame(mediaTabId, courseMediaContext).catch((err) => {
+            syncLog("media_gallery_api_err", {
+              course: course.name,
+              error: err?.message ?? String(err),
+            });
+            return { categoryId: null, entries: [], categoryCandidates, mediaTabLabel: null, discoveredCount: 0 };
+          });
+        }
         const resolvedMediaContext = galleryResult?.categoryId
           ? { ...courseMediaContext, categoryId: galleryResult.categoryId }
           : courseMediaContext;
@@ -1664,20 +1928,42 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           mediaTabLabel: galleryResult?.mediaTabLabel ?? null,
           expectedCount: galleryResult?.expectedCount ?? null,
           pagedCount: galleryResult?.pagedCount ?? null,
+          transport: galleryResult?.transport ?? "gallery_dom",
         });
 
-        const attachmentResults = await listMediaEntryTranscriptAttachmentsFromFrame(
-          mediaTabId,
+        let attachmentResults = await listMediaEntryTranscriptAttachmentsFromKalturaApi(
           resolvedMediaContext,
           galleryEntries,
         ).catch((err) => {
-          syncLog("media_attachment_batch_err", {
+          syncLog("media_attachment_fast_err", {
             course: course.name,
             entries: galleryEntries.length,
             error: err?.message ?? String(err),
           });
-          return [];
+          return null;
         });
+        const apiAttachmentCount = (attachmentResults ?? [])
+          .reduce((sum, result) => sum + (Array.isArray(result?.attachments) ? result.attachments.length : 0), 0);
+        if (!attachmentResults || apiAttachmentCount === 0) {
+          attachmentResults = await listMediaEntryTranscriptAttachmentsFromFrame(
+            mediaTabId,
+            resolvedMediaContext,
+            galleryEntries,
+          ).catch((err) => {
+            syncLog("media_attachment_batch_err", {
+              course: course.name,
+              entries: galleryEntries.length,
+              error: err?.message ?? String(err),
+            });
+            return [];
+          });
+        } else {
+          syncLog("media_attachment_fast_done", {
+            course: course.name,
+            entries: galleryEntries.length,
+            attachments: apiAttachmentCount,
+          });
+        }
         const downloadTasks = [];
 
         for (const attachmentResult of attachmentResults) {
