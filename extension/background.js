@@ -21,6 +21,8 @@ const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
 const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
 const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
+const MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY = 8;
+const MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY = 6;
 const LEGACY_MEDIA_TRANSCRIPT_RAW_TEXT_CHAR_LIMIT = 25_000;
 const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
 const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
@@ -94,6 +96,21 @@ function importPayloadByteLength(payload) {
   } catch {
     return json.length;
   }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+
+  return results;
 }
 
 function prepareCanvasImportPayload(payload) {
@@ -1200,14 +1217,21 @@ async function captureMediaGalleryContext(tabId) {
   };
 }
 
-async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entry) {
-  if (!tabId || !context?.selectedFrameId || !entry?.mediaId) return [];
+async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entries) {
+  const mediaEntries = (Array.isArray(entries) ? entries : [entries])
+    .map((entry, index) => ({
+      index,
+      mediaId: String(entry?.mediaId || ""),
+      title: String(entry?.title || ""),
+    }))
+    .filter((entry) => entry.mediaId);
+  if (!tabId || !context?.selectedFrameId || mediaEntries.length === 0) return [];
 
   const [frameResult] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [context.selectedFrameId] },
     world: "MAIN",
-    args: [entry.mediaId],
-    func: (mediaId) => {
+    args: [mediaEntries, MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY],
+    func: async (mediaEntriesToInspect, concurrency) => {
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const parseDate = (value) => {
         const parsed = Date.parse(String(value || "").trim());
@@ -1227,61 +1251,93 @@ async function listMediaEntryTranscriptAttachmentsFromFrame(tabId, context, entr
         return null;
       };
 
-      const xhr = new XMLHttpRequest();
-      xhr.open("GET", `/attachments/index/index/entryid/${encodeURIComponent(mediaId)}/entryView/1?format=ajax`, false);
-      xhr.withCredentials = true;
-      xhr.send(null);
+      const mapWithConcurrencyInFrame = async (items, limit, mapper) => {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+        const workerCount = Math.min(Math.max(1, Number(limit) || 1), items.length);
 
-      if (xhr.status !== 200) {
-        throw new Error(`Attachments endpoint failed (${xhr.status}) for ${mediaId}`);
-      }
+        await Promise.all(Array.from({ length: workerCount }, async () => {
+          while (nextIndex < items.length) {
+            const index = nextIndex++;
+            results[index] = await mapper(items[index], index);
+          }
+        }));
 
-      const payload = JSON.parse(xhr.responseText || "{}");
-      const html = Array.isArray(payload?.content)
-        ? payload.content
-          .map((item) => (typeof item?.content === "string" ? item.content : ""))
-          .join("\n")
-        : "";
-      if (!html.trim()) return [];
+        return results;
+      };
 
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const attachments = [];
+      const lookupAttachments = async (entry) => {
+        try {
+          const response = await fetch(`/attachments/index/index/entryid/${encodeURIComponent(entry.mediaId)}/entryView/1?format=ajax`, {
+            credentials: "include",
+            headers: {
+              Accept: "application/json, text/javascript, */*; q=0.01",
+              "X-Requested-With": "XMLHttpRequest",
+            },
+          });
 
-      for (const row of Array.from(doc.querySelectorAll("tbody tr"))) {
-        const cells = row.querySelectorAll("td");
-        const fileName = clean(cells[0]?.querySelector("[title]")?.getAttribute("title") || cells[0]?.textContent);
-        const uploadedAtText = clean(cells[4]?.textContent);
-        const downloadLink = row.querySelector("a.js-download-attachment-link[href]");
-        const href = clean(downloadLink?.getAttribute("href") || downloadLink?.href);
+          if (!response.ok) {
+            throw new Error(`Attachments endpoint failed (${response.status}) for ${entry.mediaId}`);
+          }
 
-        if (!fileName || !href || !/\.txt(?:$|[?#])/i.test(fileName)) continue;
+          const payload = await response.json();
+          const html = Array.isArray(payload?.content)
+            ? payload.content
+              .map((item) => (typeof item?.content === "string" ? item.content : ""))
+              .join("\n")
+            : "";
+          if (!html.trim()) {
+            return { ...entry, attachments: [], error: null };
+          }
 
-        attachments.push({
-          attachmentId: clean(downloadLink?.getAttribute("data-attachment-id")) || null,
-          entryId: clean(downloadLink?.getAttribute("data-entry-id")) || mediaId,
-          fileName,
-          url: href,
-          uploadedAt: parseDate(uploadedAtText),
-          size: parseSize(cells[3]?.textContent),
-          transport: "attachments_ajax",
-        });
-      }
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          const attachments = [];
 
-      const ranked = attachments
-        .filter((attachment) => !/chat\s+file/i.test(attachment.fileName))
-        .sort((a, b) => {
-          const aPid = /pid\s+\d+/i.test(a.fileName) ? 1 : 0;
-          const bPid = /pid\s+\d+/i.test(b.fileName) ? 1 : 0;
-          if (aPid !== bPid) return bPid - aPid;
-          const aSize = Number(a.size) || 0;
-          const bSize = Number(b.size) || 0;
-          if (aSize !== bSize) return bSize - aSize;
-          const aTime = a.uploadedAt ? Date.parse(a.uploadedAt) : 0;
-          const bTime = b.uploadedAt ? Date.parse(b.uploadedAt) : 0;
-          return bTime - aTime;
-        });
+          for (const row of Array.from(doc.querySelectorAll("tbody tr"))) {
+            const cells = row.querySelectorAll("td");
+            const fileName = clean(cells[0]?.querySelector("[title]")?.getAttribute("title") || cells[0]?.textContent);
+            const uploadedAtText = clean(cells[4]?.textContent);
+            const downloadLink = row.querySelector("a.js-download-attachment-link[href]");
+            const href = clean(downloadLink?.getAttribute("href") || downloadLink?.href);
 
-      return ranked.length > 0 ? [ranked[0]] : [];
+            if (!fileName || !href || !/\.txt(?:$|[?#])/i.test(fileName)) continue;
+
+            attachments.push({
+              attachmentId: clean(downloadLink?.getAttribute("data-attachment-id")) || null,
+              entryId: clean(downloadLink?.getAttribute("data-entry-id")) || entry.mediaId,
+              fileName,
+              url: href,
+              uploadedAt: parseDate(uploadedAtText),
+              size: parseSize(cells[3]?.textContent),
+              transport: "attachments_ajax",
+            });
+          }
+
+          const ranked = attachments
+            .filter((attachment) => !/chat\s+file/i.test(attachment.fileName))
+            .sort((a, b) => {
+              const aPid = /pid\s+\d+/i.test(a.fileName) ? 1 : 0;
+              const bPid = /pid\s+\d+/i.test(b.fileName) ? 1 : 0;
+              if (aPid !== bPid) return bPid - aPid;
+              const aSize = Number(a.size) || 0;
+              const bSize = Number(b.size) || 0;
+              if (aSize !== bSize) return bSize - aSize;
+              const aTime = a.uploadedAt ? Date.parse(a.uploadedAt) : 0;
+              const bTime = b.uploadedAt ? Date.parse(b.uploadedAt) : 0;
+              return bTime - aTime;
+            });
+
+          return { ...entry, attachments: ranked.length > 0 ? [ranked[0]] : [], error: null };
+        } catch (err) {
+          return {
+            ...entry,
+            attachments: [],
+            error: err?.message ?? String(err),
+          };
+        }
+      };
+
+      return mapWithConcurrencyInFrame(mediaEntriesToInspect, concurrency, lookupAttachments);
     },
   });
 
@@ -1590,78 +1646,131 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
           pagedCount: galleryResult?.pagedCount ?? null,
         });
 
-        for (const entry of galleryEntries) {
-          try {
-            const attachments = await listMediaEntryTranscriptAttachmentsFromFrame(mediaTabId, resolvedMediaContext, entry).catch((err) => {
-              syncLog("media_entry_api_err", {
-                course: course.name,
-                title: entry.title,
-                mediaId: entry.mediaId,
-                error: err?.message ?? String(err),
-              });
-              return [];
-            });
-            if (attachments.length === 0) continue;
+        const attachmentResults = await listMediaEntryTranscriptAttachmentsFromFrame(
+          mediaTabId,
+          resolvedMediaContext,
+          galleryEntries,
+        ).catch((err) => {
+          syncLog("media_attachment_batch_err", {
+            course: course.name,
+            entries: galleryEntries.length,
+            error: err?.message ?? String(err),
+          });
+          return [];
+        });
+        const downloadTasks = [];
 
-            syncLog("media_entry_source", {
+        for (const attachmentResult of attachmentResults) {
+          const entry = galleryEntries[Number(attachmentResult?.index)] ?? {
+            mediaId: attachmentResult?.mediaId,
+            title: attachmentResult?.title,
+          };
+          const attachments = Array.isArray(attachmentResult?.attachments)
+            ? attachmentResult.attachments
+            : [];
+
+          if (attachmentResult?.error) {
+            syncLog("media_entry_api_err", {
               course: course.name,
               title: entry.title,
-              source: attachments[0]?.transport ?? "attachments_ajax",
-              attachments: attachments.length,
               mediaId: entry.mediaId,
+              error: attachmentResult.error,
             });
+          }
+          if (attachments.length === 0) continue;
 
-            for (const attachment of attachments) {
-              const contentId = buildMediaTranscriptContentId(entry.mediaId, attachment.fileName, attachment.url);
-              const displayName = buildMediaTranscriptDisplayName(entry.title, attachment.fileName);
-              const moduleName = courseMediaContext.galleryTitle
-                ? `Kaltura Media Gallery · ${courseMediaContext.galleryTitle}`
-                : "Kaltura Media Gallery";
+          syncLog("media_entry_source", {
+            course: course.name,
+            title: entry.title,
+            source: attachments[0]?.transport ?? "attachments_ajax",
+            attachments: attachments.length,
+            mediaId: entry.mediaId,
+          });
 
-              if (!seenCandidateIds.has(contentId)) {
-                seenCandidateIds.add(contentId);
-                course.materialCandidates.push({
-                  fileName: displayName,
-                  moduleName,
-                  contentId,
-                  sourceKind: "canvas_media",
-                  remoteSize: attachment.size ?? null,
-                  remoteUpdatedAt: attachment.uploadedAt ?? null,
-                });
-              }
+          for (const attachment of attachments) {
+            const contentId = buildMediaTranscriptContentId(entry.mediaId, attachment.fileName, attachment.url);
+            const displayName = buildMediaTranscriptDisplayName(entry.title, attachment.fileName);
+            const moduleName = resolvedMediaContext.galleryTitle
+              ? `Kaltura Media Gallery · ${resolvedMediaContext.galleryTitle}`
+              : "Kaltura Media Gallery";
 
-              const shouldDownload =
-                requestedIds.has(contentId) ||
-                shouldImportRemoteSource(
-                  materialState,
-                  "canvas_media",
-                  contentId,
-                  attachment.uploadedAt ?? null,
-                );
-              if (!shouldDownload || downloadedIds.has(contentId)) continue;
-
-              const text = await fetchPlainTextFile(attachment.url);
-              if (text.length < 100) continue;
-
-              downloadedIds.add(contentId);
-              course.materialTexts.push({
+            if (!seenCandidateIds.has(contentId)) {
+              seenCandidateIds.add(contentId);
+              course.materialCandidates.push({
                 fileName: displayName,
-                text,
-                sourceKey: contentId,
+                moduleName,
+                contentId,
                 sourceKind: "canvas_media",
                 remoteSize: attachment.size ?? null,
                 remoteUpdatedAt: attachment.uploadedAt ?? null,
-                requested: requestedIds.has(contentId),
               });
-              transcriptCount++;
             }
-          } catch (err) {
-            syncLog("media_entry_err", {
-              course: course.name,
-              title: entry.title,
-              error: err?.message ?? String(err),
+
+            const shouldDownload =
+              requestedIds.has(contentId) ||
+              shouldImportRemoteSource(
+                materialState,
+                "canvas_media",
+                contentId,
+                attachment.uploadedAt ?? null,
+              );
+            if (!shouldDownload || downloadedIds.has(contentId)) continue;
+
+            downloadedIds.add(contentId);
+            downloadTasks.push({
+              entry,
+              attachment,
+              contentId,
+              displayName,
+              requested: requestedIds.has(contentId),
             });
           }
+        }
+
+        if (downloadTasks.length > 0) {
+          syncLog("media_download_plan", {
+            course: course.name,
+            transcripts: downloadTasks.length,
+            attachmentLookupConcurrency: MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY,
+            downloadConcurrency: MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY,
+          });
+        }
+
+        const downloadResults = await mapWithConcurrency(
+          downloadTasks,
+          MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY,
+          async (task) => {
+            try {
+              return { task, text: await fetchPlainTextFile(task.attachment.url), error: null };
+            } catch (err) {
+              return { task, text: "", error: err?.message ?? String(err) };
+            }
+          },
+        );
+
+        for (const result of downloadResults) {
+          const { task, text, error } = result;
+          if (error) {
+            syncLog("media_download_err", {
+              course: course.name,
+              title: task.entry.title,
+              mediaId: task.entry.mediaId,
+              error,
+            });
+            continue;
+          }
+          if (text.length < 100) continue;
+
+          course.materialTexts.push({
+            fileName: task.displayName,
+            text,
+            sourceKey: task.contentId,
+            sourceKind: "canvas_media",
+            remoteSize: task.attachment.size ?? null,
+            remoteUpdatedAt: task.attachment.uploadedAt ?? null,
+            requested: task.requested,
+          });
+          transcriptCount++;
         }
 
         syncLog("media_gallery_done", {
