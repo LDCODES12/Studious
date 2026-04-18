@@ -80,6 +80,22 @@ function extractScheduleSection(html) {
     return results;
   }
 
+  function findCourseMediaGalleryTab(navTabs) {
+    const tabs = Array.isArray(navTabs) ? navTabs : [];
+    const isMyMedia = (tab) => /\bmy\s+media\b/i.test(String(tab?.label ?? ""));
+    const isMediaGallery = (tab) => /\bmedia\s+gallery\b/i.test(String(tab?.label ?? ""));
+    const isKalturaGallery = (tab) => {
+      const label = String(tab?.label ?? "");
+      return /\bkaltura\b/i.test(label) && /\bgallery\b/i.test(label);
+    };
+
+    return (
+      tabs.find((tab) => isMediaGallery(tab) && !isMyMedia(tab)) ??
+      tabs.find((tab) => isKalturaGallery(tab) && !isMyMedia(tab)) ??
+      null
+    );
+  }
+
   function stripHtml(html) {
     if (!html) return null;
     return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
@@ -347,13 +363,13 @@ function extractScheduleSection(html) {
           console.log(`[scout] ${course.name}: found Gradescope tab → ${course.gradescopeTabUrl}`);
         }
 
-        const mediaTab = navTabs.find((t) => /media\s+gallery|kaltura/i.test(t.label ?? ""));
+        const mediaTab = findCourseMediaGalleryTab(navTabs);
         if (mediaTab) {
           const rawUrl = mediaTab.full_url || mediaTab.html_url || mediaTab.url || "";
           course.mediaGalleryTabUrl = rawUrl.startsWith("http")
             ? rawUrl
             : window.location.origin + rawUrl;
-          console.log(`[scout] ${course.name}: found Media Gallery tab → ${course.mediaGalleryTabUrl}`);
+          console.log(`[scout] ${course.name}: found Media Gallery tab (${mediaTab.label ?? "unknown"}) → ${course.mediaGalleryTabUrl}`);
         }
       } catch (err) {
         console.warn(`[scout] ${course.name}: tabs API error — ${err?.message}`);
