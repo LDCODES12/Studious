@@ -21,8 +21,8 @@ const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
 const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
 const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
-const MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY = 8;
-const MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY = 6;
+const MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY = 12;
+const MEDIA_TRANSCRIPT_DOWNLOAD_CONCURRENCY = 10;
 const LEGACY_MEDIA_TRANSCRIPT_RAW_TEXT_CHAR_LIMIT = 25_000;
 const SYLLABUS_TEXT_UPLOAD_CHAR_LIMIT = 60_000;
 const MATERIAL_TEXT_UPLOAD_CHAR_LIMIT = 25_000;
@@ -544,6 +544,20 @@ async function handleCanvasData(payload) {
         tabUrl: c.gradescopeTabUrl ?? null,
       })),
     });
+    const mediaGalleryTabUrls = new Map(
+      payload.courses
+        .filter((course) => course.mediaGalleryTabUrl)
+        .map((course) => [course.id, course.mediaGalleryTabUrl]),
+    );
+    if (mediaGalleryTabUrls.size > 0) {
+      syncLog("media_detection", {
+        total: payload.courses.length,
+        tabUrl: mediaGalleryTabUrls.size,
+        courses: payload.courses
+          .filter((course) => mediaGalleryTabUrls.has(course.id))
+          .map((course) => ({ name: course.name, tabUrl: mediaGalleryTabUrls.get(course.id) })),
+      });
+    }
 
     if (coursesNeedingResolve.length > 0) {
       broadcastToPopup({ type: "SYNC_PROGRESS", percent: 86, label: "Discovering Gradescope links…" });
@@ -574,22 +588,6 @@ async function handleCanvasData(payload) {
         if (resolveTabId) {
           try { await chrome.tabs.remove(resolveTabId); } catch { /* already closed */ }
         }
-      }
-    }
-
-    // ── Step 1b: Discover Kaltura / Media Gallery transcript attachments ────
-    // Transcript .txt attachments are high-value lecture material: they contain
-    // the spoken lecture itself, but they live outside the normal module PDF
-    // workflow. We discover them from the Media Gallery tab and feed them into
-    // the regular material sync as plain text.
-    const coursesWithMediaGallery = payload.courses.filter((c) => c.mediaGalleryTabUrl);
-    if (coursesWithMediaGallery.length > 0) {
-      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 87, label: "Checking lecture transcripts…" });
-      try {
-        await syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, coursesWithMediaGallery);
-      } catch (err) {
-        syncLog("media_sync_err", { error: err?.message ?? String(err) });
-        console.warn("[worker] Media transcript sync failed (non-fatal):", err?.message ?? err);
       }
     }
 
@@ -684,16 +682,6 @@ async function handleCanvasData(payload) {
         : "Saving to Study Circle…",
     });
 
-    const mediaTranscriptEntries = extractMediaTranscriptEntries(payload);
-    const mediaTranscriptBatches = createMediaTranscriptBatches(mediaTranscriptEntries);
-    if (mediaTranscriptEntries.length > 0) {
-      syncLog("media_batch_plan", {
-        transcripts: mediaTranscriptEntries.length,
-        batches: mediaTranscriptBatches.length,
-        batchBytes: mediaTranscriptBatches.map((batch) => batch.bytes),
-      });
-    }
-
     const payloadPrep = prepareCanvasImportPayload(payload);
     if (
       payloadPrep.syllabusTrimmed > 0 ||
@@ -716,10 +704,42 @@ async function handleCanvasData(payload) {
 
     syncLog("canvas_import_done", { status: canvasImport.status, bytes: canvasImport.bytes });
 
+    // ── Step 3b: Discover Kaltura / Media Gallery transcript attachments ────
+    // The main Canvas import is already saved before this slower media phase.
+    // If the user stops mid-transcript sync, courses/assignments still remain.
+    const coursesWithMediaGallery = payload.courses
+      .filter((course) => mediaGalleryTabUrls.has(course.id))
+      .map((course) => {
+        course.mediaGalleryTabUrl = mediaGalleryTabUrls.get(course.id);
+        return course;
+      });
+    if (coursesWithMediaGallery.length > 0) {
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 94, label: "Checking lecture transcripts…" });
+      try {
+        await syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, coursesWithMediaGallery);
+      } catch (err) {
+        syncLog("media_sync_err", { error: err?.message ?? String(err) });
+        console.warn("[worker] Media transcript sync failed (non-fatal):", err?.message ?? err);
+      }
+      for (const course of coursesWithMediaGallery) {
+        delete course.mediaGalleryTabUrl;
+      }
+    }
+
+    const mediaTranscriptEntries = extractMediaTranscriptEntries(payload);
+    const mediaTranscriptBatches = createMediaTranscriptBatches(mediaTranscriptEntries);
+    if (mediaTranscriptEntries.length > 0) {
+      syncLog("media_batch_plan", {
+        transcripts: mediaTranscriptEntries.length,
+        batches: mediaTranscriptBatches.length,
+        batchBytes: mediaTranscriptBatches.map((batch) => batch.bytes),
+      });
+    }
+
     if (mediaTranscriptBatches.length > 0) {
       broadcastToPopup({
         type: "SYNC_PROGRESS",
-        percent: 94,
+        percent: 95,
         label: `Saving ${mediaTranscriptEntries.length} lecture transcript${mediaTranscriptEntries.length !== 1 ? "s" : ""}…`,
       });
 
