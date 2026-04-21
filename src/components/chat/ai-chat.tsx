@@ -47,6 +47,7 @@ export function AIChat({
         return {
           body: {
             ...body,
+            messages: msgs,
             ...(context?.courseId ? { courseId: context.courseId } : {}),
             ...(context?.topicName ? { topicName: context.topicName } : {}),
             ...(context?.targetEvidence ? { targetEvidence: context.targetEvidence } : {}),

@@ -55,7 +55,13 @@ export function TutorSession({
       prepareSendMessagesRequest: ({ messages: msgs, body }) => {
         const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
         const rid = (lastAssistant?.metadata as { responseId?: string } | undefined)?.responseId;
-        return { body: { ...body, ...(rid ? { previousResponseId: rid } : {}) } };
+        return {
+          body: {
+            ...body,
+            messages: msgs,
+            ...(rid ? { previousResponseId: rid } : {}),
+          },
+        };
       },
     }),
   });
