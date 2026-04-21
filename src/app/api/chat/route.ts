@@ -159,8 +159,8 @@ export async function POST(request: NextRequest) {
       if (evidence.canonicalMaterials.length > 0 || evidence.transcriptMaterials.length > 0) {
         materialContext = `\n\nCross-course study evidence:\n${formatStudyEvidenceForPrompt(evidence, {
           canonicalExcerptChars: 650,
-          transcriptExcerptChars: 400,
-          transcriptOnlyChars: 1_200,
+          transcriptExcerptChars: 1_200,
+          transcriptOnlyChars: 2_400,
         })}`;
       }
     } catch {

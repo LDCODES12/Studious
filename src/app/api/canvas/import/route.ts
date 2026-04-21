@@ -21,9 +21,11 @@ import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-ma
 import {
   effectiveStoredForAI,
   hashMaterialText,
+  ensureMaterialTranscriptChunks,
   isRemoteSourceNewer,
   normalizeSourceUpdatedAt,
   updateMaterialEmbedding,
+  updateMaterialSearchIndex,
   type MaterialSourceKind,
 } from "@/lib/material-sync";
 
@@ -1125,7 +1127,7 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                 const existing = await findExistingSyncedMaterial(scCourseId, sourceKind, sourceKey, mt.fileName);
 
                 if (existing && existing.contentHash === contentHash) {
-                  await saveSyncedMaterial({
+                  const material = await saveSyncedMaterial({
                     existing,
                     courseId: scCourseId,
                     fileName: mt.fileName,
@@ -1143,6 +1145,15 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                         ? existing.autoStoredForAI || existing.storedForAI
                         : existing.autoStoredForAI,
                   });
+                  try {
+                    await ensureMaterialTranscriptChunks({
+                      materialId: material.id,
+                      courseId: scCourseId,
+                      sourceKind,
+                      text: pdfText,
+                      contentHash,
+                    });
+                  } catch { /* transcript chunk indexing never blocks import */ }
                   dbg.materials.push({ fileName: mt.fileName, detectedType: existing.detectedType, chars: pdfText.length });
                   return;
                 }
@@ -1178,8 +1189,14 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
                   autoStoredForAI,
                 });
                 try {
-                  await updateMaterialEmbedding(material.id, pdfText);
-                } catch { /* embedding failure never blocks import */ }
+                  await updateMaterialSearchIndex({
+                    materialId: material.id,
+                    courseId: scCourseId,
+                    sourceKind,
+                    text: pdfText,
+                    contentHash,
+                  });
+                } catch { /* search indexing never blocks import */ }
                 dbg.materials.push({ fileName: mt.fileName, detectedType, chars: pdfText.length });
               } catch {
                 dbg.materials.push({ fileName: mt.fileName, detectedType: "error", chars: pdfText.length });

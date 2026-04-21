@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { db } from "@/lib/db";
 import { generateEmbedding } from "@/lib/embeddings";
+import { ensureTranscriptChunks } from "@/lib/transcript-chunks";
 
 export type MaterialSourceKind =
   | "canvas_syllabus"
@@ -52,4 +53,38 @@ export async function updateMaterialEmbedding(
     SET embedding = ${JSON.stringify(vector)}::vector
     WHERE id = ${materialId}
   `;
+}
+
+export async function ensureMaterialTranscriptChunks({
+  materialId,
+  courseId,
+  sourceKind,
+  text,
+  contentHash,
+}: {
+  materialId: string;
+  courseId: string;
+  sourceKind: MaterialSourceKind;
+  text: string;
+  contentHash: string;
+}): Promise<void> {
+  if (sourceKind !== "canvas_media") return;
+  await ensureTranscriptChunks({ materialId, courseId, text, contentHash });
+}
+
+export async function updateMaterialSearchIndex({
+  materialId,
+  courseId,
+  sourceKind,
+  text,
+  contentHash,
+}: {
+  materialId: string;
+  courseId: string;
+  sourceKind: MaterialSourceKind;
+  text: string;
+  contentHash: string;
+}): Promise<void> {
+  await updateMaterialEmbedding(materialId, text);
+  await ensureMaterialTranscriptChunks({ materialId, courseId, sourceKind, text, contentHash });
 }

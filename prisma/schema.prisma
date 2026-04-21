@@ -153,9 +153,35 @@ model CourseMaterial {
   uploadedAt              DateTime                     @default(now())
   embedding               Unsupported("vector(1536)")?
   course                  Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  chunks                  CourseMaterialChunk[]
 
   @@unique([courseId, sourceKind, sourceKey])
   @@index([courseId, sourceKind])
+}
+
+model CourseMaterialChunk {
+  id            String                       @id @default(cuid())
+  materialId    String
+  courseId      String
+  chunkIndex    Int
+  charStart     Int
+  charEnd       Int
+  text          String
+  contentHash   String
+  tokenEstimate Int
+  evidenceType  String                       @default("content") // content | worked_example | review | clarification | formula | definition
+  signals       String[]                     @default([])
+  keywords      String[]                     @default([])
+  importance    Int                          @default(0)
+  createdAt     DateTime                     @default(now())
+  embedding     Unsupported("vector(1536)")?
+  material      CourseMaterial               @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@unique([materialId, chunkIndex])
+  @@index([courseId])
+  @@index([materialId])
+  @@index([materialId, contentHash])
+  @@index([courseId, materialId])
 }
 
 model Quiz {

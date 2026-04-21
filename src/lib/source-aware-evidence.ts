@@ -1,4 +1,5 @@
 import { addDays, differenceInCalendarDays, format, isValid, parseISO, startOfWeek, subDays } from "date-fns";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { generateEmbedding } from "@/lib/embeddings";
 import type { CourseContextSnapshot, DeadlineItem } from "@/lib/course-context";
@@ -23,6 +24,33 @@ interface MaterialRecord {
   uploadedAt: Date;
 }
 
+interface TranscriptChunkSearchRow {
+  chunkId: string;
+  materialId: string;
+  courseId: string;
+  courseName: string | null;
+  fileName: string;
+  detectedType: string;
+  sourceKind: string;
+  sourceRole: string;
+  summary: string;
+  relatedTopics: string[];
+  storedForAI: boolean;
+  contentHash: string | null;
+  sourceUpdatedAt: Date | null;
+  uploadedAt: Date;
+  chunkIndex: number;
+  charStart: number;
+  charEnd: number;
+  chunkText: string;
+  chunkContentHash: string;
+  evidenceType: string;
+  signals: string[];
+  keywords: string[];
+  importance: number;
+  hybridScore: number | null;
+}
+
 export interface SelectionCandidate extends EvidenceMaterial {
   matchScore: number;
   preferred: boolean;
@@ -43,6 +71,10 @@ export interface EvidenceMaterial {
   sourceUpdatedAt?: string | null;
   uploadedAt: string;
   materialSourceRole: Exclude<MaterialSourceRole, "structural">;
+  transcriptEvidenceType?: string;
+  transcriptSignals?: string[];
+  transcriptKeywords?: string[];
+  transcriptImportance?: number;
 }
 
 export interface TranscriptDigest {
@@ -140,8 +172,8 @@ const DEFAULT_STUDY_CAPS: SelectionCaps = {
 
 const DEFAULT_GENERATION_CAPS: SelectionCaps = {
   maxCanonical: 6,
-  maxTranscript: 4,
-  transcriptOnlyMax: 6,
+  maxTranscript: 8,
+  transcriptOnlyMax: 16,
 };
 
 const STOPWORDS = new Set([
@@ -286,6 +318,37 @@ function toEvidenceMaterial(material: MaterialRecord, matchScore: number, prefer
   };
 }
 
+function toIsoString(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function toTranscriptChunkCandidate(row: TranscriptChunkSearchRow, matchScore: number): SelectionCandidate {
+  return {
+    id: `${row.materialId}:chunk:${row.chunkIndex}`,
+    fileName: `${row.fileName} (excerpt ${row.chunkIndex + 1})`,
+    courseName: row.courseName,
+    detectedType: row.detectedType,
+    sourceKind: row.sourceKind,
+    sourceRole: row.sourceRole,
+    summary: row.summary,
+    relatedTopics: row.relatedTopics,
+    rawText: row.chunkText,
+    storedForAI: row.storedForAI,
+    contentHash: `${row.contentHash ?? row.chunkContentHash}:chunk:${row.chunkIndex}:${row.charStart}-${row.charEnd}`,
+    sourceUpdatedAt: toIsoString(row.sourceUpdatedAt),
+    uploadedAt: toIsoString(row.uploadedAt) ?? new Date().toISOString(),
+    materialSourceRole: "transcript",
+    transcriptEvidenceType: row.evidenceType,
+    transcriptSignals: row.signals,
+    transcriptKeywords: row.keywords,
+    transcriptImportance: row.importance,
+    matchScore,
+    preferred: true,
+  };
+}
+
 async function fetchMaterialDetails(
   courseId: string,
   ids?: string[],
@@ -336,6 +399,111 @@ async function searchMaterialIds(courseId: string, query: string, limit: number)
   return rows.map((row) => row.id);
 }
 
+async function searchTranscriptChunkCandidates(
+  courseId: string,
+  query: string,
+  limit: number,
+): Promise<SelectionCandidate[]> {
+  if (!query.trim()) return [];
+  const vector = await generateEmbedding(query);
+  const vectorStr = JSON.stringify(vector);
+  const candidateLimit = Math.max(limit * 8, 40);
+  const rows = await db.$queryRaw<TranscriptChunkSearchRow[]>`
+    WITH search_query AS (
+      SELECT websearch_to_tsquery('english', ${query}) AS tsquery
+    ),
+    vector_matches AS (
+      SELECT cmc.id,
+             row_number() OVER (ORDER BY cmc.embedding <=> ${vectorStr}::vector) AS vector_rank
+      FROM "CourseMaterialChunk" cmc
+      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+      WHERE cmc."courseId" = ${courseId}
+        AND cmc.embedding IS NOT NULL
+        AND cm."sourceKind" = 'canvas_media'
+      ORDER BY cmc.embedding <=> ${vectorStr}::vector
+      LIMIT ${candidateLimit}
+    ),
+    keyword_matches AS (
+      SELECT cmc.id,
+             row_number() OVER (
+               ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+             ) AS keyword_rank
+      FROM "CourseMaterialChunk" cmc
+      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+      CROSS JOIN search_query
+      WHERE cmc."courseId" = ${courseId}
+        AND cm."sourceKind" = 'canvas_media'
+        AND to_tsvector('english', cmc.text) @@ search_query.tsquery
+      ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+      LIMIT ${candidateLimit}
+    ),
+    fused AS (
+      SELECT id,
+             MIN(vector_rank)::float AS vector_rank,
+             MIN(keyword_rank)::float AS keyword_rank
+      FROM (
+        SELECT id, vector_rank, NULL::bigint AS keyword_rank FROM vector_matches
+        UNION ALL
+        SELECT id, NULL::bigint AS vector_rank, keyword_rank FROM keyword_matches
+      ) matches
+      GROUP BY id
+    )
+    SELECT cmc.id AS "chunkId",
+           cmc."materialId" AS "materialId",
+           cmc."courseId" AS "courseId",
+           c.name AS "courseName",
+           cm."fileName" AS "fileName",
+           cm."detectedType" AS "detectedType",
+           cm."sourceKind" AS "sourceKind",
+           cm."sourceRole" AS "sourceRole",
+           cm.summary AS "summary",
+           cm."relatedTopics" AS "relatedTopics",
+           cm."storedForAI" AS "storedForAI",
+           cm."contentHash" AS "contentHash",
+           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
+           cm."uploadedAt" AS "uploadedAt",
+           cmc."chunkIndex" AS "chunkIndex",
+           cmc."charStart" AS "charStart",
+           cmc."charEnd" AS "charEnd",
+           cmc.text AS "chunkText",
+           cmc."contentHash" AS "chunkContentHash",
+           cmc."evidenceType" AS "evidenceType",
+           cmc.signals AS "signals",
+           cmc.keywords AS "keywords",
+           cmc.importance AS "importance",
+           (
+             COALESCE(70.0 / (60.0 + fused.vector_rank), 0) +
+             COALESCE(45.0 / (60.0 + fused.keyword_rank), 0) +
+             LEAST(cmc.importance, 20) * 0.03 +
+             CASE
+               WHEN ${query} ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+                 AND (cm."fileName" || ' ' || array_to_string(cmc.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+               THEN 1.4
+               ELSE 0
+             END +
+             CASE
+               WHEN ${query} ~* '\\m(example|problem|calculate|calculation|solve)\\M'
+                 AND 'worked_example' = ANY(cmc.signals)
+               THEN 1.1
+               ELSE 0
+             END +
+             CASE
+               WHEN ${query} ~* '\\m(important|emphasize|focus|remember|key)\\M'
+                 AND 'instructor_emphasis' = ANY(cmc.signals)
+               THEN 1.1
+               ELSE 0
+             END
+           )::float AS "hybridScore"
+    FROM fused
+    INNER JOIN "CourseMaterialChunk" cmc ON cmc.id = fused.id
+    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+    INNER JOIN "Course" c ON c.id = cm."courseId"
+    ORDER BY "hybridScore" DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((row, index) => toTranscriptChunkCandidate(row, 120 + (row.hybridScore ?? 0) - index * 0.01));
+}
+
 async function fetchUserMaterialDetails(
   userId: string,
   ids: string[],
@@ -384,6 +552,169 @@ async function searchUserMaterialIds(userId: string, query: string, limit: numbe
     LIMIT ${limit}
   `;
   return rows.map((row) => row.id);
+}
+
+async function searchUserTranscriptChunkCandidates(
+  userId: string,
+  query: string,
+  limit: number,
+): Promise<SelectionCandidate[]> {
+  if (!query.trim()) return [];
+  const vector = await generateEmbedding(query);
+  const vectorStr = JSON.stringify(vector);
+  const candidateLimit = Math.max(limit * 8, 40);
+  const rows = await db.$queryRaw<TranscriptChunkSearchRow[]>`
+    WITH search_query AS (
+      SELECT websearch_to_tsquery('english', ${query}) AS tsquery
+    ),
+    vector_matches AS (
+      SELECT cmc.id,
+             row_number() OVER (ORDER BY cmc.embedding <=> ${vectorStr}::vector) AS vector_rank
+      FROM "CourseMaterialChunk" cmc
+      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+      INNER JOIN "Course" c ON c.id = cm."courseId"
+      WHERE c."userId" = ${userId}
+        AND cmc.embedding IS NOT NULL
+        AND cm."sourceKind" = 'canvas_media'
+      ORDER BY cmc.embedding <=> ${vectorStr}::vector
+      LIMIT ${candidateLimit}
+    ),
+    keyword_matches AS (
+      SELECT cmc.id,
+             row_number() OVER (
+               ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+             ) AS keyword_rank
+      FROM "CourseMaterialChunk" cmc
+      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+      INNER JOIN "Course" c ON c.id = cm."courseId"
+      CROSS JOIN search_query
+      WHERE c."userId" = ${userId}
+        AND cm."sourceKind" = 'canvas_media'
+        AND to_tsvector('english', cmc.text) @@ search_query.tsquery
+      ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+      LIMIT ${candidateLimit}
+    ),
+    fused AS (
+      SELECT id,
+             MIN(vector_rank)::float AS vector_rank,
+             MIN(keyword_rank)::float AS keyword_rank
+      FROM (
+        SELECT id, vector_rank, NULL::bigint AS keyword_rank FROM vector_matches
+        UNION ALL
+        SELECT id, NULL::bigint AS vector_rank, keyword_rank FROM keyword_matches
+      ) matches
+      GROUP BY id
+    )
+    SELECT cmc.id AS "chunkId",
+           cmc."materialId" AS "materialId",
+           cmc."courseId" AS "courseId",
+           c.name AS "courseName",
+           cm."fileName" AS "fileName",
+           cm."detectedType" AS "detectedType",
+           cm."sourceKind" AS "sourceKind",
+           cm."sourceRole" AS "sourceRole",
+           cm.summary AS "summary",
+           cm."relatedTopics" AS "relatedTopics",
+           cm."storedForAI" AS "storedForAI",
+           cm."contentHash" AS "contentHash",
+           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
+           cm."uploadedAt" AS "uploadedAt",
+           cmc."chunkIndex" AS "chunkIndex",
+           cmc."charStart" AS "charStart",
+           cmc."charEnd" AS "charEnd",
+           cmc.text AS "chunkText",
+           cmc."contentHash" AS "chunkContentHash",
+           cmc."evidenceType" AS "evidenceType",
+           cmc.signals AS "signals",
+           cmc.keywords AS "keywords",
+           cmc.importance AS "importance",
+           (
+             COALESCE(70.0 / (60.0 + fused.vector_rank), 0) +
+             COALESCE(45.0 / (60.0 + fused.keyword_rank), 0) +
+             LEAST(cmc.importance, 20) * 0.03 +
+             CASE
+               WHEN ${query} ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+                 AND (cm."fileName" || ' ' || array_to_string(cmc.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+               THEN 1.4
+               ELSE 0
+             END +
+             CASE
+               WHEN ${query} ~* '\\m(example|problem|calculate|calculation|solve)\\M'
+                 AND 'worked_example' = ANY(cmc.signals)
+               THEN 1.1
+               ELSE 0
+             END +
+             CASE
+               WHEN ${query} ~* '\\m(important|emphasize|focus|remember|key)\\M'
+                 AND 'instructor_emphasis' = ANY(cmc.signals)
+               THEN 1.1
+               ELSE 0
+             END
+           )::float AS "hybridScore"
+    FROM fused
+    INNER JOIN "CourseMaterialChunk" cmc ON cmc.id = fused.id
+    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+    INNER JOIN "Course" c ON c.id = cm."courseId"
+    ORDER BY "hybridScore" DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((row, index) => toTranscriptChunkCandidate(row, 120 + (row.hybridScore ?? 0) - index * 0.01));
+}
+
+async function fetchHighValueTranscriptChunkCandidates(
+  courseId: string,
+  materialIds: string[] | undefined,
+  limit: number,
+): Promise<SelectionCandidate[]> {
+  const materialFilter = materialIds && materialIds.length > 0
+    ? Prisma.sql`AND cmc."materialId" IN (${Prisma.join(materialIds)})`
+    : Prisma.empty;
+
+  const rows = await db.$queryRaw<TranscriptChunkSearchRow[]>(Prisma.sql`
+    SELECT cmc.id AS "chunkId",
+           cmc."materialId" AS "materialId",
+           cmc."courseId" AS "courseId",
+           c.name AS "courseName",
+           cm."fileName" AS "fileName",
+           cm."detectedType" AS "detectedType",
+           cm."sourceKind" AS "sourceKind",
+           cm."sourceRole" AS "sourceRole",
+           cm.summary AS "summary",
+           cm."relatedTopics" AS "relatedTopics",
+           cm."storedForAI" AS "storedForAI",
+           cm."contentHash" AS "contentHash",
+           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
+           cm."uploadedAt" AS "uploadedAt",
+           cmc."chunkIndex" AS "chunkIndex",
+           cmc."charStart" AS "charStart",
+           cmc."charEnd" AS "charEnd",
+           cmc.text AS "chunkText",
+           cmc."contentHash" AS "chunkContentHash",
+           cmc."evidenceType" AS "evidenceType",
+           cmc.signals AS "signals",
+           cmc.keywords AS "keywords",
+           cmc.importance AS "importance",
+           (
+             cmc.importance +
+             CASE WHEN 'review' = ANY(cmc.signals) THEN 8 ELSE 0 END +
+             CASE WHEN 'worked_example' = ANY(cmc.signals) THEN 5 ELSE 0 END +
+             CASE WHEN 'instructor_emphasis' = ANY(cmc.signals) THEN 5 ELSE 0 END +
+             CASE WHEN cmc."evidenceType" IN ('formula', 'definition', 'clarification') THEN 3 ELSE 0 END
+           )::float AS "hybridScore"
+    FROM "CourseMaterialChunk" cmc
+    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+    INNER JOIN "Course" c ON c.id = cm."courseId"
+    WHERE cmc."courseId" = ${courseId}
+      AND cm."sourceKind" = 'canvas_media'
+      ${materialFilter}
+    ORDER BY "hybridScore" DESC,
+             cm."sourceUpdatedAt" DESC NULLS LAST,
+             cm."uploadedAt" DESC,
+             cmc."chunkIndex" ASC
+    LIMIT ${limit}
+  `);
+
+  return rows.map((row, index) => toTranscriptChunkCandidate(row, 110 + (row.hybridScore ?? 0) - index * 0.01));
 }
 
 async function fetchRecentUserMaterials(userId: string, limit: number): Promise<MaterialRecord[]> {
@@ -473,9 +804,10 @@ export function selectSourceAwareMaterials(
     .filter((material) => material.materialSourceRole === "transcript")
     .sort((a, b) => {
       const delta = Number(b.preferred) - Number(a.preferred)
+        || b.matchScore - a.matchScore
         || transcriptPriority(b) - transcriptPriority(a)
         || materialFreshnessPriority(b) - materialFreshnessPriority(a)
-        || b.matchScore - a.matchScore;
+        || (b.transcriptImportance ?? 0) - (a.transcriptImportance ?? 0);
       return delta || a.fileName.localeCompare(b.fileName);
     });
 
@@ -652,6 +984,20 @@ function summarizeMaterial(material: EvidenceMaterial): string {
   return material.fileName;
 }
 
+function formatTranscriptMetadata(material: EvidenceMaterial): string {
+  const parts: string[] = [];
+  if (material.transcriptEvidenceType && material.transcriptEvidenceType !== "content") {
+    parts.push(`type: ${material.transcriptEvidenceType.replace(/_/g, " ")}`);
+  }
+  if (material.transcriptSignals && material.transcriptSignals.length > 0) {
+    parts.push(`signals: ${material.transcriptSignals.map((signal) => signal.replace(/_/g, " ")).join(", ")}`);
+  }
+  if (material.transcriptKeywords && material.transcriptKeywords.length > 0) {
+    parts.push(`keywords: ${material.transcriptKeywords.slice(0, 8).join(", ")}`);
+  }
+  return parts.join("; ");
+}
+
 function formatMaterialLabel(material: Pick<EvidenceMaterial, "fileName" | "courseName">): string {
   return material.courseName ? `${material.courseName} — ${material.fileName}` : material.fileName;
 }
@@ -680,9 +1026,19 @@ export async function resolveWeeklyEvidence({
   const deadlines = collectWeekDeadlines(context, now);
   const nextAssessmentTitle = pickHighSalienceAssessment(deadlines);
   const query = buildWeeklyQuery(topics, readings, deadlines, nextAssessmentTitle);
-  const semanticIds = query ? await searchMaterialIds(courseId, query, 8) : [];
-  const semanticMaterials = semanticIds.length > 0 ? await fetchMaterialDetails(courseId, semanticIds) : [];
-  const rankedMaterials = mergeRankedMaterials([], semanticMaterials);
+  const [semanticMaterials, transcriptChunkCandidates]: [MaterialRecord[], SelectionCandidate[]] = query
+    ? await Promise.all([
+      (async () => {
+        const semanticIds = await searchMaterialIds(courseId, query, 8);
+        return semanticIds.length > 0 ? fetchMaterialDetails(courseId, semanticIds) : [];
+      })(),
+      searchTranscriptChunkCandidates(courseId, query, 8),
+    ])
+    : [[], []];
+  const rankedMaterials = [
+    ...mergeRankedMaterials([], semanticMaterials),
+    ...transcriptChunkCandidates,
+  ];
   const selection = selectSourceAwareMaterials(rankedMaterials, DEFAULT_WEEKLY_CAPS);
   const transcriptDigest = buildTranscriptDigest(
     selection.transcriptMaterials,
@@ -722,30 +1078,50 @@ export async function resolveStudyEvidence({
   let rankedMaterials: SelectionCandidate[] = [];
   if (materialIds && materialIds.length > 0) {
     const selectedMaterials = await fetchMaterialDetails(courseId, materialIds, storedForAIOnly);
-    rankedMaterials = selectedMaterials.map((material, index) => toEvidenceMaterial(material, 80 - index, true));
+    const transcriptMaterialIds = selectedMaterials
+      .filter((material) => material.sourceKind === "canvas_media")
+      .map((material) => material.id);
+    const transcriptChunkCandidates = transcriptMaterialIds.length > 0
+      ? await fetchHighValueTranscriptChunkCandidates(courseId, transcriptMaterialIds, 24)
+      : [];
+    rankedMaterials = [
+      ...selectedMaterials.map((material, index) => toEvidenceMaterial(material, 80 - index, true)),
+      ...transcriptChunkCandidates,
+    ];
   } else if (storedForAIOnly) {
-    const selectedMaterials = await fetchMaterialDetails(courseId, undefined, true);
-    rankedMaterials = selectedMaterials.map((material, index) => toEvidenceMaterial(material, 60 - index, false));
+    const [selectedMaterials, transcriptChunkCandidates] = await Promise.all([
+      fetchMaterialDetails(courseId, undefined, true),
+      fetchHighValueTranscriptChunkCandidates(courseId, undefined, 32),
+    ]);
+    rankedMaterials = [
+      ...selectedMaterials.map((material, index) => toEvidenceMaterial(material, 60 - index, false)),
+      ...transcriptChunkCandidates,
+    ];
   } else {
     const preferredIds = targetEvidence?.materials.map((material) => material.id) ?? [];
-    const [preferredMaterials, semanticMaterials] = await Promise.all([
+    const queryParts = [
+      topicName ?? "",
+      questionText ?? "",
+      targetEvidence?.weekLabel ?? "",
+      ...(targetEvidence?.readings ?? []),
+      ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
+    ].filter(Boolean);
+    const query = dedupeStrings(queryParts, 12).join(" | ");
+
+    const [preferredMaterials, semanticMaterials, transcriptChunkCandidates] = await Promise.all([
       preferredIds.length > 0 ? fetchMaterialDetails(courseId, preferredIds) : Promise.resolve([]),
       (async () => {
-        const parts = [
-          topicName ?? "",
-          questionText ?? "",
-          targetEvidence?.weekLabel ?? "",
-          ...(targetEvidence?.readings ?? []),
-          ...((targetEvidence?.candidates ?? []).map((candidate) => candidate.moduleName)),
-        ].filter(Boolean);
-        const query = dedupeStrings(parts, 12).join(" | ");
         if (!query) return [] as MaterialRecord[];
         const semanticIds = await searchMaterialIds(courseId, query, 8);
         return semanticIds.length > 0 ? fetchMaterialDetails(courseId, semanticIds) : [];
       })(),
+      query ? searchTranscriptChunkCandidates(courseId, query, 8) : Promise.resolve([]),
     ]);
 
-    rankedMaterials = mergeRankedMaterials(preferredMaterials, semanticMaterials);
+    rankedMaterials = [
+      ...mergeRankedMaterials(preferredMaterials, semanticMaterials),
+      ...transcriptChunkCandidates,
+    ];
   }
 
   const selection = selectSourceAwareMaterials(rankedMaterials, caps);
@@ -782,14 +1158,20 @@ export async function resolveCrossCourseStudyEvidence({
 }: CrossCourseStudyEvidenceInput): Promise<ResolvedStudyEvidence> {
   const caps = resolveCaps(selectionCaps, DEFAULT_STUDY_CAPS);
   const lectureSpecific = questionText ? LECTURE_SPECIFIC_RX.test(questionText) : false;
-  const semanticMaterials = questionText
-    ? await (async () => {
+  const [semanticMaterials, transcriptChunkCandidates]: [MaterialRecord[], SelectionCandidate[]] = questionText
+    ? await Promise.all([
+      (async () => {
         const semanticIds = await searchUserMaterialIds(userId, questionText, 10);
         return semanticIds.length > 0 ? fetchUserMaterialDetails(userId, semanticIds) : [];
-      })()
-    : [];
+      })(),
+      searchUserTranscriptChunkCandidates(userId, questionText, 10),
+    ])
+    : [[], []];
   const recentMaterials = lectureSpecific ? await fetchRecentUserMaterials(userId, 8) : [];
-  const rankedMaterials = mergeRankedMaterials(recentMaterials, semanticMaterials);
+  const rankedMaterials = [
+    ...mergeRankedMaterials(recentMaterials, semanticMaterials),
+    ...transcriptChunkCandidates,
+  ];
   const selection = selectSourceAwareMaterials(rankedMaterials, caps);
   const transcriptDigest = buildTranscriptDigest(
     selection.transcriptMaterials,
@@ -821,8 +1203,8 @@ export function formatStudyEvidenceForPrompt(
   },
 ): string {
   const canonicalExcerptChars = options?.canonicalExcerptChars ?? 850;
-  const transcriptExcerptChars = options?.transcriptExcerptChars ?? 500;
-  const transcriptOnlyChars = options?.transcriptOnlyChars ?? 1600;
+  const transcriptExcerptChars = options?.transcriptExcerptChars ?? 1_400;
+  const transcriptOnlyChars = options?.transcriptOnlyChars ?? 2_400;
 
   const sections: string[] = [];
 
@@ -871,7 +1253,8 @@ export function formatStudyEvidenceForPrompt(
     transcriptLines.push(
       ...evidence.transcriptMaterials.map((material) => {
         const excerpt = clipText(material.rawText, transcriptChars);
-        return `- ${formatMaterialLabel(material)}\n  Summary: ${summarizeMaterial(material)}\n  Excerpt: ${excerpt}`;
+        const metadata = formatTranscriptMetadata(material);
+        return `- ${formatMaterialLabel(material)}\n  Summary: ${summarizeMaterial(material)}${metadata ? `\n  Transcript signals: ${metadata}` : ""}\n  Excerpt: ${excerpt}`;
       })
     );
 
@@ -932,8 +1315,9 @@ export function formatGenerationEvidenceForPrompt(
       let remaining = transcriptCharBudget;
       for (const material of evidence.transcriptMaterials) {
         if (remaining <= 0) break;
-        const body = clipText(material.rawText, Math.min(remaining, 1_200));
-        const block = `--- ${formatMaterialLabel(material)} ---\nSummary: ${summarizeMaterial(material)}\nExcerpt: ${body}`;
+        const body = clipText(material.rawText, Math.min(remaining, 2_000));
+        const metadata = formatTranscriptMetadata(material);
+        const block = `--- ${formatMaterialLabel(material)} ---\nSummary: ${summarizeMaterial(material)}${metadata ? `\nTranscript signals: ${metadata}` : ""}\nExcerpt: ${body}`;
         transcriptSnippets.push(block);
         remaining -= block.length + 2;
       }
@@ -944,7 +1328,8 @@ export function formatGenerationEvidenceForPrompt(
       let transcriptBody = "";
       for (const material of evidence.transcriptMaterials) {
         if (transcriptBody.length >= transcriptOnlyBudget) break;
-        transcriptBody += `\n\n--- ${formatMaterialLabel(material)} ---\n${material.rawText}`;
+        const metadata = formatTranscriptMetadata(material);
+        transcriptBody += `\n\n--- ${formatMaterialLabel(material)} ---${metadata ? `\nTranscript signals: ${metadata}` : ""}\n${material.rawText}`;
       }
       transcriptText += `${transcriptText ? "\n\n" : ""}${transcriptBody.slice(0, transcriptOnlyBudget)}`;
     }

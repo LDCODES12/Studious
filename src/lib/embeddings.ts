@@ -1,13 +1,24 @@
-import { embed } from "ai";
+import { embed, embedMany } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
+
+const EMBEDDING_INPUT_MAX_CHARS = 8_000;
 
 export async function generateEmbedding(text: string): Promise<number[]> {
   const { embedding } = await embed({
     model: openai.embedding("text-embedding-3-small"),
-    value: text.slice(0, 8000),
+    value: text.slice(0, EMBEDDING_INPUT_MAX_CHARS),
   });
   return embedding;
+}
+
+export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const { embeddings } = await embedMany({
+    model: openai.embedding("text-embedding-3-small"),
+    values: texts.map((text) => text.slice(0, EMBEDDING_INPUT_MAX_CHARS)),
+  });
+  return embeddings;
 }
 
 export async function searchMaterials(
