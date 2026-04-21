@@ -17,7 +17,32 @@ export interface TutorTopic {
   evidence: StudyTargetEvidence;
 }
 
-export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
+export interface RecentTutorConversationSummary {
+  id: string;
+  conversationId?: string;
+  courseId?: string;
+  courseName?: string;
+  courseColor?: string;
+  topicName?: string;
+  title: string;
+  preview: string;
+  updatedAtLabel?: string;
+}
+
+interface TutorTopicPickerProps {
+  topics: TutorTopic[];
+  recentTutorConversations: RecentTutorConversationSummary[];
+}
+
+function pushTutorRoute(router: ReturnType<typeof useRouter>, params: URLSearchParams) {
+  const query = params.toString();
+  router.push(query ? `/study-tools/tutor?${query}` : "/study-tools/tutor");
+}
+
+export function TutorTopicPicker({
+  topics,
+  recentTutorConversations,
+}: TutorTopicPickerProps) {
   const router = useRouter();
   const [freeInput, setFreeInput] = useState("");
 
@@ -30,13 +55,35 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
       ...(topic.readings.length > 0 ? { readings: topic.readings.join("|||") } : {}),
       evidence: JSON.stringify(topic.evidence),
     });
-    router.push(`/study-tools/tutor?${params.toString()}`);
+    pushTutorRoute(router, params);
+  }
+
+  function handleConversationClick(conversation: RecentTutorConversationSummary) {
+    const params = new URLSearchParams();
+
+    if (conversation.conversationId) {
+      params.set("conversationId", conversation.conversationId);
+    }
+    if (conversation.courseId) {
+      params.set("courseId", conversation.courseId);
+    }
+    if (conversation.courseName) {
+      params.set("courseName", conversation.courseName);
+    }
+    if (conversation.courseColor) {
+      params.set("courseColor", conversation.courseColor);
+    }
+    if (conversation.topicName) {
+      params.set("topic", conversation.topicName);
+    }
+
+    pushTutorRoute(router, params);
   }
 
   function handleFreeStart() {
     if (freeInput.trim()) {
       const params = new URLSearchParams({ q: freeInput.trim() });
-      router.push(`/study-tools/tutor?${params.toString()}`);
+      pushTutorRoute(router, params);
     }
   }
 
@@ -49,10 +96,75 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
 
   return (
     <div className="space-y-6">
+      {recentTutorConversations.length > 0 && (
+        <div>
+          <p className="mb-3 text-[13px] text-muted-foreground">
+            Recent tutor conversations
+          </p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {recentTutorConversations.map((conversation) => {
+              const colors = conversation.courseColor
+                ? courseColors[conversation.courseColor]
+                : undefined;
+              const secondaryLabel =
+                conversation.topicName && conversation.topicName !== conversation.title
+                  ? conversation.topicName
+                  : conversation.preview;
+
+              return (
+                <button
+                  key={conversation.id}
+                  onClick={() => handleConversationClick(conversation)}
+                  className="group rounded-lg border border-border bg-card p-4 text-left transition-colors hover:bg-accent/30"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        {conversation.courseName ? (
+                          <>
+                            <span
+                              className={cn(
+                                "h-2 w-2 shrink-0 rounded-full",
+                                colors?.dot ?? "bg-gray-400"
+                              )}
+                            />
+                            <span className="truncate text-[11px] font-medium text-muted-foreground">
+                              {conversation.courseName}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-[11px] font-medium text-muted-foreground">
+                            Tutor
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {conversation.updatedAtLabel && (
+                      <span className="shrink-0 text-[11px] text-muted-foreground/70">
+                        {conversation.updatedAtLabel}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[13px] font-medium leading-snug line-clamp-2">
+                    {conversation.title}
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted-foreground/70 line-clamp-2">
+                    {secondaryLabel}
+                  </p>
+                  <span className="mt-2 inline-block text-[11px] font-medium text-muted-foreground transition-colors group-hover:text-foreground">
+                    {conversation.conversationId ? "Resume conversation →" : "Open topic →"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Topic cards */}
       {topics.length > 0 && (
         <div>
-          <p className="text-[13px] text-muted-foreground mb-3">
+          <p className="mb-3 text-[13px] text-muted-foreground">
             Pick a topic from this week to start a tutoring session
           </p>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
@@ -101,8 +213,10 @@ export function TutorTopicPicker({ topics }: { topics: TutorTopic[] }) {
 
       {/* Free-form input */}
       <div>
-        <p className="text-[13px] text-muted-foreground mb-2">
-          {topics.length > 0 ? "Or describe what you want to study" : "Describe what you want to study"}
+        <p className="mb-2 text-[13px] text-muted-foreground">
+          {topics.length > 0 || recentTutorConversations.length > 0
+            ? "Or describe what you want to study"
+            : "Describe what you want to study"}
         </p>
         <div className="flex gap-2">
           <input

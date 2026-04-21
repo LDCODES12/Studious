@@ -5,12 +5,22 @@ import { Brain, CalendarClock, GraduationCap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AIChat } from "@/components/chat/ai-chat";
 import { StudyPlanPanel } from "@/components/study-tools/study-plan-panel";
-import { TutorTopicPicker, type TutorTopic } from "@/components/study-tools/tutor-topic-picker";
+import {
+  TutorTopicPicker,
+  type RecentTutorConversationSummary,
+  type TutorTopic,
+} from "@/components/study-tools/tutor-topic-picker";
 import { buildStudyAssistantPromptOptions } from "@/lib/study-target-presenters";
 
 type Tab = "tutor" | "chat" | "plan";
 
-export function StudyToolsClient({ tutorTopics }: { tutorTopics: TutorTopic[] }) {
+export function StudyToolsClient({
+  tutorTopics,
+  recentTutorConversations,
+}: {
+  tutorTopics: TutorTopic[];
+  recentTutorConversations: RecentTutorConversationSummary[];
+}) {
   const [tab, setTab] = useState<Tab>("tutor");
   const assistantPrompts = [
     ...buildStudyAssistantPromptOptions(tutorTopics, 4),
@@ -62,7 +72,10 @@ export function StudyToolsClient({ tutorTopics }: { tutorTopics: TutorTopic[] })
 
       {/* Tab content */}
       {tab === "tutor" ? (
-        <TutorTopicPicker topics={tutorTopics} />
+        <TutorTopicPicker
+          topics={tutorTopics}
+          recentTutorConversations={recentTutorConversations}
+        />
       ) : tab === "chat" ? (
         <AIChat
           suggestedPrompts={assistantPrompts}

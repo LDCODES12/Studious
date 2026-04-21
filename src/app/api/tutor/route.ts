@@ -9,6 +9,12 @@ import { computeInterventionOutcomes } from "@/lib/intervention-outcomes";
 import type { StudyTargetEvidence } from "@/lib/study-targets";
 import { extractTextFromParts, sanitizeUiMessages } from "@/lib/ui-message-utils";
 import { formatStudyEvidenceForPrompt, resolveStudyEvidence } from "@/lib/source-aware-evidence";
+import {
+  buildTutorConversationPreview,
+  buildTutorConversationTitle,
+  extractTextFromMessageParts,
+  serializeTutorEvidence,
+} from "@/lib/tutor-conversations";
 
 export const maxDuration = 60;
 
@@ -52,19 +58,27 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json() as {
     messages?: unknown;
+    conversationId?: string;
     courseId?: string;
     topicName?: string;
+    readings?: string[];
     targetEvidence?: StudyTargetEvidence;
     previousResponseId?: string;
   };
   const uiMessages = sanitizeUiMessages(body.messages);
   const {
+    conversationId,
     courseId,
     topicName,
+    readings,
     targetEvidence,
     previousResponseId,
   } = body;
+  const userMessages = uiMessages.filter((m) => m.role === "user");
+  const firstUserText = extractTextFromParts(userMessages[0]?.parts);
+  const lastUserText = extractTextFromParts(userMessages[userMessages.length - 1]?.parts);
   log.info("tutor request", {
+    conversationId,
     courseId,
     topicName,
     evidenceSource: targetEvidence?.source ?? null,
@@ -73,7 +87,6 @@ export async function POST(request: NextRequest) {
   });
 
   // Log first message as a tutoring session event
-  const userMessages = (uiMessages ?? []).filter((m: { role: string }) => m.role === "user");
   if (userMessages.length === 1) {
     db.learningEvent.create({
       data: {
@@ -93,11 +106,13 @@ export async function POST(request: NextRequest) {
   // Build course context
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
 
+  if (courseId && !promptText) {
+    return new Response(JSON.stringify({ error: "Course not found" }), { status: 404 });
+  }
+
   let materialContext = "";
   if (courseId) {
     try {
-      const lastUserMsg = [...uiMessages].reverse().find((m) => m.role === "user");
-      const lastUserText = extractTextFromParts(lastUserMsg?.parts);
       const evidence = await resolveStudyEvidence({
         courseId,
         topicName,
@@ -140,36 +155,180 @@ Today is ${today}.${topicContext}${adaptiveRules}
 ${promptText}${materialContext}`;
 
   // ── Responses API conversation chaining ──────────────────────────────────
-  const config = modelConfig("high");
+  let tutorConversation = conversationId
+    ? await db.tutorConversation.findFirst({
+        where: {
+          id: conversationId,
+          userId: session.user.id,
+        },
+        select: {
+          id: true,
+          title: true,
+          lastResponseId: true,
+          _count: {
+            select: {
+              messages: true,
+            },
+          },
+        },
+      })
+    : null;
 
-  const result = previousResponseId
+  const pendingMessages = uiMessages.slice(tutorConversation?._count.messages ?? 0);
+  const pendingUserMessages = pendingMessages
+    .filter((message) => message.role === "user")
+    .map((message) => ({
+      role: message.role,
+      content: extractTextFromParts(message.parts).trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const snapshotReadings = readings?.filter(Boolean) ?? targetEvidence?.readings ?? [];
+
+  if (!tutorConversation && userMessages.length > 0) {
+    tutorConversation = await db.tutorConversation.create({
+      data: {
+        userId: session.user.id,
+        ...(courseId ? { courseId } : {}),
+        ...(topicName ? { topicName } : {}),
+        title: buildTutorConversationTitle({
+          topicName,
+          firstUserText,
+        }),
+        preview: buildTutorConversationPreview({
+          latestUserText: lastUserText,
+          topicName,
+        }),
+        ...(snapshotReadings.length > 0 ? { readings: snapshotReadings } : {}),
+        ...(targetEvidence
+          ? { targetEvidence: serializeTutorEvidence(targetEvidence) }
+          : {}),
+        lastMessageAt: new Date(),
+      },
+      select: {
+        id: true,
+        title: true,
+        lastResponseId: true,
+        _count: {
+          select: {
+            messages: true,
+          },
+        },
+      },
+    });
+  }
+
+  if (tutorConversation) {
+    if (pendingUserMessages.length > 0) {
+      await db.tutorMessage.createMany({
+        data: pendingUserMessages.map((message) => ({
+          conversationId: tutorConversation!.id,
+          role: message.role,
+          content: message.content,
+        })),
+      });
+    }
+
+    await db.tutorConversation.update({
+      where: { id: tutorConversation.id },
+      data: {
+        ...(courseId ? { courseId } : {}),
+        ...(topicName ? { topicName } : {}),
+        ...(snapshotReadings.length > 0 ? { readings: snapshotReadings } : {}),
+        ...(targetEvidence
+          ? { targetEvidence: serializeTutorEvidence(targetEvidence) }
+          : {}),
+        preview: buildTutorConversationPreview({
+          latestUserText: lastUserText,
+          topicName,
+        }),
+        lastMessageAt: new Date(),
+      },
+    });
+  }
+
+  const effectivePreviousResponseId =
+    previousResponseId ?? tutorConversation?.lastResponseId ?? undefined;
+  const config = modelConfig("high");
+  let generatedResponseId: string | undefined;
+
+  const result = effectivePreviousResponseId
     ? (() => {
         const lastMsg = uiMessages[uiMessages.length - 1];
         const lastText = extractTextFromParts(lastMsg?.parts);
-        log.info("streaming tutor continuation", { previousResponseId });
+        log.info("streaming tutor continuation", {
+          previousResponseId: effectivePreviousResponseId,
+          conversationId: tutorConversation?.id ?? null,
+        });
         return streamText({
           ...config,
           prompt: lastText,
           providerOptions: {
             openai: {
               ...config.providerOptions.openai,
-              previousResponseId,
+              previousResponseId: effectivePreviousResponseId,
               instructions: system,
             },
           },
         });
       })()
     : await (async () => {
-        log.info("streaming new tutor session", { courseId: courseId ?? "none", topicName: topicName ?? "free-form" });
+        log.info("streaming new tutor session", {
+          conversationId: tutorConversation?.id ?? null,
+          courseId: courseId ?? "none",
+          topicName: topicName ?? "free-form",
+        });
         const messages = await convertToModelMessages(uiMessages);
         return streamText({ ...config, system, messages });
       })();
 
   return result.toUIMessageStreamResponse({
+    onFinish: async ({ isAborted, responseMessage }) => {
+      if (isAborted || !tutorConversation) return;
+
+      const assistantText = extractTextFromMessageParts(
+        responseMessage.parts as Array<{ type?: string; text?: string }>
+      ).trim();
+      if (!assistantText) return;
+
+      const preview = buildTutorConversationPreview({
+        latestAssistantText: assistantText,
+        latestUserText: lastUserText,
+        topicName,
+      });
+
+      await db.$transaction([
+        db.tutorMessage.create({
+          data: {
+            conversationId: tutorConversation.id,
+            role: "assistant",
+            content: assistantText,
+            ...(generatedResponseId ? { responseId: generatedResponseId } : {}),
+          },
+        }),
+        db.tutorConversation.update({
+          where: { id: tutorConversation.id },
+          data: {
+            preview,
+            lastMessageAt: new Date(),
+            ...(generatedResponseId ? { lastResponseId: generatedResponseId } : {}),
+          },
+        }),
+      ]).catch(() => {});
+    },
     messageMetadata: ({ part }) => {
+      if (part.type === "start" && tutorConversation) {
+        return { conversationId: tutorConversation.id };
+      }
       if (part.type === "finish-step" && "providerMetadata" in part) {
         const rid = (part.providerMetadata?.openai as { responseId?: string } | undefined)?.responseId;
-        if (rid) return { responseId: rid };
+        if (rid) {
+          generatedResponseId = rid;
+          return {
+            conversationId: tutorConversation?.id,
+            responseId: rid,
+          };
+        }
       }
       return undefined;
     },

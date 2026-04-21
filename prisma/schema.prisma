@@ -11,18 +11,19 @@ datasource db {
 }
 
 model User {
-  id                 String    @id @default(cuid())
-  email              String    @unique
+  id                 String              @id @default(cuid())
+  email              String              @unique
   name               String?
   password           String?
   image              String?
   emailVerified      DateTime?
   canvasIcsUrl       String?
-  apiTokenHash       String?   @unique // SHA-256 hash of extension API token
+  apiTokenHash       String?             @unique // SHA-256 hash of extension API token
   bgSyncProcessingAt DateTime? // set when after() starts AI processing, cleared when done
-  createdAt          DateTime  @default(now())
+  createdAt          DateTime            @default(now())
   courses            Course[]
   tasks              Task[]
+  tutorConversations TutorConversation[]
   accounts           Account[]
   sessions           Session[]
 }
@@ -93,6 +94,41 @@ model Course {
   flashcardDecks      FlashcardDeck[]
   announcements       Announcement[]
   tasks               Task[]
+  tutorConversations  TutorConversation[]
+}
+
+model TutorConversation {
+  id             String         @id @default(cuid())
+  userId         String
+  courseId       String?
+  topicName      String?
+  title          String
+  preview        String?
+  readings       String[]       @default([])
+  targetEvidence Json?
+  lastMessageAt  DateTime       @default(now())
+  lastResponseId String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course         Course?        @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  messages       TutorMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, lastMessageAt])
+  @@index([userId, courseId, topicName])
+}
+
+model TutorMessage {
+  id             String            @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  responseId     String?
+  createdAt      DateTime          @default(now())
+  conversation   TutorConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
 }
 
 model CourseTopic {
