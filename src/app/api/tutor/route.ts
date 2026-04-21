@@ -77,6 +77,8 @@ export async function POST(request: NextRequest) {
   const userMessages = uiMessages.filter((m) => m.role === "user");
   const firstUserText = extractTextFromParts(userMessages[0]?.parts);
   const lastUserText = extractTextFromParts(userMessages[userMessages.length - 1]?.parts);
+  const isAutoTopicStart =
+    !!topicName && firstUserText === `I want to study: ${topicName}`;
   log.info("tutor request", {
     conversationId,
     courseId,
@@ -85,23 +87,6 @@ export async function POST(request: NextRequest) {
     hasPrevResponse: !!previousResponseId,
     messageCount: uiMessages?.length ?? 0,
   });
-
-  // Log first message as a tutoring session event
-  if (userMessages.length === 1) {
-    db.learningEvent.create({
-      data: {
-        userId: session.user.id,
-        type: "tutor_session",
-        metadata: JSON.parse(
-          JSON.stringify({
-            courseId: courseId ?? null,
-            topicName: topicName ?? null,
-            targetSource: targetEvidence?.source ?? null,
-          })
-        ),
-      },
-    }).catch(() => {});
-  }
 
   // Build course context
   const { promptText } = await buildStudyContext(session.user.id, courseId ?? undefined);
@@ -175,8 +160,8 @@ ${promptText}${materialContext}`;
     : null;
 
   const pendingMessages = uiMessages.slice(tutorConversation?._count.messages ?? 0);
-  const pendingUserMessages = pendingMessages
-    .filter((message) => message.role === "user")
+  const pendingConversationMessages = pendingMessages
+    .filter((message) => message.role === "user" || message.role === "assistant")
     .map((message) => ({
       role: message.role,
       content: extractTextFromParts(message.parts).trim(),
@@ -184,8 +169,17 @@ ${promptText}${materialContext}`;
     .filter((message) => message.content.length > 0);
 
   const snapshotReadings = readings?.filter(Boolean) ?? targetEvidence?.readings ?? [];
+  const shouldCreateConversation =
+    !!tutorConversation ||
+    (
+      userMessages.length > 0 &&
+      (
+        !isAutoTopicStart ||
+        userMessages.length > 1
+      )
+    );
 
-  if (!tutorConversation && userMessages.length > 0) {
+  if (!tutorConversation && shouldCreateConversation) {
     tutorConversation = await db.tutorConversation.create({
       data: {
         userId: session.user.id,
@@ -216,12 +210,35 @@ ${promptText}${materialContext}`;
         },
       },
     });
+
+    db.learningEvent.create({
+      data: {
+        userId: session.user.id,
+        type: "tutor_session",
+        metadata: JSON.parse(
+          JSON.stringify({
+            courseId: courseId ?? null,
+            topicName: topicName ?? null,
+            targetSource: targetEvidence?.source ?? null,
+            conversationId: tutorConversation.id,
+            title: buildTutorConversationTitle({
+              topicName,
+              firstUserText,
+            }),
+            preview: buildTutorConversationPreview({
+              latestUserText: lastUserText,
+              topicName,
+            }),
+          })
+        ),
+      },
+    }).catch(() => {});
   }
 
   if (tutorConversation) {
-    if (pendingUserMessages.length > 0) {
+    if (pendingConversationMessages.length > 0) {
       await db.tutorMessage.createMany({
-        data: pendingUserMessages.map((message) => ({
+        data: pendingConversationMessages.map((message) => ({
           conversationId: tutorConversation!.id,
           role: message.role,
           content: message.content,

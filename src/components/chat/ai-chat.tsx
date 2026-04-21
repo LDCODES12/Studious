@@ -208,7 +208,7 @@ export function AIChat({
           placeholder={placeholder}
           disabled={isLoading}
           rows={1}
-          className="flex-1 resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          className="flex-1 resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground transition-[border-color,box-shadow] focus:border-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/10 disabled:opacity-50"
           style={{ maxHeight: "120px", overflowY: "auto" }}
           onInput={(e) => {
             const el = e.currentTarget;

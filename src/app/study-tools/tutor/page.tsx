@@ -146,6 +146,7 @@ export default async function TutorPage({
         courseName={courseName}
         courseColor={courseColor}
         draftKey={draftKey}
+        forceAutoStart={!!requestedDraftKey && !conversationDetail}
         initialMessages={initialMessages}
         initialPrompt={conversationDetail ? undefined : requestedPrompt}
         readings={readings}

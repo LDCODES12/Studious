@@ -5,7 +5,7 @@ import { DefaultChatTransport, type UIMessage } from "ai";
 import { formatDistanceToNow } from "date-fns";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Send, ArrowLeft, Plus } from "lucide-react";
+import { Send, ArrowLeft, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { courseColors } from "@/lib/constants";
 import Link from "next/link";
@@ -29,6 +29,7 @@ interface TutorSessionProps {
   courseName?: string;
   courseColor?: string;
   draftKey: string;
+  forceAutoStart?: boolean;
   initialMessages: UIMessage[];
   initialPrompt?: string;
   topicName?: string;
@@ -87,6 +88,7 @@ export function TutorSession({
   courseName,
   courseColor,
   draftKey,
+  forceAutoStart = false,
   initialMessages,
   initialPrompt,
   topicName,
@@ -98,6 +100,7 @@ export function TutorSession({
   const [candidateState, setCandidateState] = useState(targetEvidence?.candidates ?? []);
   const [conversationCards, setConversationCards] = useState(conversationSummaries);
   const [requestingCandidateId, setRequestingCandidateId] = useState<string | null>(null);
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null);
 
   const colors = courseColor ? courseColors[courseColor] : null;
   const evidenceForDisplay = targetEvidence
@@ -109,7 +112,16 @@ export function TutorSession({
   const importCandidate = evidenceForDisplay
     ? getImportableCandidate(evidenceForDisplay)
     : null;
-  const autoStartMessage = initialPrompt ?? (topicName ? `I want to study: ${topicName}` : undefined);
+  const shouldAutoStartDraft =
+    !!initialPrompt ||
+    forceAutoStart ||
+    (
+      !activeConversationId &&
+      conversationSummaries.length === 0
+    );
+  const autoStartMessage = shouldAutoStartDraft
+    ? initialPrompt ?? (topicName ? `I want to study: ${topicName}` : undefined)
+    : undefined;
   const chatId = activeConversationId ?? `tutor-draft:${draftKey}`;
 
   const { messages, sendMessage, status } = useChat({
@@ -294,6 +306,40 @@ export function TutorSession({
     );
   }
 
+  async function handleDeleteConversation(conversationId: string) {
+    if (deletingConversationId) return;
+
+    setDeletingConversationId(conversationId);
+    try {
+      const res = await fetch(`/api/tutor/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) return;
+
+      setConversationCards((prev) =>
+        prev.filter((conversation) => conversation.id !== conversationId)
+      );
+
+      if (conversationId === activeConversationId) {
+        router.replace(
+          buildTutorHref({
+            courseId,
+            courseName,
+            courseColor,
+            topicName,
+            readings,
+            targetEvidence,
+          })
+        );
+      } else {
+        router.refresh();
+      }
+    } finally {
+      setDeletingConversationId(null);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="shrink-0 pb-4">
@@ -372,43 +418,57 @@ export function TutorSession({
               {conversationCards.map((conversation) => {
                 const isActive = conversation.id === activeConversationId;
                 return (
-                  <button
+                  <div
                     key={conversation.id}
-                    onClick={() =>
-                      router.push(
-                        buildTutorHref({
-                          conversationId: conversation.id,
-                        })
-                      )
-                    }
                     className={cn(
-                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      "rounded-md border px-3 py-2 transition-colors",
                       isActive
                         ? "border-primary/40 bg-primary/5"
                         : "border-border hover:bg-muted/60"
                     )}
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        {conversation.courseName && (
-                          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                            {conversation.courseName}
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        onClick={() =>
+                          router.push(
+                            buildTutorHref({
+                              conversationId: conversation.id,
+                            })
+                          )
+                        }
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            {conversation.courseName && (
+                              <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                {conversation.courseName}
+                              </p>
+                            )}
+                            <p className="truncate text-[13px] font-medium">
+                              {conversation.title}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-[10px] text-muted-foreground">
+                            {formatConversationAge(conversation.lastMessageAt)}
+                          </span>
+                        </div>
+                        {conversation.preview && (
+                          <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                            {conversation.preview}
                           </p>
                         )}
-                        <p className="truncate text-[13px] font-medium">
-                          {conversation.title}
-                        </p>
-                      </div>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {formatConversationAge(conversation.lastMessageAt)}
-                      </span>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteConversation(conversation.id)}
+                        disabled={deletingConversationId === conversation.id}
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                        aria-label={`Delete ${conversation.title}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
-                    {conversation.preview && (
-                      <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
-                        {conversation.preview}
-                      </p>
-                    )}
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -424,7 +484,9 @@ export function TutorSession({
         {!hasStarted && !autoStartMessage && (
           <div className="flex h-full flex-col items-center justify-center gap-4 px-4 text-center">
             <p className="text-sm text-muted-foreground">
-              Describe what you want to study and your tutor will guide you through it with questions.
+              {conversationCards.length > 0 && !activeConversationId
+                ? "Pick a saved conversation or start a fresh one for this topic."
+                : "Describe what you want to study and your tutor will guide you through it with questions."}
             </p>
           </div>
         )}
@@ -487,7 +549,7 @@ export function TutorSession({
             placeholder={hasStarted ? "Type your answer..." : "Describe what you want to study..."}
             disabled={isLoading}
             rows={1}
-            className="flex-1 resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+            className="flex-1 resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground transition-[border-color,box-shadow] focus:border-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/10 disabled:opacity-50"
             style={{ maxHeight: "120px", overflowY: "auto" }}
             onInput={(e) => {
               const el = e.currentTarget;
