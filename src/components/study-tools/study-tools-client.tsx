@@ -22,6 +22,7 @@ export function StudyToolsClient({
   recentTutorConversations: RecentTutorConversationSummary[];
 }) {
   const [tab, setTab] = useState<Tab>("tutor");
+  const usesPanelLayout = tab !== "tutor";
   const assistantPrompts = [
     ...buildStudyAssistantPromptOptions(tutorTopics, 4),
     { label: "What should I focus on today?", prompt: "What should I focus on today?" },
@@ -29,7 +30,7 @@ export function StudyToolsClient({
   ];
 
   return (
-    <div className="flex flex-1 flex-col gap-4 overflow-hidden">
+    <div className={cn("flex flex-col gap-4", usesPanelLayout && "min-h-0 flex-1")}>
       {/* Tab header */}
       <div className="flex items-center gap-1 shrink-0">
         <button
@@ -70,21 +71,23 @@ export function StudyToolsClient({
         </button>
       </div>
 
-      {/* Tab content */}
-      {tab === "tutor" ? (
-        <TutorTopicPicker
-          topics={tutorTopics}
-          recentTutorConversations={recentTutorConversations}
-        />
-      ) : tab === "chat" ? (
-        <AIChat
-          suggestedPrompts={assistantPrompts}
-          emptyMessage="Ask about any of your courses — planning, priorities, study strategies, exam prep."
-          placeholder="Ask across all your courses... (Enter to send)"
-        />
-      ) : (
-        <StudyPlanPanel />
-      )}
+      <div className={cn(usesPanelLayout && "min-h-0 flex-1")}>
+        {/* Tab content */}
+        {tab === "tutor" ? (
+          <TutorTopicPicker
+            topics={tutorTopics}
+            recentTutorConversations={recentTutorConversations}
+          />
+        ) : tab === "chat" ? (
+          <AIChat
+            suggestedPrompts={assistantPrompts}
+            emptyMessage="Ask about any of your courses — planning, priorities, study strategies, exam prep."
+            placeholder="Ask across all your courses... (Enter to send)"
+          />
+        ) : (
+          <StudyPlanPanel />
+        )}
+      </div>
     </div>
   );
 }

@@ -61,6 +61,9 @@ function extractScheduleSection(html) {
 
 (async function canvasSync() {
   const BASE = window.location.origin + "/api/v1";
+  const AUTO_IMPORT_PDF_MAX_BYTES = 10_000_000;
+  const MATERIAL_CANDIDATE_MAX_BYTES = 20_000_000;
+  const SYLLABUS_LINK_SCAN_MAX_PDFS = 40;
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -78,6 +81,102 @@ function extractScheduleSection(html) {
       next = match ? match[1] : null;
     }
     return results;
+  }
+
+  async function mapWithConcurrency(items, concurrency, mapper) {
+    if (!Array.isArray(items) || items.length === 0) return [];
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(Math.max(1, Number(concurrency) || 1), items.length);
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index], index);
+      }
+    }));
+
+    return results;
+  }
+
+  async function fetchCanvasFileInfo(courseId, fileId) {
+    try {
+      const [fileInfo] = await fetchAll(`${BASE}/courses/${courseId}/files/${fileId}`);
+      return fileInfo ?? null;
+    } catch {
+      try {
+        const [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
+        return fileInfo ?? null;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  function fileLooksPdf(fileInfo, fallbackName = "") {
+    const contentType = String(fileInfo?.["content-type"] ?? fileInfo?.content_type ?? "");
+    const fileName = String(fileInfo?.display_name ?? fallbackName ?? "");
+    return contentType.includes("pdf") || fileName.toLowerCase().endsWith(".pdf");
+  }
+
+  function resolveCanvasHref(rawHref) {
+    if (!rawHref) return "";
+    try {
+      return new URL(rawHref, window.location.href).toString();
+    } catch {
+      return rawHref;
+    }
+  }
+
+  function extractCanvasFileId(href) {
+    const match = String(href ?? "").match(/\/(?:courses\/\d+\/)?files\/(\d+)(?:\/|$|[?#])/i);
+    return match?.[1] ?? null;
+  }
+
+  function extractLinkedPdfRefs(html) {
+    if (!html) return [];
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const refs = [];
+      const seen = new Set();
+
+      for (const a of doc.querySelectorAll("a[href]")) {
+        const href = resolveCanvasHref(a.getAttribute("href") ?? "");
+        if (!href) continue;
+
+        const label = a.textContent?.trim() || null;
+        const canvasFileId = extractCanvasFileId(href);
+        if (canvasFileId) {
+          const key = `canvas:${canvasFileId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          refs.push({ kind: "canvas", fileId: canvasFileId, href, label });
+          continue;
+        }
+
+        if (/\.pdf(?:$|[?#])/i.test(href)) {
+          const sourceKey = normalizeExternalSourceKey(href);
+          const key = `external:${sourceKey}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          refs.push({ kind: "external", href, label, sourceKey });
+        }
+      }
+
+      return refs;
+    } catch {
+      return [];
+    }
+  }
+
+  function buildMaterialContextName(moduleName, pageTitle = null) {
+    const normalizedModuleName = String(moduleName ?? "").trim() || "Canvas Page";
+    const normalizedPageTitle = String(pageTitle ?? "").trim();
+    if (!normalizedPageTitle) return normalizedModuleName;
+    if (normalizedModuleName.toLowerCase() === normalizedPageTitle.toLowerCase()) {
+      return normalizedModuleName;
+    }
+    return `${normalizedModuleName} - ${normalizedPageTitle}`;
   }
 
   function findCourseMediaGalleryTab(navTabs) {
@@ -433,6 +532,7 @@ function extractScheduleSection(html) {
       // much more reliable than the files endpoint which is often restricted.
       const rawModules = [];
       const modulePageUrls = new Set();
+      const modulePageItems = [];
       try {
         const fetched = await fetchAll(
           `${BASE}/courses/${course.id}/modules?include[]=items&include[]=content_details&per_page=100`
@@ -443,7 +543,15 @@ function extractScheduleSection(html) {
           const topics   = items.filter((it) => ["Page", "SubHeader", "ExternalUrl"].includes(it.type)).map((it) => it.title).filter(Boolean);
           const readings = items.filter((it) => it.type === "File").map((it) => it.title).filter(Boolean);
           for (const it of items) {
-            if (it.type === "Page" && it.page_url) modulePageUrls.add(it.page_url);
+            if (it.type === "Page" && it.page_url) {
+              modulePageUrls.add(it.page_url);
+              modulePageItems.push({
+                moduleId: mod.id,
+                moduleName: mod.name ?? "Canvas Module",
+                pageUrl: it.page_url,
+                pageTitle: it.title ?? null,
+              });
+            }
           }
           payload.modules.push({ courseId: course.id, moduleId: mod.id, position: mod.position, name: mod.name, topics, readings });
         }
@@ -577,7 +685,9 @@ function extractScheduleSection(html) {
       // content_details.url is the Canvas API info endpoint, NOT a download URL.
       // Instead use content_id → GET /api/v1/files/:id to get the real download URL.
       // Fallback: course files endpoint (often restricted for students).
-      // Strategy: name-match first, then peek inside unmatched ones. Cap at 3.
+      // Strategy: name-match first, then peek inside unmatched ones. We keep a
+      // generous cap for syllabus-page-linked PDFs because some schedules embed
+      // dozens of downloadable lecture PDFs.
       {
         const SYLLABUS_NAME_RE = /syllab|schedul|course[\s._-]?(guide|outline|info|overview|pack)/i;
         const toFetch       = []; // { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt }
@@ -594,43 +704,17 @@ function extractScheduleSection(html) {
         const htmlToScan = course._rawSyllabusBody ?? course.syllabusBody;
         if (htmlToScan) {
           try {
-            const doc = new DOMParser().parseFromString(htmlToScan, "text/html");
-            for (const a of doc.querySelectorAll("a[href]")) {
-              // Use getAttribute to get the raw href value — DOMParser documents
-              // have base URL "about:blank" so a.href may not resolve root-relative
-              // Canvas paths (e.g. /courses/123/files/456) into valid https:// URLs.
-              const rawHref = a.getAttribute("href") ?? "";
-              // Resolve root-relative paths manually against the current Canvas origin.
-              const href = rawHref.startsWith("http")
-                ? rawHref
-                : rawHref.startsWith("/")
-                  ? window.location.origin + rawHref
-                  : rawHref;
-              if (!href) continue;
-              // Canvas inline file: /courses/:id/files/:fileId[/download]
-              const canvasMatch = href.match(/\/courses\/\d+\/files\/(\d+)/);
-              if (canvasMatch) {
-                const fileId = canvasMatch[1];
+            const linkedPdfRefs = extractLinkedPdfRefs(htmlToScan);
+            for (const ref of linkedPdfRefs) {
+              if (ref.kind === "canvas") {
+                const fileId = ref.fileId;
                 if (seenIds.has(fileId)) continue;
                 seenIds.add(fileId);
                 try {
-                  // Try course-scoped endpoint first (students often can't access
-                  // the global /files/:id endpoint), then fall back to global.
-                  let fileInfo;
-                  try {
-                    [fileInfo] = await fetchAll(`${BASE}/courses/${course.id}/files/${fileId}`);
-                  } catch {
-                    [fileInfo] = await fetchAll(`${BASE}/files/${fileId}`);
-                  }
-                  // Canvas returns various content-type values for PDFs:
-                  // "application/pdf", "application/pdf; charset=binary",
-                  // "application/octet-stream", or sometimes nothing.
-                  // Fall back to checking the filename extension.
-                  const ct = fileInfo?.["content-type"] ?? "";
-                  const isPdf = ct.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
-                  if (fileInfo?.url && isPdf && (fileInfo.size ?? 0) < 5_000_000) {
-                    const name = fileInfo.display_name ?? a.textContent?.trim() ?? "syllabus.pdf";
-                    console.log("[content] Source 0 found PDF:", name, ct);
+                  const fileInfo = await fetchCanvasFileInfo(course.id, fileId);
+                  if (fileInfo?.url && fileLooksPdf(fileInfo, ref.label ?? "syllabus.pdf") && (fileInfo.size ?? 0) < AUTO_IMPORT_PDF_MAX_BYTES) {
+                    const name = fileInfo.display_name ?? ref.label ?? "syllabus.pdf";
+                    console.log("[content] Source 0 found PDF:", name, fileInfo?.["content-type"] ?? "");
                     toFetch.push({
                       name,
                       url: fileInfo.url,
@@ -643,20 +727,22 @@ function extractScheduleSection(html) {
                 } catch (err) {
                   console.warn("[content] Source 0: file API failed for fileId", fileId, err?.message ?? err);
                 }
-              } else if (/\.pdf(\?|$)/i.test(href) && !seenIds.has(href)) {
+              } else {
                 // Direct external PDF link
-                seenIds.add(href);
-                const name = a.textContent?.trim() || "syllabus.pdf";
+                const sourceKey = ref.sourceKey ?? normalizeExternalSourceKey(ref.href);
+                if (seenIds.has(sourceKey)) continue;
+                seenIds.add(sourceKey);
+                const name = ref.label || "syllabus.pdf";
                 toFetch.push({
                   name,
-                  url: href,
-                  sourceKey: normalizeExternalSourceKey(href),
+                  url: ref.href,
+                  sourceKey,
                   sourceKind: "canvas_syllabus",
                   remoteSize: null,
                   remoteUpdatedAt: null,
                 });
               }
-              if (toFetch.length >= 3) break;
+              if (toFetch.length >= SYLLABUS_LINK_SCAN_MAX_PDFS) break;
             }
           } catch { /* DOMParser failure — skip */ }
         }
@@ -669,8 +755,9 @@ function extractScheduleSection(html) {
         for (const mod of earlyMods) {
           for (const item of (mod.items ?? [])) {
             if (item.type !== "File" || !item.content_id) continue;
-            if (seenIds.has(item.content_id)) continue;
-            seenIds.add(item.content_id);
+            const contentId = String(item.content_id);
+            if (seenIds.has(contentId)) continue;
+            seenIds.add(contentId);
             if (SYLLABUS_NAME_RE.test(item.title ?? "")) {
               // Name match — fetch the real download URL.
               // Try the course-scoped endpoint first (more permissive for students),
@@ -684,7 +771,7 @@ function extractScheduleSection(html) {
                 }
                 const ct1 = fileInfo?.["content-type"] ?? "";
                 const isPdf1 = ct1.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
-                if (fileInfo?.url && isPdf1 && (fileInfo.size ?? 0) < 5_000_000) {
+                if (fileInfo?.url && isPdf1 && (fileInfo.size ?? 0) < AUTO_IMPORT_PDF_MAX_BYTES) {
                   const name1 = fileInfo.display_name ?? item.title;
                   console.log("[content] Source 1 found PDF:", name1, ct1);
                   toFetch.push({
@@ -706,7 +793,7 @@ function extractScheduleSection(html) {
               peekCandidates.push({
                 title: item.title,
                 content_id: item.content_id,
-                sourceKey: String(item.content_id),
+                sourceKey: contentId,
                 remoteSize: null,
                 remoteUpdatedAt: null,
               });
@@ -720,14 +807,15 @@ function extractScheduleSection(html) {
             `${BASE}/courses/${course.id}/files?content_types[]=application/pdf&per_page=100&sort=created_at&order=asc`
           );
           for (const f of files) {
-            if (!f.url || (f.size ?? 0) === 0 || (f.size ?? 0) > 5_000_000) continue;
-            if (seenIds.has(f.id)) continue;
-            seenIds.add(f.id);
+            if (!f.url || (f.size ?? 0) === 0 || (f.size ?? 0) > AUTO_IMPORT_PDF_MAX_BYTES) continue;
+            const fileId = String(f.id);
+            if (seenIds.has(fileId)) continue;
+            seenIds.add(fileId);
             if (SYLLABUS_NAME_RE.test(f.display_name ?? "")) {
               toFetch.push({
                 name: f.display_name,
                 url: f.url,
-                sourceKey: String(f.id),
+                sourceKey: fileId,
                 sourceKind: "canvas_syllabus",
                 remoteSize: f.size ?? null,
                 remoteUpdatedAt: f.updated_at ?? null,
@@ -736,7 +824,7 @@ function extractScheduleSection(html) {
               peekCandidates.push({
                 title: f.display_name,
                 url: f.url,
-                sourceKey: String(f.id),
+                sourceKey: fileId,
                 remoteSize: f.size ?? null,
                 remoteUpdatedAt: f.updated_at ?? null,
               });
@@ -753,11 +841,11 @@ function extractScheduleSection(html) {
               let url = candidate.url;
               let fileInfo = null;
               if (!url && candidate.content_id) {
-                [fileInfo] = await fetchAll(`${BASE}/files/${candidate.content_id}`);
+                fileInfo = await fetchCanvasFileInfo(course.id, candidate.content_id);
                 const ct2 = fileInfo?.["content-type"] ?? "";
                 const isPdf2 = ct2.includes("pdf") || (fileInfo?.display_name ?? "").toLowerCase().endsWith(".pdf");
                 if (!fileInfo?.url || !isPdf2) continue;
-                if ((fileInfo.size ?? 0) > 5_000_000) continue;
+                if ((fileInfo.size ?? 0) > AUTO_IMPORT_PDF_MAX_BYTES) continue;
                 url = fileInfo.url;
               }
               if (url && await peekIsSyllabus(url)) {
@@ -775,7 +863,7 @@ function extractScheduleSection(html) {
         }
 
         // ── Collect syllabus URLs for offscreen document to fetch + extract ──
-        const syllabusImports = scoutMode ? [] : toFetch.slice(0, 3);
+        const syllabusImports = scoutMode ? [] : toFetch;
         for (const { name, url, sourceKey, sourceKind, remoteSize, remoteUpdatedAt } of syllabusImports) {
           if (!shouldImportSource(materialState, sourceKind, sourceKey, remoteUpdatedAt, remoteSize ?? null, sourceKey)) continue;
           course.syllabusFileUrls.push({
@@ -812,7 +900,7 @@ function extractScheduleSection(html) {
             : [],
         );
 
-        // Step 2: scan all non-orientation modules
+        // Step 2: scan all non-orientation module file items
         for (const mod of rawModules) {
           // Skip orientation/syllabus modules — Source 1 already covered these
           if (SYLLABUS_MOD_RE.test(mod.name ?? "")) continue;
@@ -846,7 +934,7 @@ function extractScheduleSection(html) {
 
             // Skip textbook-sized files from the candidate list (> 20 MB)
             const candidateSize = details.size ?? 0;
-            if (candidateSize > 20_000_000) continue;
+            if (candidateSize > MATERIAL_CANDIDATE_MAX_BYTES) continue;
 
             // Add to candidates list — no extra API call needed
             course.materialCandidates.push({
@@ -863,7 +951,7 @@ function extractScheduleSection(html) {
 
             if (isAutoSelect || isRequested) {
               try {
-                const [fileInfo] = await fetchAll(`${BASE}/files/${cid}`);
+                const fileInfo = await fetchCanvasFileInfo(course.id, cid);
                 const ct = fileInfo?.["content-type"] ?? "";
                 const name = fileInfo?.display_name ?? candidateFileName;
                 const isPdf = ct.includes("pdf") || name.toLowerCase().endsWith(".pdf");
@@ -877,7 +965,7 @@ function extractScheduleSection(html) {
                   size,
                   cid,
                 );
-                if (fileInfo?.url && isPdf && size > 0 && size < 10_000_000 && shouldImport) {
+                if (fileInfo?.url && isPdf && size > 0 && size < AUTO_IMPORT_PDF_MAX_BYTES && shouldImport) {
                   course.materialFileUrls.push({
                     fileName: name,
                     url: fileInfo.url,
@@ -892,6 +980,110 @@ function extractScheduleSection(html) {
               } catch { /* skip */ }
             }
           }
+        }
+
+        // Step 3: walk module Page items and pull in linked PDFs sitting inside
+        // ordinary lecture pages (for example a Page that contains slide download
+        // links rather than direct File module items).
+        const pageScanTargets = [];
+        const seenPageUrls = new Set();
+        for (const pageItem of modulePageItems) {
+          if (SYLLABUS_MOD_RE.test(pageItem.moduleName ?? "")) continue;
+          if (!pageItem.pageUrl || seenPageUrls.has(pageItem.pageUrl)) continue;
+          if (scoutMode && !scoutPreferredModuleIds.has(pageItem.moduleId)) continue;
+          seenPageUrls.add(pageItem.pageUrl);
+          pageScanTargets.push(pageItem);
+        }
+
+        if (pageScanTargets.length > 0) {
+          await mapWithConcurrency(pageScanTargets, scoutMode ? 3 : 5, async (pageItem) => {
+            try {
+              const [pageData] = await fetchAll(`${BASE}/courses/${course.id}/pages/${pageItem.pageUrl}`);
+              const bodyHtml = pageData?.body?.trim();
+              if (!bodyHtml || bodyHtml.length < 25) return;
+
+              const linkedPdfRefs = extractLinkedPdfRefs(bodyHtml);
+              if (linkedPdfRefs.length === 0) return;
+
+              let candidateCount = 0;
+              let downloadCount = 0;
+
+              for (const ref of linkedPdfRefs) {
+                let sourceKey = null;
+                let fileName = ref.label ?? "linked.pdf";
+                let downloadUrl = null;
+                let remoteSize = null;
+                let remoteUpdatedAt = null;
+
+                if (ref.kind === "canvas") {
+                  sourceKey = String(ref.fileId);
+                  if (materialSeenIds.has(sourceKey)) continue;
+
+                  const fileInfo = await fetchCanvasFileInfo(course.id, ref.fileId);
+                  const resolvedName = fileInfo?.display_name ?? fileName;
+                  if (!fileInfo?.url || !fileLooksPdf(fileInfo, resolvedName)) continue;
+
+                  remoteSize = fileInfo.size ?? null;
+                  if (typeof remoteSize === "number" && remoteSize > MATERIAL_CANDIDATE_MAX_BYTES) continue;
+
+                  fileName = resolvedName;
+                  downloadUrl = fileInfo.url;
+                  remoteUpdatedAt = fileInfo.updated_at ?? null;
+                } else {
+                  sourceKey = ref.sourceKey ?? normalizeExternalSourceKey(ref.href);
+                  if (materialSeenIds.has(sourceKey)) continue;
+                  downloadUrl = ref.href;
+                }
+
+                materialSeenIds.add(sourceKey);
+                candidateCount++;
+
+                course.materialCandidates.push({
+                  fileName,
+                  moduleName: buildMaterialContextName(pageItem.moduleName, pageItem.pageTitle),
+                  contentId: sourceKey,
+                  sourceKind: "canvas_module",
+                  remoteSize,
+                  remoteUpdatedAt,
+                });
+
+                const isRequested = requestedContentIds.has(sourceKey);
+                const shouldImport =
+                  isRequested ||
+                  shouldImportSource(
+                    materialState,
+                    "canvas_module",
+                    sourceKey,
+                    remoteUpdatedAt,
+                    remoteSize,
+                    sourceKey,
+                  );
+                const withinAutoImportSize = typeof remoteSize !== "number" || remoteSize < AUTO_IMPORT_PDF_MAX_BYTES;
+
+                if (downloadUrl && withinAutoImportSize && shouldImport) {
+                  course.materialFileUrls.push({
+                    fileName,
+                    url: downloadUrl,
+                    sourceKey,
+                    sourceKind: "canvas_module",
+                    remoteSize,
+                    remoteUpdatedAt,
+                  });
+                  downloadCount++;
+                }
+              }
+
+              if (candidateCount > 0) {
+                console.log(
+                  `[scout] ${course.name} | page "${pageItem.pageTitle ?? pageItem.pageUrl}": linkedPdfCandidates=${candidateCount} downloads=${downloadCount}`
+                );
+              }
+            } catch (err) {
+              console.warn(
+                `[scout] ${course.name}: failed to inspect page "${pageItem.pageTitle ?? pageItem.pageUrl}" for linked files — ${err?.message ?? err}`
+              );
+            }
+          });
         }
 
         // ── Per-course Scout diagnostic ───────────────────────────────────

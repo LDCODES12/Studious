@@ -185,6 +185,21 @@ function cloneCourseForMaterialBatch(course) {
   return clone;
 }
 
+function canvasModuleCandidateForMaterial(course, material) {
+  const sourceKey = material.sourceKey;
+  if (!sourceKey) return null;
+  const existing = (course.materialCandidates ?? []).find((candidate) => candidate.contentId === sourceKey);
+  if (existing) return { ...existing };
+  return {
+    fileName: material.fileName,
+    moduleName: "Canvas-linked download",
+    contentId: sourceKey,
+    sourceKind: "canvas_module",
+    remoteSize: material.remoteSize ?? null,
+    remoteUpdatedAt: material.remoteUpdatedAt ?? null,
+  };
+}
+
 function mediaCandidateForMaterial(course, material) {
   const sourceKey = material.sourceKey;
   if (!sourceKey) return null;
@@ -259,6 +274,98 @@ function splitOversizedMediaEntry(entry) {
   });
 
   return chunks;
+}
+
+function extractCanvasModuleMaterialEntries(payload) {
+  const entries = [];
+
+  for (const course of payload.courses ?? []) {
+    const keptMaterials = [];
+    for (const material of course.materialTexts ?? []) {
+      if (
+        material.sourceKind !== "canvas_module" ||
+        !material.sourceKey ||
+        typeof material.text !== "string" ||
+        material.text.length === 0
+      ) {
+        keptMaterials.push(material);
+        continue;
+      }
+
+      entries.push({
+        course,
+        material: { ...material },
+        candidate: canvasModuleCandidateForMaterial(course, material),
+      });
+    }
+    course.materialTexts = keptMaterials;
+  }
+
+  return entries;
+}
+
+function buildCanvasModuleMaterialPayload(entries) {
+  const courseMap = new Map();
+
+  for (const entry of entries) {
+    const key = String(entry.course.id);
+    let course = courseMap.get(key);
+    if (!course) {
+      course = cloneCourseForMaterialBatch(entry.course);
+      courseMap.set(key, course);
+    }
+
+    course.materialTexts.push(entry.material);
+
+    if (entry.candidate) {
+      const exists = course.materialCandidates.some((candidate) => candidate.contentId === entry.candidate.contentId);
+      if (!exists) course.materialCandidates.push(entry.candidate);
+    }
+  }
+
+  return {
+    syncMode: "scout",
+    courses: [...courseMap.values()],
+    assignments: [],
+    modules: [],
+    announcements: [],
+    assignmentGroups: [],
+  };
+}
+
+function createCanvasModuleMaterialBatches(entries) {
+  const batches = [];
+  let currentEntries = [];
+
+  for (const entry of entries) {
+    const trialEntries = [...currentEntries, entry];
+    const trialPayload = buildCanvasModuleMaterialPayload(trialEntries);
+    const trialBytes = importPayloadByteLength(trialPayload);
+
+    if (currentEntries.length > 0 && trialBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
+      const payload = buildCanvasModuleMaterialPayload(currentEntries);
+      batches.push({
+        payload,
+        materialCount: currentEntries.length,
+        bytes: importPayloadByteLength(payload),
+      });
+      currentEntries = [entry];
+      continue;
+    }
+
+    currentEntries = trialEntries;
+  }
+
+  if (currentEntries.length > 0) {
+    const payload = buildCanvasModuleMaterialPayload(currentEntries);
+    batches.push({
+      payload,
+      materialCount: currentEntries.length,
+      bytes: importPayloadByteLength(payload),
+    });
+  }
+
+  return batches;
 }
 
 function extractMediaTranscriptEntries(payload) {
@@ -711,6 +818,16 @@ async function handleCanvasData(payload) {
       );
     }
 
+    const canvasModuleMaterialEntries = extractCanvasModuleMaterialEntries(payload);
+    const canvasModuleMaterialBatches = createCanvasModuleMaterialBatches(canvasModuleMaterialEntries);
+    if (canvasModuleMaterialEntries.length > 0) {
+      syncLog("canvas_module_material_batch_plan", {
+        materials: canvasModuleMaterialEntries.length,
+        batches: canvasModuleMaterialBatches.length,
+        batchBytes: canvasModuleMaterialBatches.map((batch) => batch.bytes),
+      });
+    }
+
     const canvasImport = await postCanvasImportPayload(scUrl, apiToken, payload, "main Canvas sync");
     const result = canvasImport.result;
 
@@ -719,6 +836,39 @@ async function handleCanvasData(payload) {
     }
 
     syncLog("canvas_import_done", { status: canvasImport.status, bytes: canvasImport.bytes });
+
+    if (canvasModuleMaterialBatches.length > 0) {
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 94,
+        label: `Saving ${canvasModuleMaterialEntries.length} course file${canvasModuleMaterialEntries.length !== 1 ? "s" : ""}…`,
+      });
+
+      let uploadedMaterials = 0;
+      for (let index = 0; index < canvasModuleMaterialBatches.length; index++) {
+        const batch = canvasModuleMaterialBatches[index];
+        const batchImport = await postCanvasImportPayload(
+          scUrl,
+          apiToken,
+          batch.payload,
+          `course material batch ${index + 1}/${canvasModuleMaterialBatches.length}`,
+        );
+        uploadedMaterials += batch.materialCount;
+        syncLog("canvas_module_material_batch_done", {
+          batch: index + 1,
+          batches: canvasModuleMaterialBatches.length,
+          materials: batch.materialCount,
+          uploadedMaterials,
+          status: batchImport.status,
+          bytes: batchImport.bytes,
+        });
+      }
+
+      result.canvasMaterials = {
+        queued: canvasModuleMaterialEntries.length,
+        batches: canvasModuleMaterialBatches.length,
+      };
+    }
 
     // ── Step 3b: Discover Kaltura / Media Gallery transcript attachments ────
     // The main Canvas import is already saved before this slower media phase.
@@ -730,7 +880,7 @@ async function handleCanvasData(payload) {
         return course;
       });
     if (coursesWithMediaGallery.length > 0) {
-      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 94, label: "Checking lecture transcripts…" });
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 95, label: "Checking lecture transcripts…" });
       try {
         await syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, coursesWithMediaGallery);
       } catch (err) {
@@ -755,7 +905,7 @@ async function handleCanvasData(payload) {
     if (mediaTranscriptBatches.length > 0) {
       broadcastToPopup({
         type: "SYNC_PROGRESS",
-        percent: 95,
+        percent: 96,
         label: `Saving ${mediaTranscriptEntries.length} lecture transcript${mediaTranscriptEntries.length !== 1 ? "s" : ""}…`,
       });
 
