@@ -105,6 +105,11 @@ export default async function StudyToolsPage() {
           },
         },
         materials: {
+          where: {
+            sourceKind: {
+              notIn: ["canvas_page", "canvas_syllabus_page", "canvas_announcement"],
+            },
+          },
           select: {
             id: true,
             fileName: true,

@@ -40,7 +40,14 @@ export default async function CoursePage({ params }: CoursePageProps) {
         },
       },
       topics: { orderBy: { weekNumber: "asc" } },
-      materials: { orderBy: { uploadedAt: "desc" } },
+      materials: {
+        where: {
+          sourceKind: {
+            notIn: ["canvas_page", "canvas_syllabus_page", "canvas_announcement"],
+          },
+        },
+        orderBy: { uploadedAt: "desc" },
+      },
       announcements: { orderBy: { postedAt: "desc" }, take: 10 },
     },
   }), db.task.findMany({

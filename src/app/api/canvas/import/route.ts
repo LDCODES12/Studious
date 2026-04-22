@@ -93,6 +93,8 @@ interface CanvasCourse {
   syllabusTexts?: SyllabusText[];
   /** Pre-extracted text from non-syllabus course materials (problem sets, lecture notes, etc.) */
   materialTexts?: SyllabusText[];
+  /** Pre-extracted text from Canvas Pages discovered during sync */
+  pageTexts?: SyllabusText[];
   /** All PDF file metadata from non-orientation modules — stored as candidates for student selection */
   materialCandidates?: MaterialCandidate[];
   /** ISO start date of the course term (e.g. "2026-01-13T00:00:00Z") */
@@ -317,6 +319,92 @@ function classifyImportedPdfSource(
   };
 }
 
+function summarizeCanvasTextDocumentSource(
+  sourceKind: MaterialSourceKind,
+  sourceRole: "timeline" | "content" | "mixed" | "unknown",
+): string {
+  if (sourceKind === "canvas_syllabus_page") {
+    return "Canvas syllabus text imported from the course syllabus page.";
+  }
+  if (sourceKind === "canvas_announcement") {
+    return "Canvas announcement imported from the course updates feed.";
+  }
+  if (sourceRole === "timeline") {
+    return "Canvas page imported from the course pages/modules and identified as schedule-relevant.";
+  }
+  if (sourceRole === "mixed") {
+    return "Canvas page imported from the course pages/modules with both schedule and content signals.";
+  }
+  return "Canvas page imported from the course pages/modules.";
+}
+
+function classifyCanvasTextDocument(
+  sourceKind: MaterialSourceKind,
+  fileName: string,
+  text: string,
+): {
+  authority: ScheduleSourceAuthority;
+  detectedType: "syllabus" | "lecture_notes" | "lecture_slides" | "other";
+  sourceRole: "timeline" | "content" | "mixed" | "unknown";
+  storedForAI: boolean;
+  summary: string;
+} {
+  const rawText = text.trim();
+  const scheduleWindow = bestWindow(rawText);
+  const score = scheduleScore(scheduleWindow);
+  const heuristic = classifyImportedPdfSource(fileName, scheduleWindow, score);
+
+  if (sourceKind === "canvas_syllabus_page") {
+    const authority = heuristic.authority === "enrichment" ? "supporting" : heuristic.authority;
+    const sourceRole = authority === "primary" ? "timeline" : "mixed";
+    return {
+      authority,
+      detectedType: "syllabus",
+      sourceRole,
+      storedForAI: false,
+      summary: summarizeCanvasTextDocumentSource(sourceKind, sourceRole),
+    };
+  }
+
+  if (sourceKind === "canvas_announcement") {
+    const sourceRole =
+      /\b(exam|quiz|midterm|final|deadline|due date|schedule|lecture|class|office hour|cancel(?:led)?|review)\b/i.test(
+        `${fileName}\n${rawText}`,
+      )
+        ? "mixed"
+        : "unknown";
+    return {
+      authority: "enrichment",
+      detectedType: "other",
+      sourceRole,
+      storedForAI: false,
+      summary: summarizeCanvasTextDocumentSource(sourceKind, sourceRole),
+    };
+  }
+
+  if (heuristic.authority !== "enrichment") {
+    return {
+      authority: heuristic.authority,
+      detectedType: "syllabus",
+      sourceRole: heuristic.sourceRole,
+      storedForAI: false,
+      summary: summarizeCanvasTextDocumentSource(sourceKind, heuristic.sourceRole),
+    };
+  }
+
+  const contentLikePage = /\b(lecture|class|unit|week|lab|discussion|review|exam|notes?|worksheet|guide)\b/i.test(
+    fileName,
+  );
+  const sourceRole = contentLikePage ? "content" : "unknown";
+  return {
+    authority: heuristic.authority,
+    detectedType: "other",
+    sourceRole,
+    storedForAI: false,
+    summary: summarizeCanvasTextDocumentSource(sourceKind, sourceRole),
+  };
+}
+
 function hasOverlappingDateRanges(
   aStart: string,
   aEnd: string,
@@ -342,6 +430,27 @@ function resolveCanvasSourceKey(
 
 function materialStateKey(sourceKind: MaterialSourceKind, sourceKey: string): string {
   return `${sourceKind}:${sourceKey}`;
+}
+
+function isCanvasFileSourceKind(sourceKind: string | null | undefined): sourceKind is MaterialSourceKind {
+  return sourceKind === "canvas_module" || sourceKind === "canvas_syllabus";
+}
+
+function canvasFileSourceKindPriority(sourceKind: string | null | undefined): number {
+  if (sourceKind === "canvas_module") return 2;
+  if (sourceKind === "canvas_syllabus") return 1;
+  return 0;
+}
+
+function canonicalCanvasFileSourceKind(
+  incoming: MaterialSourceKind,
+  existing?: string | null,
+): MaterialSourceKind {
+  if (!isCanvasFileSourceKind(incoming)) return incoming;
+  if (!existing || !isCanvasFileSourceKind(existing)) return incoming;
+  return canvasFileSourceKindPriority(existing) >= canvasFileSourceKindPriority(incoming)
+    ? existing
+    : incoming;
 }
 
 function deriveCandidateStatus(args: {
@@ -380,6 +489,7 @@ async function findExistingSyncedMaterial(
     where: { courseId, sourceKind, sourceKey },
     select: {
       id: true,
+      sourceKind: true,
       contentHash: true,
       sourceUpdatedAt: true,
       detectedType: true,
@@ -393,6 +503,35 @@ async function findExistingSyncedMaterial(
   });
   if (byKey) return byKey;
 
+  if (isCanvasFileSourceKind(sourceKind)) {
+    const byCrossKindKey = await db.courseMaterial.findFirst({
+      where: {
+        courseId,
+        sourceKey,
+        sourceKind: { in: ["canvas_module", "canvas_syllabus"] },
+      },
+      orderBy: [
+        { sourceKind: "asc" },
+        { lastSyncedAt: "desc" },
+        { uploadedAt: "desc" },
+      ],
+      select: {
+        id: true,
+        sourceKind: true,
+        contentHash: true,
+        sourceUpdatedAt: true,
+        detectedType: true,
+        sourceRole: true,
+        summary: true,
+        relatedTopics: true,
+        storedForAI: true,
+        autoStoredForAI: true,
+        userStoredForAIOverride: true,
+      },
+    });
+    if (byCrossKindKey) return byCrossKindKey;
+  }
+
   if (sourceKind === "canvas_module" || sourceKind === "canvas_media") {
     const keylessMatches = await db.courseMaterial.findMany({
       where: {
@@ -403,6 +542,7 @@ async function findExistingSyncedMaterial(
       },
       select: {
         id: true,
+        sourceKind: true,
         contentHash: true,
         sourceUpdatedAt: true,
         detectedType: true,
@@ -432,6 +572,7 @@ async function findExistingSyncedMaterial(
       },
       select: {
         id: true,
+        sourceKind: true,
         contentHash: true,
         sourceUpdatedAt: true,
         detectedType: true,
@@ -448,9 +589,109 @@ async function findExistingSyncedMaterial(
   return null;
 }
 
+async function dedupeCanvasFileMaterials(courseId: string): Promise<number> {
+  const materials = await db.courseMaterial.findMany({
+    where: {
+      courseId,
+      sourceKind: { in: ["canvas_module", "canvas_syllabus"] },
+      sourceKey: { not: null },
+    },
+    select: {
+      id: true,
+      sourceKind: true,
+      sourceKey: true,
+      rawText: true,
+      relatedTopics: true,
+      autoStoredForAI: true,
+      userStoredForAIOverride: true,
+      sourceUpdatedAt: true,
+      lastSyncedAt: true,
+      uploadedAt: true,
+    },
+    orderBy: [{ lastSyncedAt: "desc" }, { uploadedAt: "desc" }],
+  });
+
+  const byKey = new Map<string, typeof materials>();
+  for (const material of materials) {
+    if (!material.sourceKey) continue;
+    const bucket = byKey.get(material.sourceKey) ?? [];
+    bucket.push(material);
+    byKey.set(material.sourceKey, bucket);
+  }
+
+  let deleted = 0;
+
+  for (const [sourceKey, bucket] of byKey) {
+    const sourceKinds = new Set(bucket.map((material) => material.sourceKind));
+    if (sourceKinds.size <= 1) continue;
+
+    const ranked = [...bucket].sort((a, b) => {
+      const sourcePriority = canvasFileSourceKindPriority(b.sourceKind as MaterialSourceKind)
+        - canvasFileSourceKindPriority(a.sourceKind as MaterialSourceKind);
+      if (sourcePriority !== 0) return sourcePriority;
+
+      const updatedDelta =
+        (b.sourceUpdatedAt?.getTime() ?? 0) - (a.sourceUpdatedAt?.getTime() ?? 0);
+      if (updatedDelta !== 0) return updatedDelta;
+
+      const syncDelta =
+        (b.lastSyncedAt?.getTime() ?? 0) - (a.lastSyncedAt?.getTime() ?? 0);
+      if (syncDelta !== 0) return syncDelta;
+
+      const rawTextDelta = (b.rawText?.length ?? 0) - (a.rawText?.length ?? 0);
+      if (rawTextDelta !== 0) return rawTextDelta;
+
+      return b.uploadedAt.getTime() - a.uploadedAt.getTime();
+    });
+
+    const winner = ranked[0];
+    const losers = ranked.slice(1);
+    if (losers.length === 0) continue;
+
+    const canonicalKind = canonicalCanvasFileSourceKind(
+      winner.sourceKind as MaterialSourceKind,
+      null,
+    );
+    const mergedRelatedTopics = Array.from(
+      new Set(ranked.flatMap((material) => material.relatedTopics ?? [])),
+    );
+    const mergedAutoStoredForAI = ranked.some((material) => material.autoStoredForAI);
+    const mergedSourceUpdatedAt = ranked
+      .map((material) => material.sourceUpdatedAt)
+      .filter((value): value is Date => Boolean(value))
+      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+
+    await db.courseMaterial.update({
+      where: { id: winner.id },
+      data: {
+        sourceKind: canonicalKind,
+        relatedTopics: mergedRelatedTopics,
+        autoStoredForAI: mergedAutoStoredForAI,
+        storedForAI: effectiveStoredForAI(
+          mergedAutoStoredForAI,
+          winner.userStoredForAIOverride,
+        ),
+        sourceUpdatedAt: mergedSourceUpdatedAt,
+      },
+    });
+
+    await db.courseMaterial.deleteMany({
+      where: { id: { in: losers.map((material) => material.id) } },
+    });
+
+    deleted += losers.length;
+    console.log(
+      `[sync] deduped ${losers.length} duplicate canvas file material(s) for course ${courseId} sourceKey=${sourceKey}`,
+    );
+  }
+
+  return deleted;
+}
+
 async function saveSyncedMaterial(args: {
   existing?: {
     id: string;
+    sourceKind: string;
     userStoredForAIOverride: boolean | null;
   } | null;
   courseId: string;
@@ -466,6 +707,7 @@ async function saveSyncedMaterial(args: {
   sourceUpdatedAt?: string | Date | null;
   autoStoredForAI: boolean;
 }) {
+  const sourceKind = canonicalCanvasFileSourceKind(args.sourceKind, args.existing?.sourceKind);
   const storedForAI = effectiveStoredForAI(
     args.autoStoredForAI,
     args.existing?.userStoredForAIOverride,
@@ -479,7 +721,7 @@ async function saveSyncedMaterial(args: {
         fileName: args.fileName,
         detectedType: args.detectedType,
         sourceRole: args.sourceRole,
-        sourceKind: args.sourceKind,
+        sourceKind,
         sourceKey: args.sourceKey,
         summary: args.summary,
         relatedTopics: args.relatedTopics,
@@ -501,7 +743,7 @@ async function saveSyncedMaterial(args: {
       fileName: args.fileName,
       detectedType: args.detectedType,
       sourceRole: args.sourceRole,
-      sourceKind: args.sourceKind,
+      sourceKind,
       sourceKey: args.sourceKey,
       summary: args.summary,
       relatedTopics: args.relatedTopics,
@@ -515,6 +757,61 @@ async function saveSyncedMaterial(args: {
     },
     select: { id: true },
   });
+}
+
+async function saveImportedTextDocument(args: {
+  courseId: string;
+  fileName: string;
+  text: string;
+  sourceKind: MaterialSourceKind;
+  sourceKey: string;
+  sourceUpdatedAt?: string | Date | null;
+  classification: {
+    detectedType: "syllabus" | "lecture_notes" | "lecture_slides" | "other";
+    sourceRole: "timeline" | "content" | "mixed" | "unknown";
+    summary: string;
+    storedForAI: boolean;
+  };
+}) {
+  const rawText = args.text.trim();
+  if (rawText.length === 0) return null;
+
+  const existing = await findExistingSyncedMaterial(
+    args.courseId,
+    args.sourceKind,
+    args.sourceKey,
+    args.fileName,
+  );
+  const contentHash = hashMaterialText(rawText);
+  const material = await saveSyncedMaterial({
+    existing,
+    courseId: args.courseId,
+    fileName: args.fileName,
+    detectedType: args.classification.detectedType,
+    sourceRole: args.classification.sourceRole,
+    sourceKind: args.sourceKind,
+    sourceKey: args.sourceKey,
+    summary: args.classification.summary,
+    relatedTopics: [],
+    rawText: rawText.slice(0, 25_000),
+    contentHash,
+    sourceUpdatedAt: args.sourceUpdatedAt ?? null,
+    autoStoredForAI: args.classification.storedForAI,
+  });
+
+  if (!existing || existing.contentHash !== contentHash) {
+    try {
+      await updateMaterialSearchIndex({
+        materialId: material.id,
+        courseId: args.courseId,
+        sourceKind: args.sourceKind,
+        text: rawText,
+        contentHash,
+      });
+    } catch { /* search indexing never blocks import */ }
+  }
+
+  return material;
 }
 
 function shiftDateIntoTerm(dateStr: string | null, termStart: string | null, termEnd: string | null): string | null {
@@ -964,6 +1261,22 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
       const scCourseId = courseIdMap.get(c.id);
       if (!scCourseId) return;
 
+      const existingCourseRecord = await db.course.findUnique({
+        where: { id: scCourseId },
+        select: { timelineDiagnostics: true },
+      });
+      const existingTimelineDiagnostics =
+        existingCourseRecord?.timelineDiagnostics &&
+        typeof existingCourseRecord.timelineDiagnostics === "object" &&
+        !Array.isArray(existingCourseRecord.timelineDiagnostics)
+          ? existingCourseRecord.timelineDiagnostics as Record<string, unknown>
+          : null;
+      const existingTimelineQuality =
+        typeof existingTimelineDiagnostics?.timelineQuality === "string"
+          ? existingTimelineDiagnostics.timelineQuality
+          : null;
+      const existingUsedModuleScaffold = existingTimelineDiagnostics?.usedModuleScaffold === true;
+
       // ── a) Check whether AI topics already exist ─────────────────────────
       const existingAiTopics = await db.courseTopic.count({
         where: { courseId: scCourseId, canvasModuleId: null },
@@ -1002,12 +1315,12 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
 
       // If we already parsed this course's syllabus, don't overwrite unless the
       // stored AI timeline is clearly from a different term and therefore stale.
-      const shouldRunAI = existingAiTopics === 0 || staleAiTimeline;
+      const shouldRunAIBase = existingAiTopics === 0 || staleAiTimeline;
 
       const dbg: CourseDebug = {
         name: c.name,
         existingAiTopics,
-        shouldRunAI,
+        shouldRunAI: shouldRunAIBase,
         syllabusBody: null,
         syllabusTexts: [],
         candidates: [],
@@ -1098,6 +1411,86 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
         } catch (matErr) {
           console.error(`[sync] ${c.name}: material save failed for ${st.fileName}:`, matErr);
         }
+      }
+
+      // ── b1b) Persist Canvas-native text sources into the canonical corpus ──
+      if (c.syllabusBody) {
+        const bodyText = htmlToText(c.syllabusBody).trim();
+        if (bodyText.length >= 100) {
+          try {
+            await saveImportedTextDocument({
+              courseId: scCourseId,
+              fileName: "Canvas syllabus page",
+              text: bodyText,
+              sourceKind: "canvas_syllabus_page",
+              sourceKey: "syllabus-body",
+              classification: classifyCanvasTextDocument(
+                "canvas_syllabus_page",
+                "Canvas syllabus page",
+                bodyText,
+              ),
+            });
+          } catch (matErr) {
+            console.error(`[sync] ${c.name}: syllabus-body save failed:`, matErr);
+          }
+        }
+      }
+
+      const pageTexts = c.pageTexts ?? [];
+      if (pageTexts.length > 0) {
+        await Promise.all(
+          pageTexts
+            .filter((page) => page.text.trim().length >= 100)
+            .map(async (page) => {
+              try {
+                await saveImportedTextDocument({
+                  courseId: scCourseId,
+                  fileName: page.fileName,
+                  text: page.text,
+                  sourceKind: page.sourceKind ?? "canvas_page",
+                  sourceKey: resolveCanvasSourceKey(page.sourceKind ?? "canvas_page", page.fileName, page.sourceKey),
+                  sourceUpdatedAt: page.remoteUpdatedAt ?? null,
+                  classification: classifyCanvasTextDocument(
+                    page.sourceKind ?? "canvas_page",
+                    page.fileName,
+                    page.text,
+                  ),
+                });
+              } catch (matErr) {
+                console.error(`[sync] ${c.name}: page save failed for ${page.fileName}:`, matErr);
+              }
+            }),
+        );
+      }
+
+      const courseAnnouncements = announcements.filter(
+        (announcement) => announcement.courseId === c.id && typeof announcement.body === "string" && announcement.body.trim().length >= 40,
+      );
+      if (courseAnnouncements.length > 0) {
+        await Promise.all(
+          courseAnnouncements.map(async (announcement) => {
+            const bodyText = decodeAnnouncementBody(announcement.body).trim();
+            if (bodyText.length < 40) return;
+            const fileName = `Announcement - ${announcement.title}`;
+            try {
+              await saveImportedTextDocument({
+                courseId: scCourseId,
+                fileName,
+                text: bodyText,
+                sourceKind: "canvas_announcement",
+                sourceKey: `announcement:${announcement.canvasId}`,
+                sourceUpdatedAt: announcement.postedAt ?? null,
+                classification: classifyCanvasTextDocument(
+                  "canvas_announcement",
+                  fileName,
+                  bodyText,
+                ),
+              });
+            } catch (matErr) {
+              console.error(`[sync] ${c.name}: announcement save failed for ${announcement.title}:`, matErr);
+            }
+          }),
+        );
       }
 
       // ── b2) Course materials (problem sets, lecture notes, etc.) ─────────────
@@ -1208,6 +1601,15 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
       // ── b3) Material candidates — upsert all and preserve freshness state ──
       // Candidates remain in the database even after import so future scouts can
       // compare remote metadata against imported CourseMaterial freshness.
+      try {
+        const removedDuplicates = await dedupeCanvasFileMaterials(scCourseId);
+        if (removedDuplicates > 0) {
+          console.log(`[sync] ${c.name}: removed ${removedDuplicates} duplicate canvas file material row(s)`);
+        }
+      } catch (dedupeErr) {
+        console.error(`[sync] ${c.name}: duplicate material cleanup failed:`, dedupeErr);
+      }
+
       const materialCandidates = c.materialCandidates ?? [];
       if (materialCandidates.length > 0) {
         try {
@@ -1337,6 +1739,20 @@ type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
       const best = candidates[0];
       const syllabusText = best?.text ?? "";
       const bestLabel = best ? `${best.label}(score=${best.score.toFixed(3)},${best.text.length}c)` : "none";
+      const hasStrongSyllabusCandidate = candidates.some(
+        (candidate) => candidate.authority !== "enrichment" && candidate.text.length >= 500,
+      );
+      const shouldRefreshWeakModuleScaffold =
+        !shouldRunAIBase &&
+        existingAiTopics > 0 &&
+        existingUsedModuleScaffold &&
+        existingTimelineQuality === "weak" &&
+        hasStrongSyllabusCandidate;
+      const shouldRunAI = shouldRunAIBase || shouldRefreshWeakModuleScaffold;
+      dbg.shouldRunAI = shouldRunAI;
+      if (shouldRefreshWeakModuleScaffold) {
+        dbg.status = "pending:refresh-weak-module-scaffold";
+      }
 
       // Full candidate list for diagnostics (all sources, not just the winner)
       const candidatesSummary = candidates.length === 0

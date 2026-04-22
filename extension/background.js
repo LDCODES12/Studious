@@ -19,6 +19,8 @@
 const DAILY_SCOUT_ALARM = "autoSyncDaily";
 const CANVAS_OPEN_SCOUT_ALARM = "autoSyncCanvasOpen";
 const IMPORT_PAYLOAD_SOFT_LIMIT_BYTES = 3_750_000;
+const PDF_EXTRACTION_CONCURRENCY = 4;
+const PDF_PROGRESS_UPDATE_INTERVAL_MS = 300;
 const MEDIA_TRANSCRIPT_BATCH_MAX_ITEMS = 10;
 const MEDIA_TRANSCRIPT_SINGLE_CHUNK_CHAR_LIMIT = 1_000_000;
 const MEDIA_ATTACHMENT_LOOKUP_CONCURRENCY = 12;
@@ -133,6 +135,7 @@ function prepareCanvasImportPayload(payload) {
   const beforeBytes = importPayloadByteLength(payload);
   let syllabusTrimmed = 0;
   let materialTrimmed = 0;
+  let pageTrimmed = 0;
 
   for (const course of payload.courses ?? []) {
     for (const syllabus of course.syllabusTexts ?? []) {
@@ -149,6 +152,13 @@ function prepareCanvasImportPayload(payload) {
         materialTrimmed++;
       }
     }
+
+    for (const page of course.pageTexts ?? []) {
+      if (typeof page.text === "string" && page.text.length > MATERIAL_TEXT_UPLOAD_CHAR_LIMIT) {
+        page.text = truncateTextForUpload(page.text, MATERIAL_TEXT_UPLOAD_CHAR_LIMIT);
+        pageTrimmed++;
+      }
+    }
   }
 
   const afterBytes = importPayloadByteLength(payload);
@@ -158,6 +168,7 @@ function prepareCanvasImportPayload(payload) {
     softLimitBytes: IMPORT_PAYLOAD_SOFT_LIMIT_BYTES,
     syllabusTrimmed,
     materialTrimmed,
+    pageTrimmed,
   };
 }
 
@@ -182,6 +193,7 @@ function cloneCourseForMaterialBatch(course) {
   }
   clone.materialTexts = [];
   clone.materialCandidates = [];
+  clone.pageTexts = [];
   return clone;
 }
 
@@ -361,6 +373,92 @@ function createCanvasModuleMaterialBatches(entries) {
     batches.push({
       payload,
       materialCount: currentEntries.length,
+      bytes: importPayloadByteLength(payload),
+    });
+  }
+
+  return batches;
+}
+
+function extractCanvasPageTextEntries(payload) {
+  const entries = [];
+
+  for (const course of payload.courses ?? []) {
+    const keptPageTexts = [];
+    for (const pageText of course.pageTexts ?? []) {
+      if (
+        pageText.sourceKind !== "canvas_page" ||
+        !pageText.sourceKey ||
+        typeof pageText.text !== "string" ||
+        pageText.text.length === 0
+      ) {
+        keptPageTexts.push(pageText);
+        continue;
+      }
+
+      entries.push({
+        course,
+        pageText: { ...pageText },
+      });
+    }
+    course.pageTexts = keptPageTexts;
+  }
+
+  return entries;
+}
+
+function buildCanvasPageTextPayload(entries) {
+  const courseMap = new Map();
+
+  for (const entry of entries) {
+    const key = String(entry.course.id);
+    let course = courseMap.get(key);
+    if (!course) {
+      course = cloneCourseForMaterialBatch(entry.course);
+      courseMap.set(key, course);
+    }
+
+    course.pageTexts.push(entry.pageText);
+  }
+
+  return {
+    syncMode: "scout",
+    courses: [...courseMap.values()],
+    assignments: [],
+    modules: [],
+    announcements: [],
+    assignmentGroups: [],
+  };
+}
+
+function createCanvasPageTextBatches(entries) {
+  const batches = [];
+  let currentEntries = [];
+
+  for (const entry of entries) {
+    const trialEntries = [...currentEntries, entry];
+    const trialPayload = buildCanvasPageTextPayload(trialEntries);
+    const trialBytes = importPayloadByteLength(trialPayload);
+
+    if (currentEntries.length > 0 && trialBytes > IMPORT_PAYLOAD_SOFT_LIMIT_BYTES) {
+      const payload = buildCanvasPageTextPayload(currentEntries);
+      batches.push({
+        payload,
+        pageCount: currentEntries.length,
+        bytes: importPayloadByteLength(payload),
+      });
+      currentEntries = [entry];
+      continue;
+    }
+
+    currentEntries = trialEntries;
+  }
+
+  if (currentEntries.length > 0) {
+    const payload = buildCanvasPageTextPayload(currentEntries);
+    batches.push({
+      payload,
+      pageCount: currentEntries.length,
       bytes: importPayloadByteLength(payload),
     });
   }
@@ -562,6 +660,101 @@ function parsePdfViaOffscreen(url, messageId) {
   });
 }
 
+function buildPdfExtractionJobKey(task) {
+  if (task?.sourceKey) return `source:${task.sourceKey}`;
+  if (task?.url) return `url:${task.url}`;
+  return `task:${task?.type ?? "pdf"}:${task?.course?.id ?? "course"}:${task?.fileName ?? "unnamed"}`;
+}
+
+function groupPdfExtractionJobs(tasks) {
+  const jobMap = new Map();
+
+  for (const task of tasks) {
+    const key = buildPdfExtractionJobKey(task);
+    let job = jobMap.get(key);
+    if (!job) {
+      job = { key, url: task.url, tasks: [] };
+      jobMap.set(key, job);
+    }
+    job.tasks.push(task);
+  }
+
+  return [...jobMap.values()];
+}
+
+function buildPdfExtractionLabel(completed, total, duplicateTasks = 0) {
+  const noun = total === 1 ? "PDF" : "PDFs";
+  if (completed <= 0) {
+    if (duplicateTasks > 0) {
+      return `Extracting text from ${total} unique ${noun}…`;
+    }
+    return `Extracting text from ${total} ${noun}…`;
+  }
+  return `Extracting PDF text… ${completed}/${total}`;
+}
+
+function attachExtractedPdfText(task, text) {
+  if (task.type === "syllabus") {
+    task.course.syllabusTexts.push({
+      fileName: task.fileName,
+      text,
+      sourceKey: task.sourceKey ?? null,
+      sourceKind: task.sourceKind ?? "canvas_syllabus",
+      remoteSize: task.remoteSize ?? null,
+      remoteUpdatedAt: task.remoteUpdatedAt ?? null,
+    });
+    return;
+  }
+
+  task.course.materialTexts.push({
+    fileName: task.fileName,
+    text,
+    sourceKey: task.sourceKey ?? null,
+    sourceKind: task.sourceKind ?? "canvas_module",
+    remoteSize: task.remoteSize ?? null,
+    remoteUpdatedAt: task.remoteUpdatedAt ?? null,
+  });
+}
+
+async function extractPdfJobsViaOffscreen(jobs, onProgress) {
+  let completed = 0;
+  let lastProgressAt = 0;
+
+  await mapWithConcurrency(jobs, PDF_EXTRACTION_CONCURRENCY, async (job) => {
+    const sampleTask = job.tasks[0];
+    const messageId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const text = await parsePdfViaOffscreen(job.url, messageId);
+    const elapsedMs = Date.now() - startedAt;
+
+    for (const task of job.tasks) {
+      task.extractedText = text;
+    }
+
+    if (text.length > 0) {
+      console.log(
+        `[worker] ${sampleTask.course.name} | ${sampleTask.type} "${sampleTask.fileName}": ${text.length}c in ${elapsedMs}ms` +
+        (job.tasks.length > 1 ? ` | reused x${job.tasks.length}` : "")
+      );
+    } else {
+      console.warn(
+        `[worker] ${sampleTask.course.name} | ${sampleTask.type} "${sampleTask.fileName}": 0 chars after ${elapsedMs}ms` +
+        (job.tasks.length > 1 ? ` | reused x${job.tasks.length}` : "")
+      );
+    }
+
+    completed++;
+
+    if (onProgress) {
+      const now = Date.now();
+      if (completed === jobs.length || now - lastProgressAt >= PDF_PROGRESS_UPDATE_INTERVAL_MS) {
+        lastProgressAt = now;
+        onProgress(completed, jobs.length);
+      }
+    }
+  });
+}
+
 // ── Phase 1: fetch course list ────────────────────────────────────────────────
 async function startPhase1() {
   await setSyncContext({ mode: "manual-picker", selectedIds: null, trigger: "manual" });
@@ -726,12 +919,6 @@ async function handleCanvasData(payload) {
     );
 
     if (totalPdfs > 0) {
-      broadcastToPopup({
-        type: "SYNC_PROGRESS",
-        percent: 88,
-        label: `Extracting text from ${totalPdfs} syllabus PDF${totalPdfs !== 1 ? "s" : ""}…`,
-      });
-
       for (const course of payload.courses) {
         course.syllabusTexts = course.syllabusTexts ?? [];
         course.materialTexts = course.materialTexts ?? [];
@@ -747,40 +934,41 @@ async function handleCanvasData(payload) {
         }
       }
 
-      await ensureOffscreen();
-
-      for (const task of allPdfTasks) {
-        const messageId = crypto.randomUUID();
-        const t0   = Date.now();
-        const text = await parsePdfViaOffscreen(task.url, messageId);
-        const ms   = Date.now() - t0;
-        if (text.length > 0) {
-          console.log(`[worker] ${task.course.name} | ${task.type} "${task.fileName}": ${text.length}c in ${ms}ms`);
-        } else {
-          console.warn(`[worker] ${task.course.name} | ${task.type} "${task.fileName}": 0 chars after ${ms}ms`);
-        }
-        if (task.type === "syllabus") {
-          task.course.syllabusTexts.push({
-            fileName: task.fileName,
-            text,
-            sourceKey: task.sourceKey ?? null,
-            sourceKind: task.sourceKind ?? "canvas_syllabus",
-            remoteSize: task.remoteSize ?? null,
-            remoteUpdatedAt: task.remoteUpdatedAt ?? null,
-          });
-        } else {
-          task.course.materialTexts.push({
-            fileName: task.fileName,
-            text,
-            sourceKey: task.sourceKey ?? null,
-            sourceKind: task.sourceKind ?? "canvas_module",
-            remoteSize: task.remoteSize ?? null,
-            remoteUpdatedAt: task.remoteUpdatedAt ?? null,
-          });
-        }
+      const pdfJobs = groupPdfExtractionJobs(allPdfTasks);
+      const duplicatePdfTasks = allPdfTasks.length - pdfJobs.length;
+      if (duplicatePdfTasks > 0) {
+        syncLog("pdf_extraction_dedupe", {
+          tasks: allPdfTasks.length,
+          uniquePdfs: pdfJobs.length,
+          duplicateTasks: duplicatePdfTasks,
+        });
       }
 
-      await closeOffscreen();
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 88,
+        label: buildPdfExtractionLabel(0, pdfJobs.length, duplicatePdfTasks),
+      });
+
+      await ensureOffscreen();
+      try {
+        await extractPdfJobsViaOffscreen(pdfJobs, (completed, total) => {
+          const progress = total > 0 ? completed / total : 1;
+          const percent = Math.min(92, 88 + Math.floor(progress * 4));
+          broadcastToPopup({
+            type: "SYNC_PROGRESS",
+            percent,
+            label: buildPdfExtractionLabel(completed, total, duplicatePdfTasks),
+          });
+        });
+      } finally {
+        await closeOffscreen();
+      }
+
+      for (const task of allPdfTasks) {
+        attachExtractedPdfText(task, task.extractedText ?? "");
+        delete task.extractedText;
+      }
 
       for (const course of payload.courses) {
         delete course.syllabusFileUrls;
@@ -793,6 +981,16 @@ async function handleCanvasData(payload) {
         delete course.syllabusFileUrls;
         delete course.materialFileUrls;
       }
+    }
+
+    const canvasPageTextEntries = extractCanvasPageTextEntries(payload);
+    const canvasPageTextBatches = createCanvasPageTextBatches(canvasPageTextEntries);
+    if (canvasPageTextEntries.length > 0) {
+      syncLog("canvas_page_text_batch_plan", {
+        pages: canvasPageTextEntries.length,
+        batches: canvasPageTextBatches.length,
+        batchBytes: canvasPageTextBatches.map((batch) => batch.bytes),
+      });
     }
 
     // ── Step 3: POST the enriched payload to Study Circle ────────────────────
@@ -808,13 +1006,15 @@ async function handleCanvasData(payload) {
     const payloadPrep = prepareCanvasImportPayload(payload);
     if (
       payloadPrep.syllabusTrimmed > 0 ||
-      payloadPrep.materialTrimmed > 0
+      payloadPrep.materialTrimmed > 0 ||
+      payloadPrep.pageTrimmed > 0
     ) {
       syncLog("payload_prepared", payloadPrep);
       console.log(
         "[worker] Prepared import payload:",
         `${Math.round(payloadPrep.beforeBytes / 1024)}KB → ${Math.round(payloadPrep.afterBytes / 1024)}KB`,
         `materialTrimmed=${payloadPrep.materialTrimmed}`,
+        `pageTrimmed=${payloadPrep.pageTrimmed}`,
       );
     }
 
@@ -870,6 +1070,39 @@ async function handleCanvasData(payload) {
       };
     }
 
+    if (canvasPageTextBatches.length > 0) {
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 95,
+        label: `Saving ${canvasPageTextEntries.length} Canvas page${canvasPageTextEntries.length !== 1 ? "s" : ""}…`,
+      });
+
+      let uploadedPages = 0;
+      for (let index = 0; index < canvasPageTextBatches.length; index++) {
+        const batch = canvasPageTextBatches[index];
+        const batchImport = await postCanvasImportPayload(
+          scUrl,
+          apiToken,
+          batch.payload,
+          `Canvas page batch ${index + 1}/${canvasPageTextBatches.length}`,
+        );
+        uploadedPages += batch.pageCount;
+        syncLog("canvas_page_text_batch_done", {
+          batch: index + 1,
+          batches: canvasPageTextBatches.length,
+          pages: batch.pageCount,
+          uploadedPages,
+          status: batchImport.status,
+          bytes: batchImport.bytes,
+        });
+      }
+
+      result.canvasPages = {
+        queued: canvasPageTextEntries.length,
+        batches: canvasPageTextBatches.length,
+      };
+    }
+
     // ── Step 3b: Discover Kaltura / Media Gallery transcript attachments ────
     // The main Canvas import is already saved before this slower media phase.
     // If the user stops mid-transcript sync, courses/assignments still remain.
@@ -880,7 +1113,7 @@ async function handleCanvasData(payload) {
         return course;
       });
     if (coursesWithMediaGallery.length > 0) {
-      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 95, label: "Checking lecture transcripts…" });
+      broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Checking lecture transcripts…" });
       try {
         await syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, coursesWithMediaGallery);
       } catch (err) {
@@ -905,7 +1138,7 @@ async function handleCanvasData(payload) {
     if (mediaTranscriptBatches.length > 0) {
       broadcastToPopup({
         type: "SYNC_PROGRESS",
-        percent: 96,
+        percent: 97,
         label: `Saving ${mediaTranscriptEntries.length} lecture transcript${mediaTranscriptEntries.length !== 1 ? "s" : ""}…`,
       });
 

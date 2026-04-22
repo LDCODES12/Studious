@@ -64,6 +64,7 @@ function extractScheduleSection(html) {
   const AUTO_IMPORT_PDF_MAX_BYTES = 10_000_000;
   const MATERIAL_CANDIDATE_MAX_BYTES = 20_000_000;
   const SYLLABUS_LINK_SCAN_MAX_PDFS = 40;
+  const PAGE_TEXT_CHAR_LIMIT = 20_000;
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -169,6 +170,41 @@ function extractScheduleSection(html) {
     }
   }
 
+  function htmlToText(html) {
+    if (!html) return "";
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      for (const el of doc.querySelectorAll("br")) {
+        el.replaceWith("\n");
+      }
+      for (const el of doc.querySelectorAll("p,li,tr,td,th,h1,h2,h3,h4,h5,h6,div,section,article")) {
+        if (!el.textContent?.includes("\n")) {
+          el.append("\n");
+        }
+      }
+      return (doc.body?.textContent ?? "")
+        .replace(/\u00a0/g, " ")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n[ \t]+/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    } catch {
+      return String(html)
+        .replace(/<\/?(tr|li|p|br|h[1-6]|div|section|thead|tbody)[^>]*>/gi, "\n")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&nbsp;/g, " ")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n[ \t]+/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+  }
+
   function buildMaterialContextName(moduleName, pageTitle = null) {
     const normalizedModuleName = String(moduleName ?? "").trim() || "Canvas Page";
     const normalizedPageTitle = String(pageTitle ?? "").trim();
@@ -177,6 +213,27 @@ function extractScheduleSection(html) {
       return normalizedModuleName;
     }
     return `${normalizedModuleName} - ${normalizedPageTitle}`;
+  }
+
+  function buildCanvasPageSourceKey(pageUrl) {
+    return `page:${String(pageUrl ?? "").trim().toLowerCase()}`;
+  }
+
+  function pushPageTextDocument(course, pageItem, bodyHtml, updatedAt = null) {
+    if (!course || !pageItem?.pageUrl || !bodyHtml) return;
+    const text = htmlToText(bodyHtml).slice(0, PAGE_TEXT_CHAR_LIMIT).trim();
+    if (text.length < 120) return;
+    const sourceKey = buildCanvasPageSourceKey(pageItem.pageUrl);
+    const exists = (course.pageTexts ?? []).some((entry) => entry.sourceKey === sourceKey);
+    if (exists) return;
+    course.pageTexts.push({
+      fileName: buildMaterialContextName(pageItem.moduleName, pageItem.pageTitle ?? pageItem.pageUrl),
+      text,
+      sourceKey,
+      sourceKind: "canvas_page",
+      remoteUpdatedAt: updatedAt ?? null,
+      remoteSize: text.length,
+    });
   }
 
   function findCourseMediaGalleryTab(navTabs) {
@@ -197,7 +254,7 @@ function extractScheduleSection(html) {
 
   function stripHtml(html) {
     if (!html) return null;
-    return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000) || null;
+    return htmlToText(html).slice(0, 4000) || null;
   }
 
   function normalizeExternalSourceKey(rawUrl) {
@@ -433,6 +490,8 @@ function extractScheduleSection(html) {
         termEndAt: c.term?.end_at ?? null,
         // Populated below: 3-week window of Canvas calendar events (class schedule fallback)
         calendarEvents: [],
+        // Populated below: Canvas Page bodies promoted into the canonical course corpus
+        pageTexts: [],
       }));
 
     const payload = { syncMode, courses, assignments: [], modules: [], announcements: [], assignmentGroups: [] };
@@ -595,6 +654,12 @@ function extractScheduleSection(html) {
             if (bodyHtml && bodyHtml.length > 50) {
               course.syllabusBody = (course.syllabusBody ?? "") + "\n" + bodyHtml;
               course._rawSyllabusBody = (course._rawSyllabusBody ?? "") + "\n" + bodyHtml;
+              const pageItem = modulePageItems.find((item) => item.pageUrl === pageUrl) ?? {
+                moduleName: "Canvas Page",
+                pageTitle: pageData?.title ?? pageUrl,
+                pageUrl,
+              };
+              pushPageTextDocument(course, pageItem, bodyHtml, pageData?.updated_at ?? null);
               fetchedBodies++;
             }
           } catch { /* skip individual module page */ }
@@ -1001,6 +1066,7 @@ function extractScheduleSection(html) {
               const [pageData] = await fetchAll(`${BASE}/courses/${course.id}/pages/${pageItem.pageUrl}`);
               const bodyHtml = pageData?.body?.trim();
               if (!bodyHtml || bodyHtml.length < 25) return;
+              pushPageTextDocument(course, pageItem, bodyHtml, pageData?.updated_at ?? null);
 
               const linkedPdfRefs = extractLinkedPdfRefs(bodyHtml);
               if (linkedPdfRefs.length === 0) return;
@@ -1017,7 +1083,7 @@ function extractScheduleSection(html) {
 
                 if (ref.kind === "canvas") {
                   sourceKey = String(ref.fileId);
-                  if (materialSeenIds.has(sourceKey)) continue;
+                  if (seenIds.has(sourceKey) || materialSeenIds.has(sourceKey)) continue;
 
                   const fileInfo = await fetchCanvasFileInfo(course.id, ref.fileId);
                   const resolvedName = fileInfo?.display_name ?? fileName;
@@ -1031,7 +1097,7 @@ function extractScheduleSection(html) {
                   remoteUpdatedAt = fileInfo.updated_at ?? null;
                 } else {
                   sourceKey = ref.sourceKey ?? normalizeExternalSourceKey(ref.href);
-                  if (materialSeenIds.has(sourceKey)) continue;
+                  if (seenIds.has(sourceKey) || materialSeenIds.has(sourceKey)) continue;
                   downloadUrl = ref.href;
                 }
 

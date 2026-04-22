@@ -5,7 +5,10 @@ import { ensureTranscriptChunks } from "@/lib/transcript-chunks";
 
 export type MaterialSourceKind =
   | "canvas_syllabus"
+  | "canvas_syllabus_page"
   | "canvas_module"
+  | "canvas_page"
+  | "canvas_announcement"
   | "canvas_media"
   | "manual_upload"
   | "auto_route"

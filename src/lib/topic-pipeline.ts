@@ -15,7 +15,7 @@
 import { generateObject } from "ai";
 import { modelConfig } from "./ai-models.ts";
 import { z } from "zod";
-import { addDays, addYears, differenceInCalendarDays, parseISO, startOfWeek, subDays } from "date-fns";
+import { addDays, addYears, parseISO, startOfWeek, subDays } from "date-fns";
 import {
   parseSyllabusSchedule,
   sanitizeSchedule,
@@ -382,6 +382,204 @@ function extractModuleSequenceNumber(label: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function extractLectureSequenceNumber(value: string): number | null {
+  const match = value.match(/\blecture\s*(\d+(?:\.\d+)?)\b/i);
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stripTrailingDateText(value: string): string {
+  return value
+    .replace(/\s*[-–]\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?).*$/i, "")
+    .replace(/\s*[-–]\s*\d{1,2}\/\d{1,2}(?:\/\d{2,4})?.*$/i, "")
+    .replace(/\.pdf$/i, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function deriveModuleMeetingLabel(moduleLabel: string, anchorText: string): string {
+  const lectureNumber = extractLectureSequenceNumber(anchorText);
+  if (lectureNumber !== null) {
+    const formatted = Number.isInteger(lectureNumber) ? String(lectureNumber) : String(lectureNumber);
+    return `Lecture ${formatted}`;
+  }
+
+  const cleanedAnchor = stripTrailingDateText(anchorText);
+  if (/\bexam\s+review\s+session\b/i.test(cleanedAnchor)) return "Exam Review Session";
+  if (/\breview\s+session\b/i.test(cleanedAnchor)) return "Review Session";
+  if (cleanedAnchor && cleanedAnchor.length <= 48) return cleanedAnchor;
+
+  return cleanModuleWeekLabel(moduleLabel);
+}
+
+function dedupeOrdered(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = normalizeForDedup(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(value);
+  }
+  return result;
+}
+
+interface ModuleMeetingSegment {
+  moduleLabel: string;
+  weekLabel: string;
+  startDate: string;
+  sequence: number | null;
+  topics: string[];
+  readings: string[];
+}
+
+function isLowSignalModuleBucket(label: string): boolean {
+  return /^(course resources|assignment descriptions|report discussions|ungraded problem sets)$/i.test(label.trim());
+}
+
+function isLowSignalModuleEntry(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  if (ADMIN_ENTRY_RX.test(trimmed)) return true;
+  if (/^<\s*unit\s+\d+\s*>$/i.test(trimmed)) return true;
+  if (/\b(?:quiz|exam|midterm|final)\b.*\b(?:key|blank)\b/i.test(trimmed)) return true;
+  return /^(?:>{2,}.*<{2,}|instructor bio|staff bios?|gradescope regrade instructions|\(not for general use\)|join iClicker|sign up for piazza|mentor office hour schedule|spring 20\d{2} calendar|topics[_\s-]*sp\d+|syllabus|office hours?)$/i.test(trimmed);
+}
+
+function isModuleMeetingAnchor(
+  value: string,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (inferIsoDateFromText(trimmed, termStartDate, termEndDate)) return true;
+  if (extractLectureSequenceNumber(trimmed) !== null) return true;
+  return /\b(?:exam\s+review\s+session|review\s+session|class\s+meeting|lab\s+\d+(?:\.\d+)?)\b/i.test(trimmed);
+}
+
+function extractModuleMeetingSegments(
+  module: CanvasModuleInfo,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): ModuleMeetingSegment[] {
+  const entries = [
+    ...module.topics.map((value) => ({ kind: "topic" as const, value })),
+    ...module.readings.map((value) => ({ kind: "reading" as const, value })),
+  ];
+
+  const segments: ModuleMeetingSegment[] = [];
+  let pendingTopics: string[] = [];
+  let pendingReadings: string[] = [];
+
+  const flushAnchor = (anchorKind: "topic" | "reading", anchorValue: string) => {
+    const startDate = inferIsoDateFromText(anchorValue, termStartDate, termEndDate);
+    if (!startDate) {
+      if (anchorKind === "topic") pendingTopics.push(anchorValue);
+      else pendingReadings.push(anchorValue);
+      return;
+    }
+
+    const topics = anchorKind === "topic"
+      ? [...pendingTopics, anchorValue]
+      : [...pendingTopics];
+    const readings = anchorKind === "reading"
+      ? [...pendingReadings, anchorValue]
+      : [...pendingReadings];
+
+    segments.push({
+      moduleLabel: module.weekLabel,
+      weekLabel: deriveModuleMeetingLabel(module.weekLabel, anchorValue),
+      startDate,
+      sequence: extractLectureSequenceNumber(anchorValue),
+      topics: dedupeOrdered(topics.filter((value) => !isLowSignalModuleEntry(value))),
+      readings: dedupeOrdered(readings.filter((value) => !isLowSignalModuleEntry(value))),
+    });
+
+    pendingTopics = [];
+    pendingReadings = [];
+  };
+
+  for (const entry of entries) {
+    const cleaned = entry.value.trim();
+    if (!cleaned || isLowSignalModuleEntry(cleaned)) continue;
+
+    if (isModuleMeetingAnchor(cleaned, termStartDate, termEndDate)) {
+      flushAnchor(entry.kind, cleaned);
+      continue;
+    }
+
+    if (entry.kind === "topic") pendingTopics.push(cleaned);
+    else pendingReadings.push(cleaned);
+  }
+
+  if (segments.length > 0 && (pendingTopics.length > 0 || pendingReadings.length > 0)) {
+    const last = segments[segments.length - 1]!;
+    last.topics = dedupeOrdered([...last.topics, ...pendingTopics.filter((value) => !isLowSignalModuleEntry(value))]);
+    last.readings = dedupeOrdered([...last.readings, ...pendingReadings.filter((value) => !isLowSignalModuleEntry(value))]);
+  }
+
+  return segments.filter(
+    (segment) => segment.topics.length > 0 || segment.readings.length > 0,
+  );
+}
+
+function organizeDatedModuleMeetingsAsTimeline(
+  contentModules: CanvasModuleInfo[],
+  courseName: string,
+  termStartDate: string | null,
+  termEndDate: string | null,
+): ParsedTopic[] {
+  const segments = contentModules.flatMap((module) =>
+    extractModuleMeetingSegments(module, termStartDate, termEndDate),
+  );
+  if (segments.length === 0) return [];
+
+  const bucketMap = new Map<string, ModuleMeetingSegment[]>();
+  for (const segment of segments) {
+    const parsed = parseISO(`${segment.startDate}T12:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) continue;
+    const weekStart = startOfWeek(parsed, { weekStartsOn: 1 }).toISOString().slice(0, 10);
+    const bucket = bucketMap.get(weekStart) ?? [];
+    bucket.push(segment);
+    bucketMap.set(weekStart, bucket);
+  }
+
+  const timeline = [...bucketMap.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([weekStart, bucket], index) => {
+      bucket.sort((a, b) => {
+        const dateDelta = a.startDate.localeCompare(b.startDate);
+        if (dateDelta !== 0) return dateDelta;
+        const seqA = a.sequence ?? Number.POSITIVE_INFINITY;
+        const seqB = b.sequence ?? Number.POSITIVE_INFINITY;
+        if (seqA !== seqB) return seqA - seqB;
+        return a.weekLabel.localeCompare(b.weekLabel);
+      });
+
+      const primary = bucket[0]!;
+      return {
+        weekNumber: index + 1,
+        weekLabel: primary.weekLabel,
+        startDate: weekStart,
+        topics: dedupeOrdered(bucket.flatMap((segment) => segment.topics)),
+        readings: dedupeOrdered(bucket.flatMap((segment) => segment.readings)),
+        notes: null,
+        courseName,
+      };
+    });
+
+  if (timeline.length > 0) {
+    console.log(
+      `[pipeline] ${courseName}: module fallback extracted ${segments.length} dated meeting segment(s) → ${timeline.length} weekly entries`,
+    );
+  }
+
+  return timeline;
+}
+
 function cleanModuleReadingTitle(title: string): string {
   let cleaned = title
     .replace(/\.[a-z0-9]{2,5}$/i, "")
@@ -434,20 +632,20 @@ function buildDeterministicSparseModuleResult(
   const coveredWeeks = new Set<number>();
   const weekLabelHints = new Map<number, WeekLabelHint>();
 
-  for (const module of modules) {
-    const targetWeek = extractModuleSequenceNumber(module.weekLabel) ?? (
-      genericWeeks.has(module.weekNumber) ? module.weekNumber : null
+  for (const courseModule of modules) {
+    const targetWeek = extractModuleSequenceNumber(courseModule.weekLabel) ?? (
+      genericWeeks.has(courseModule.weekNumber) ? courseModule.weekNumber : null
     );
     if (!targetWeek || !genericWeeks.has(targetWeek)) continue;
 
     const addTopics = [...new Set(
-      (module.topics ?? [])
+      (courseModule.topics ?? [])
         .map((topic) => topic.trim())
         .filter(Boolean)
         .filter((topic) => !isAdministrativeEntry(topic)),
     )];
     const addReadings = [...new Set(
-      (module.readings ?? [])
+      (courseModule.readings ?? [])
         .map(cleanModuleReadingTitle)
         .map((reading) => reading.trim())
         .filter(Boolean),
@@ -458,7 +656,7 @@ function buildDeterministicSparseModuleResult(
         weekNumber: targetWeek,
         addTopics,
         addReadings,
-        sourceModule: module.weekLabel,
+        sourceModule: courseModule.weekLabel,
       });
     }
     coveredWeeks.add(targetWeek);
@@ -470,7 +668,7 @@ function buildDeterministicSparseModuleResult(
       weekLabelHints.set(targetWeek, {
         weekNumber: targetWeek,
         weekLabel,
-        sourceModule: module.weekLabel,
+        sourceModule: courseModule.weekLabel,
       });
     }
   }
@@ -1032,11 +1230,17 @@ function insertSpringBreakGapTopics(topics: ParsedTopic[], courseName: string): 
     });
   }
 
-  if (additions.length > 0) {
-    console.log(`[pipeline] ${courseName}: inserted ${additions.length} spring break gap row(s)`);
-  }
+  if (additions.length === 0) return topics;
 
-  return additions.length > 0 ? [...topics, ...additions] : topics;
+  additions.sort((a, b) => {
+    const dateA = a.startDate ?? "";
+    const dateB = b.startDate ?? "";
+    return dateA.localeCompare(dateB) || a.weekNumber - b.weekNumber;
+  });
+  const selected = additions[0]!;
+
+  console.log(`[pipeline] ${courseName}: inserted 1 spring break gap row`);
+  return [...topics, selected];
 }
 
 function stripCarriedBreakNotes(
@@ -1257,7 +1461,7 @@ async function extractFromBlocks(
   );
   const merged = new Map<number, { topic: ParsedTopic; authority: SourceAuthority }>();
   const sourceLabels: string[] = [];
-  let usedWindow = allGoodResults[0].win;
+  const usedWindow = allGoodResults[0].win;
   const mergedScheduleShape = allGoodResults[0].parsedSchedule.shape;
   const mergedRowSemantics = allGoodResults[0].parsedSchedule.rowSemantics;
   const mergedHasExplicitDates = allGoodResults.some((item) => item.parsedSchedule.hasExplicitDates);
@@ -1395,6 +1599,16 @@ function organizeModulesAsTimeline(
 ): ParsedTopic[] {
   if (contentModules.length === 0) return [];
 
+  const datedMeetingTimeline = organizeDatedModuleMeetingsAsTimeline(
+    contentModules,
+    courseName,
+    termStartDate,
+    termEndDate,
+  );
+  if (datedMeetingTimeline.length >= 3) {
+    return datedMeetingTimeline;
+  }
+
   const parsed = contentModules.map((m) => {
     const label = m.weekLabel;
     const unitMatch = label.match(/\b(?:unit|module|week)\s*(\d+)/i);
@@ -1418,12 +1632,14 @@ function organizeModulesAsTimeline(
 
   const ASSIGNED_READING_RX = /reading|chapter|paper|article|\.pdf$|et\s+al|journal|\(\d{4}\)/i;
   const SKIP_READING_RX = /\b(quiz|exam)\s+(blank|key)\b|regrade\s+request|setup\s+instructions|gradescope|slide|powerpoint|worksheet|problem\s+set|packet|handout|video/i;
-  const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room)/i;
+  const SKIP_TOPIC_RX = /^(assignments?|homework|quiz\s+information|quiz\s+and\s+exam|suggested\s+readings?|lecture\s+powerpoint|section\s+\d|quiz\s+policies|exam\s+room|<\s*unit\s+\d+\s*>|>{2,}.*<{2,}|instructor bio|staff bios?|gradescope regrade instructions|\(not for general use\)|join iClicker|sign up for piazza)$/i;
 
   const timeline: ParsedTopic[] = [];
 
   for (let i = 0; i < parsed.length; i++) {
     const p = parsed[i];
+    if (isLowSignalModuleBucket(p.cleanLabel)) continue;
+
     const usefulTopics = p.module.topics.filter((t) => !SKIP_TOPIC_RX.test(t));
     const usefulReadings = p.module.readings.filter(
       (r) => ASSIGNED_READING_RX.test(r) && !SKIP_READING_RX.test(r),
@@ -1435,6 +1651,10 @@ function organizeModulesAsTimeline(
       termStartDate,
       termEndDate,
     ) ?? null;
+
+    if (!startDate && usefulTopics.length === 0 && usefulReadings.length === 0) {
+      continue;
+    }
 
     timeline.push({
       weekNumber: i + 1,

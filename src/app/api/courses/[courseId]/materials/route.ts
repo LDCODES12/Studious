@@ -133,7 +133,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   }
 
   const materials = await db.courseMaterial.findMany({
-    where: { courseId },
+    where: {
+      courseId,
+      sourceKind: {
+        notIn: ["canvas_page", "canvas_syllabus_page", "canvas_announcement"],
+      },
+    },
     orderBy: { uploadedAt: "desc" },
     select: {
       id: true,
