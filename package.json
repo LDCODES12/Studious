@@ -7,6 +7,7 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
+    "test:corpus": "tsx --test src/lib/course-corpus/*.test.ts src/lib/source-aware-evidence.test.ts",
     "copy-pdfjs": "cp node_modules/pdfjs-dist/build/pdf.min.mjs extension/lib/ && cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs extension/lib/",
     "copy-grid": "esbuild src/lib/pdf-calendar-grid.ts --bundle --format=esm --outfile=extension/pdf-calendar-grid.js",
     "prep-extension": "npm run copy-pdfjs && npm run copy-grid",
@@ -57,6 +58,7 @@
     "eslint-config-next": "16.1.6",
     "shadcn": "^3.8.5",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5"
   }

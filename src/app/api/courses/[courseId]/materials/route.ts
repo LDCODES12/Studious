@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
-import { hashMaterialText, updateMaterialEmbedding } from "@/lib/material-sync";
+import { ingestStandaloneEvidence, rebuildCourseCorpusProjections } from "@/lib/course-corpus/sync";
 
 interface RouteParams {
   params: Promise<{ courseId: string }>;
@@ -36,31 +35,31 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     );
   }
 
-  const topicLabels = course.topics.map((t) => t.weekLabel);
-  const analysis = await analyzeCourseMaterial(text, topicLabels);
-
-  const autoStoredForAI = ["lecture_notes", "lecture_slides", "textbook"].includes(analysis.detectedType);
-
-  const material = await db.courseMaterial.create({
-    data: {
-      courseId,
-      fileName,
-      detectedType: analysis.detectedType,
-      sourceRole: inferMaterialSourceRole(analysis.detectedType, fileName),
-      sourceKind: "manual_upload",
-      summary: analysis.summary,
-      relatedTopics: analysis.relatedTopics,
-      rawText: text.slice(0, 25000),
-      storedForAI: autoStoredForAI,
-      autoStoredForAI,
-      contentHash: hashMaterialText(text),
-      syncStatus: "ready",
-    },
+  await ingestStandaloneEvidence({
+    courseId,
+    rawSourceKind: "manual_upload",
+    sourceKey: fileName,
+    title: fileName,
+    text,
   });
 
-  try {
-    await updateMaterialEmbedding(material.id, text);
-  } catch { /* embedding failure never blocks upload */ }
+  await rebuildCourseCorpusProjections({
+    courseId,
+    courseName: course.name,
+  });
+
+  const material = await db.courseMaterial.findFirst({
+    where: {
+      courseId,
+      sourceKind: "manual_upload",
+      fileName,
+    },
+    orderBy: { uploadedAt: "desc" },
+  });
+
+  if (!material) {
+    return NextResponse.json({ error: "Failed to save material" }, { status: 500 });
+  }
 
   return NextResponse.json(
     {

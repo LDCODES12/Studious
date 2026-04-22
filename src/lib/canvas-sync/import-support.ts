@@ -7,10 +7,8 @@ import {
 } from "@/lib/parse-syllabus";
 import {
   effectiveStoredForAI,
-  hashMaterialText,
   isRemoteSourceNewer,
   normalizeSourceUpdatedAt,
-  updateMaterialSearchIndex,
   type MaterialSourceKind,
 } from "@/lib/material-sync";
 import { addDays, addYears, parseISO, subDays } from "date-fns";
@@ -553,63 +551,6 @@ export async function saveSyncedMaterial(args: {
     },
     select: { id: true },
   });
-}
-
-export async function saveImportedTextDocument(args: {
-  courseId: string;
-  fileName: string;
-  text: string;
-  sourceKind: MaterialSourceKind;
-  sourceKey: string;
-  sourceUpdatedAt?: string | Date | null;
-  classification: {
-    detectedType: "syllabus" | "lecture_notes" | "lecture_slides" | "other";
-    sourceRole: "timeline" | "content" | "mixed" | "unknown";
-    summary: string;
-    storedForAI: boolean;
-  };
-}) {
-  const rawText = args.text.trim();
-  if (rawText.length === 0) return null;
-
-  const existing = await findExistingSyncedMaterial(
-    args.courseId,
-    args.sourceKind,
-    args.sourceKey,
-    args.fileName,
-  );
-  const contentHash = hashMaterialText(rawText);
-  const material = await saveSyncedMaterial({
-    existing,
-    courseId: args.courseId,
-    fileName: args.fileName,
-    detectedType: args.classification.detectedType,
-    sourceRole: args.classification.sourceRole,
-    sourceKind: args.sourceKind,
-    sourceKey: args.sourceKey,
-    summary: args.classification.summary,
-    relatedTopics: [],
-    rawText: rawText.slice(0, 25_000),
-    contentHash,
-    sourceUpdatedAt: args.sourceUpdatedAt ?? null,
-    autoStoredForAI: args.classification.storedForAI,
-  });
-
-  if (!existing || existing.contentHash !== contentHash) {
-    try {
-      await updateMaterialSearchIndex({
-        materialId: material.id,
-        courseId: args.courseId,
-        sourceKind: args.sourceKind,
-        text: rawText,
-        contentHash,
-      });
-    } catch {
-      // search indexing never blocks import
-    }
-  }
-
-  return material;
 }
 
 function isoDateOnly(value: string | null | undefined): string | null {

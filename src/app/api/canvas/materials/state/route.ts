@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   });
   if (!course) return withCors(NextResponse.json({ knownCourse: false, materials: [], candidates: [] }));
 
-  const [materials, candidates] = await Promise.all([
+  const [materials, evidenceRows, candidates] = await Promise.all([
     db.courseMaterial.findMany({
       where: {
         courseId: course.id,
@@ -56,6 +56,15 @@ export async function GET(request: NextRequest) {
         sourceUpdatedAt: true,
         lastSyncedAt: true,
         syncStatus: true,
+      },
+    }),
+    db.courseEvidence.findMany({
+      where: { courseId: course.id },
+      select: {
+        sourceKey: true,
+        bodyText: true,
+        remoteUpdatedAt: true,
+        provenance: true,
       },
     }),
     db.canvasMaterialCandidate.findMany({
@@ -72,17 +81,65 @@ export async function GET(request: NextRequest) {
     }),
   ]);
 
+  const syntheticMaterials = evidenceRows.flatMap((evidence) => {
+    const provenance = Array.isArray(evidence.provenance) ? evidence.provenance : [];
+    return provenance
+      .map((entry) => {
+        const record = entry && typeof entry === "object" && !Array.isArray(entry)
+          ? entry as Record<string, unknown>
+          : null;
+        return {
+          sourceKind: typeof record?.rawSourceKind === "string" ? record.rawSourceKind : null,
+          sourceKey: typeof record?.sourceKey === "string" ? record.sourceKey : null,
+        };
+      })
+      .filter((entry): entry is { sourceKind: string; sourceKey: string } =>
+        typeof entry.sourceKind === "string" &&
+        ["canvas_syllabus", "canvas_module", "canvas_media"].includes(entry.sourceKind) &&
+        Boolean(entry.sourceKey),
+      )
+      .map((entry) => ({
+        sourceKind: entry.sourceKind,
+        sourceKey: entry.sourceKey,
+        rawTextLength: evidence.bodyText?.length ?? 0,
+        sourceUpdatedAt: evidence.remoteUpdatedAt?.toISOString() ?? null,
+        lastSyncedAt: evidence.remoteUpdatedAt?.toISOString() ?? null,
+        syncStatus: evidence.bodyText ? "ready" : "stale",
+      }));
+  });
+
+  const mergedMaterials = new Map<string, {
+    sourceKind: string;
+    sourceKey: string;
+    rawTextLength: number;
+    sourceUpdatedAt: string | null;
+    lastSyncedAt: string | null;
+    syncStatus: string;
+  }>();
+
+  for (const material of materials) {
+    if (!material.sourceKey) continue;
+    mergedMaterials.set(`${material.sourceKind}:${material.sourceKey}`, {
+      sourceKind: material.sourceKind,
+      sourceKey: material.sourceKey,
+      rawTextLength: material.rawText.length,
+      sourceUpdatedAt: material.sourceUpdatedAt?.toISOString() ?? null,
+      lastSyncedAt: material.lastSyncedAt?.toISOString() ?? null,
+      syncStatus: material.syncStatus,
+    });
+  }
+
+  for (const synthetic of syntheticMaterials) {
+    const key = `${synthetic.sourceKind}:${synthetic.sourceKey}`;
+    if (!mergedMaterials.has(key)) {
+      mergedMaterials.set(key, synthetic);
+    }
+  }
+
   return withCors(
     NextResponse.json({
       knownCourse: true,
-      materials: materials.map((material) => ({
-        sourceKind: material.sourceKind,
-        sourceKey: material.sourceKey,
-        rawTextLength: material.rawText.length,
-        sourceUpdatedAt: material.sourceUpdatedAt?.toISOString() ?? null,
-        lastSyncedAt: material.lastSyncedAt?.toISOString() ?? null,
-        syncStatus: material.syncStatus,
-      })),
+      materials: [...mergedMaterials.values()],
       candidates: candidates.map((candidate) => ({
         contentId: candidate.contentId,
         sourceKind: candidate.sourceKind,

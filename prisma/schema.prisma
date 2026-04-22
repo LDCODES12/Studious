@@ -7,7 +7,7 @@ datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
   directUrl  = env("DIRECT_URL")
-  extensions = [vector]
+  extensions = [pg_graphql(schema: "graphql"), pg_stat_statements(schema: "extensions"), pgcrypto(schema: "extensions"), supabase_vault(schema: "vault"), uuid_ossp(map: "uuid-ossp", schema: "extensions"), vector]
 }
 
 model User {
@@ -89,6 +89,9 @@ model Course {
   topics              CourseTopic[]
   timelineAnchors     CourseTimelineAnchor[]
   materials           CourseMaterial[]
+  evidence            CourseEvidence[]
+  evidenceChunks      CourseEvidenceChunk[]
+  evidencePlacements  CourseEvidencePlacement[]
   materialCandidates  CanvasMaterialCandidate[]
   quizzes             Quiz[]
   flashcardDecks      FlashcardDeck[]
@@ -189,15 +192,39 @@ model CourseMaterial {
   uploadedAt              DateTime                     @default(now())
   embedding               Unsupported("vector(1536)")?
   course                  Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  chunks                  CourseMaterialChunk[]
 
   @@unique([courseId, sourceKind, sourceKey])
   @@index([courseId, sourceKind])
 }
 
-model CourseMaterialChunk {
-  id            String                       @id @default(cuid())
-  materialId    String
+model CourseEvidence {
+  id               String                  @id @default(cuid())
+  courseId         String
+  sourceKind       String
+  sourceKey        String
+  title            String
+  bodyText         String?
+  structuredPayload Json?
+  provenance       Json
+  capturedAt       DateTime                @default(now())
+  remoteUpdatedAt  DateTime?
+  contentHash      String?
+  derivedHints     Json?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  embedding        Unsupported("vector(1536)")?
+  course           Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  chunks           CourseEvidenceChunk[]
+  placements       CourseEvidencePlacement[]
+
+  @@unique([courseId, sourceKey])
+  @@index([courseId, sourceKind])
+  @@index([courseId, remoteUpdatedAt])
+}
+
+model CourseEvidenceChunk {
+  id            String          @id @default(cuid())
+  evidenceId    String
   courseId      String
   chunkIndex    Int
   charStart     Int
@@ -205,19 +232,42 @@ model CourseMaterialChunk {
   text          String
   contentHash   String
   tokenEstimate Int
-  evidenceType  String                       @default("content") // content | worked_example | review | clarification | formula | definition
-  signals       String[]                     @default([])
-  keywords      String[]                     @default([])
-  importance    Int                          @default(0)
-  createdAt     DateTime                     @default(now())
+  evidenceType  String          @default("content")
+  signals       String[]        @default([])
+  keywords      String[]        @default([])
+  importance    Int             @default(0)
+  createdAt     DateTime        @default(now())
   embedding     Unsupported("vector(1536)")?
-  material      CourseMaterial               @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  course        Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  evidence      CourseEvidence  @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
 
-  @@unique([materialId, chunkIndex])
+  @@unique([evidenceId, chunkIndex])
   @@index([courseId])
-  @@index([materialId])
-  @@index([materialId, contentHash])
-  @@index([courseId, materialId])
+  @@index([evidenceId])
+  @@index([evidenceId, contentHash])
+  @@index([courseId, evidenceId])
+}
+
+model CourseEvidencePlacement {
+  id            String          @id @default(cuid())
+  courseId      String
+  evidenceId    String
+  placementKind String
+  weekNumber    Int?
+  weekLabel     String?
+  startDate     String?
+  confidence    String          @default("unknown")
+  rationale     String?
+  signals       String[]        @default([])
+  isPrimary     Boolean         @default(false)
+  createdAt     DateTime        @default(now())
+  course        Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  evidence      CourseEvidence  @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@unique([evidenceId, placementKind, weekNumber, startDate])
+  @@index([courseId, placementKind])
+  @@index([courseId, weekNumber])
+  @@index([evidenceId])
 }
 
 model Quiz {

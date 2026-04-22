@@ -3,43 +3,14 @@ import { after } from "next/server";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
-import {
-  extractDropRules,
-  extractClassSchedule,
-  extractScheduleFromCalendarEvents,
-  parseSyllabusText,
-  scheduleScore,
-  bestWindow,
-  type ExtractedClassSchedule,
-} from "@/lib/parse-syllabus";
-import { runTopicPipeline, type PipelineInput } from "@/lib/topic-pipeline";
 import crypto from "crypto";
-import { addDays, subDays } from "date-fns";
 import { generateTasksForUser } from "@/lib/tasks";
-import { analyzeCourseMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
 import {
-  hashMaterialText,
-  ensureMaterialTranscriptChunks,
-  updateMaterialEmbedding,
-  updateMaterialSearchIndex,
-  type MaterialSourceKind,
-} from "@/lib/material-sync";
-import {
-  classifyCanvasTextDocument,
-  classifyImportedPdfSource,
-  classScheduleProbe,
-  dedupeCanvasFileMaterials,
   deriveCandidateStatus,
-  findExistingSyncedMaterial,
-  hasUsefulMeetingTimes,
-  htmlToText,
   materialStateKey,
-  normalizeScheduleForTerm,
-  resolveCanvasSourceKey,
-  saveImportedTextDocument,
-  saveSyncedMaterial,
-  type ScheduleSourceAuthority,
 } from "@/lib/canvas-sync/import-support";
+import type { MaterialSourceKind } from "@/lib/material-sync";
+import { runCanvasCourseCorpusSync } from "@/lib/course-corpus/sync";
 
 export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
 
@@ -216,15 +187,6 @@ function inferType(
 function normalizeDueDate(iso: string | null): string | null {
   if (!iso) return null;
   return iso;
-}
-
-function hasOverlappingDateRanges(
-  aStart: string,
-  aEnd: string,
-  bStart: string,
-  bEnd: string,
-): boolean {
-  return aStart <= bEnd && bStart <= aEnd;
 }
 
 // ─── Auth helper ─────────────────────────────────────────────────────────────
@@ -456,49 +418,9 @@ export async function POST(request: NextRequest) {
     await Promise.all(assUpdates.map(({ id, data }) => db.assignment.update({ where: { id }, data })));
   }
 
-  // 7. Upsert modules as CourseTopic — bulk fetch then createMany + parallel updates
-  //
-  // ALL modules are imported regardless of their naming convention. Canvas module
-  // data is real course data the student has access to and serves as a meaningful
-  // fallback when AI syllabus extraction hasn't run yet or didn't find a schedule.
-  // When AI extraction succeeds it will delete these and replace with parsed weeks.
-  let newModules = 0;
-  let updatedModules = 0;
-
-  {
-    const existingModDb = await db.courseTopic.findMany({
-      where: { courseId: { in: allScCourseIds }, canvasModuleId: { not: null } },
-      select: { id: true, courseId: true, canvasModuleId: true },
-    });
-    const existingModMap = new Map(
-      existingModDb.map(m => [`${m.courseId}:${m.canvasModuleId}`, m.id])
-    );
-
-    type ModCreate = Prisma.CourseTopicCreateManyInput;
-    type ModUpdate = { id: string; data: Prisma.CourseTopicUpdateInput };
-    const modCreates: ModCreate[] = [];
-    const modUpdates: ModUpdate[] = [];
-
-    for (const mod of modules) {
-      const scCourseId = courseIdMap.get(mod.courseId);
-      if (!scCourseId) continue;
-      const canvasModId = String(mod.moduleId);
-      const existingId = existingModMap.get(`${scCourseId}:${canvasModId}`);
-      if (existingId) {
-        modUpdates.push({
-          id: existingId,
-          data: { weekNumber: mod.position, weekLabel: mod.name, topics: mod.topics, readings: mod.readings },
-        });
-        updatedModules++;
-      } else {
-        modCreates.push({ courseId: scCourseId, canvasModuleId: canvasModId, weekNumber: mod.position, weekLabel: mod.name, topics: mod.topics, readings: mod.readings });
-        newModules++;
-      }
-    }
-
-    if (modCreates.length > 0) await db.courseTopic.createMany({ data: modCreates });
-    await Promise.all(modUpdates.map(({ id, data }) => db.courseTopic.update({ where: { id }, data })));
-  }
+  // 7. Modules are now canonical evidence inputs, not temporary CourseTopic rows.
+  const newModules = 0;
+  const updatedModules = 0;
 
   // 8. Upsert announcements
   let newAnnouncements = 0;
@@ -569,911 +491,166 @@ export async function POST(request: NextRequest) {
     bgLog.info("background AI processing started", { courses: courses.length, syncMode });
     await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: new Date() } });
 
-  try {
-  // AI syllabus processing — run all courses in parallel for speed
-  //    For each course that provided syllabus content:
-  //      a) Build best available syllabus text from HTML body + pre-extracted PDF texts
-  //      b) Save PDF-sourced materials as CourseMaterial records
-  //      c) Run parseSyllabusTopics() if we have substantial text
-  //      d) If AI returns a schedule, replace module-based topics with it
-  //
-  //    Skip courses that already have AI-parsed topics (canvasModuleId = null)
-  //    so subsequent syncs are fast and don't overwrite user-annotated progress.
+    try {
+      const courseDebug: Array<{
+        name: string;
+        weeksWritten: number;
+        classScheduleSource: string;
+        status: string;
+        error?: string;
+      }> = [];
 
-  let aiTopicsCreated = 0;
-  let syllabusFilesImported = 0;
+      await Promise.all(
+        courses.map(async (c) => {
+          const scCourseId = courseIdMap.get(c.id);
+          if (!scCourseId) return;
 
-  // ── Per-course structured debug info ──────────────────────────────────────
-  // Built during processing, logged immediately per course (not batched at
-  // end so a timeout can't silently kill the log), and returned in the
-  // response body so the extension can persist it to chrome.storage.local.
-type CandidateDebug = { label: string; chars: number; windowChars: number; score: number; authority?: ScheduleSourceAuthority };
-type MaterialDebug  = { fileName: string; detectedType: string; chars: number };
-  type CourseDebug = {
-    name: string;
-    existingAiTopics: number;
-    shouldRunAI: boolean;
-    syllabusBody: { chars: number; score: number } | null;
-    syllabusTexts: { fileName: string; chars: number; windowChars: number; score: number; authority: ScheduleSourceAuthority }[];
-    candidates: CandidateDebug[];
-    selectedSource: string;
-    materials: MaterialDebug[];
-    weeksWritten: number;
-    classScheduleSource: string;
-    status: string;
-    error?: string;
-  };
-  const allCourseDebug: CourseDebug[] = [];
-  const scheduleRows: string[] = [];
-
-  await Promise.all(
-    courses.map(async (c) => {
-      try {
-      const scCourseId = courseIdMap.get(c.id);
-      if (!scCourseId) return;
-
-      const existingCourseRecord = await db.course.findUnique({
-        where: { id: scCourseId },
-        select: { timelineDiagnostics: true },
-      });
-      const existingTimelineDiagnostics =
-        existingCourseRecord?.timelineDiagnostics &&
-        typeof existingCourseRecord.timelineDiagnostics === "object" &&
-        !Array.isArray(existingCourseRecord.timelineDiagnostics)
-          ? existingCourseRecord.timelineDiagnostics as Record<string, unknown>
-          : null;
-      const existingTimelineQuality =
-        typeof existingTimelineDiagnostics?.timelineQuality === "string"
-          ? existingTimelineDiagnostics.timelineQuality
-          : null;
-      const existingUsedModuleScaffold = existingTimelineDiagnostics?.usedModuleScaffold === true;
-
-      // ── a) Check whether AI topics already exist ─────────────────────────
-      const existingAiTopics = await db.courseTopic.count({
-        where: { courseId: scCourseId, canvasModuleId: null },
-      });
-      const existingAiTopicRange = existingAiTopics > 0
-        ? await db.courseTopic.aggregate({
-            where: {
-              courseId: scCourseId,
-              canvasModuleId: null,
-              startDate: { not: null },
-            },
-            _min: { startDate: true },
-            _max: { startDate: true },
-          })
-        : null;
-
-      let staleAiTimeline = false;
-      if (
-        existingAiTopicRange?._min.startDate &&
-        existingAiTopicRange?._max.startDate &&
-        c.termStartAt
-      ) {
-        const termStart = c.termStartAt.split("T")[0];
-        const termEnd = c.termEndAt
-          ? c.termEndAt.split("T")[0]
-          : addDays(new Date(`${termStart}T12:00:00Z`), 140).toISOString().slice(0, 10);
-        const paddedStart = subDays(new Date(`${termStart}T12:00:00Z`), 42).toISOString().slice(0, 10);
-        const paddedEnd = addDays(new Date(`${termEnd}T12:00:00Z`), 42).toISOString().slice(0, 10);
-        staleAiTimeline = !hasOverlappingDateRanges(
-          existingAiTopicRange._min.startDate,
-          existingAiTopicRange._max.startDate,
-          paddedStart,
-          paddedEnd,
-        );
-      }
-
-      // If we already parsed this course's syllabus, don't overwrite unless the
-      // stored AI timeline is clearly from a different term and therefore stale.
-      const shouldRunAIBase = existingAiTopics === 0 || staleAiTimeline;
-
-      const dbg: CourseDebug = {
-        name: c.name,
-        existingAiTopics,
-        shouldRunAI: shouldRunAIBase,
-        syllabusBody: null,
-        syllabusTexts: [],
-        candidates: [],
-        selectedSource: "none",
-        materials: [],
-        weeksWritten: 0,
-        classScheduleSource: "",
-        status: staleAiTimeline ? "pending:stale-ai-timeline" : "pending",
-      };
-
-      // ── b+c) Pick best source by schedule-content density ─────────────────
-      // Collect all candidate texts, score each, use the highest-scoring one.
-      // "Longest text" is a poor proxy — a 10k-char policy page scores lower
-      // than a 3k-char week-by-week schedule table.
-      const syllabusTexts = c.syllabusTexts ?? [];
-
-      type ScoredSource = { text: string; score: number; label: string; authority: ScheduleSourceAuthority };
-      const candidates: ScoredSource[] = [];
-
-      if (c.syllabusBody) {
-        const bodyText = htmlToText(c.syllabusBody);
-        if (bodyText.length >= 100) {
-          const win = bestWindow(bodyText);
-          const score = scheduleScore(win);
-          // Score the best window — short HTML bodies are scored whole; large ones find densest slice
-          candidates.push({ text: bodyText, score, label: "html-body", authority: "primary" });
-          dbg.syllabusBody = { chars: bodyText.length, score };
-        }
-      }
-
-      for (const st of syllabusTexts) {
-        const pdfText = st.text.trim();
-        let pdfClassification = classifyImportedPdfSource(st.fileName, "", 0);
-        if (pdfText.length >= 100) {
-          const win = bestWindow(pdfText);
-          const score = scheduleScore(win);
-          pdfClassification = classifyImportedPdfSource(st.fileName, win, score);
-          if (pdfClassification.authority !== "enrichment") {
-            candidates.push({ text: pdfText, score, label: st.fileName, authority: pdfClassification.authority });
-          }
-          dbg.syllabusTexts.push({
-            fileName: st.fileName,
-            chars: pdfText.length,
-            windowChars: win.length,
-            score,
-            authority: pdfClassification.authority,
-          });
-        } else {
-          dbg.syllabusTexts.push({
-            fileName: st.fileName,
-            chars: pdfText.length,
-            windowChars: 0,
-            score: 0,
-            authority: pdfClassification.authority,
-          });
-        }
-
-        try {
-          const sourceKind: MaterialSourceKind = st.sourceKind ?? "canvas_syllabus";
-          const sourceKey = resolveCanvasSourceKey(sourceKind, st.fileName, st.sourceKey);
-          const existing = await findExistingSyncedMaterial(scCourseId, sourceKind, sourceKey, st.fileName);
-          const contentHash = hashMaterialText(pdfText);
-          const storedText = pdfText.slice(0, 60_000);
-          const material = await saveSyncedMaterial({
-            existing,
-            courseId: scCourseId,
-            fileName: st.fileName,
-            detectedType: pdfClassification.detectedType,
-            sourceRole: pdfClassification.sourceRole,
-            sourceKind,
-            sourceKey,
-            summary:
-              pdfClassification.detectedType === "syllabus"
-                ? "Syllabus automatically imported from Canvas."
-                : "Canvas-linked PDF imported from the syllabus page.",
-            relatedTopics: [],
-            rawText: storedText,
-            contentHash,
-            sourceUpdatedAt: st.remoteUpdatedAt ?? null,
-            autoStoredForAI: pdfClassification.storedForAI,
-          });
-          if (!existing) syllabusFilesImported++;
-          if (!existing || existing.contentHash !== contentHash) {
-            try {
-              await updateMaterialEmbedding(material.id, pdfText);
-            } catch { /* embedding failure never blocks import */ }
-          }
-        } catch (matErr) {
-          console.error(`[sync] ${c.name}: material save failed for ${st.fileName}:`, matErr);
-        }
-      }
-
-      // ── b1b) Persist Canvas-native text sources into the canonical corpus ──
-      if (c.syllabusBody) {
-        const bodyText = htmlToText(c.syllabusBody).trim();
-        if (bodyText.length >= 100) {
           try {
-            await saveImportedTextDocument({
-              courseId: scCourseId,
-              fileName: "Canvas syllabus page",
-              text: bodyText,
-              sourceKind: "canvas_syllabus_page",
-              sourceKey: "syllabus-body",
-              classification: classifyCanvasTextDocument(
-                "canvas_syllabus_page",
-                "Canvas syllabus page",
-                bodyText,
-              ),
-            });
-          } catch (matErr) {
-            console.error(`[sync] ${c.name}: syllabus-body save failed:`, matErr);
-          }
-        }
-      }
+            const courseAssignments = assignments.filter((assignment) => assignment.courseId === c.id);
+            const courseModules = modules.filter((module) => module.courseId === c.id);
+            const courseAnnouncements = announcements.filter((announcement) => announcement.courseId === c.id);
 
-      const pageTexts = c.pageTexts ?? [];
-      if (pageTexts.length > 0) {
-        await Promise.all(
-          pageTexts
-            .filter((page) => page.text.trim().length >= 100)
-            .map(async (page) => {
-              try {
-                await saveImportedTextDocument({
-                  courseId: scCourseId,
-                  fileName: page.fileName,
-                  text: page.text,
-                  sourceKind: page.sourceKind ?? "canvas_page",
-                  sourceKey: resolveCanvasSourceKey(page.sourceKind ?? "canvas_page", page.fileName, page.sourceKey),
-                  sourceUpdatedAt: page.remoteUpdatedAt ?? null,
-                  classification: classifyCanvasTextDocument(
-                    page.sourceKind ?? "canvas_page",
-                    page.fileName,
-                    page.text,
-                  ),
-                });
-              } catch (matErr) {
-                console.error(`[sync] ${c.name}: page save failed for ${page.fileName}:`, matErr);
-              }
-            }),
-        );
-      }
-
-      const courseAnnouncements = announcements.filter(
-        (announcement) => announcement.courseId === c.id && typeof announcement.body === "string" && announcement.body.trim().length >= 40,
-      );
-      if (courseAnnouncements.length > 0) {
-        await Promise.all(
-          courseAnnouncements.map(async (announcement) => {
-            const bodyText = decodeAnnouncementBody(announcement.body).trim();
-            if (bodyText.length < 40) return;
-            const fileName = `Announcement - ${announcement.title}`;
-            try {
-              await saveImportedTextDocument({
-                courseId: scCourseId,
-                fileName,
-                text: bodyText,
-                sourceKind: "canvas_announcement",
-                sourceKey: `announcement:${announcement.canvasId}`,
-                sourceUpdatedAt: announcement.postedAt ?? null,
-                classification: classifyCanvasTextDocument(
-                  "canvas_announcement",
-                  fileName,
-                  bodyText,
-                ),
-              });
-            } catch (matErr) {
-              console.error(`[sync] ${c.name}: announcement save failed for ${announcement.title}:`, matErr);
-            }
-          }),
-        );
-      }
-
-      // ── b2) Course materials (problem sets, lecture notes, etc.) ─────────────
-      // materialTexts are non-syllabus PDFs collected from all Canvas modules.
-      // Run AI classification on each and upsert into CourseMaterial.
-      // These are NOT used for syllabus topic extraction — only for the
-      // Materials tab display and quiz generation.
-      const materialTexts = c.materialTexts ?? [];
-      if (materialTexts.length > 0) {
-        const courseTopicLabels = await db.courseTopic.findMany({
-          where: { courseId: scCourseId },
-          select: { weekLabel: true },
-        });
-        const topicLabels = courseTopicLabels.map((t) => t.weekLabel);
-
-        await Promise.all(
-          materialTexts
-            .filter((mt) => mt.text.trim().length >= 50)
-            .map(async (mt) => {
-              const pdfText = mt.text.trim();
-              const sourceKind: MaterialSourceKind = mt.sourceKind ?? "canvas_module";
-              const sourceKey = resolveCanvasSourceKey(sourceKind, mt.fileName, mt.sourceKey);
-              const contentHash = hashMaterialText(pdfText);
-              const storedRawText = sourceKind === "canvas_media" ? pdfText : pdfText.slice(0, 25_000);
-
-              try {
-                const existing = await findExistingSyncedMaterial(scCourseId, sourceKind, sourceKey, mt.fileName);
-
-                if (existing && existing.contentHash === contentHash) {
-                  const material = await saveSyncedMaterial({
-                    existing,
+            const materialCandidates = c.materialCandidates ?? [];
+            if (materialCandidates.length > 0) {
+              const [importedMaterials, existingCandidates] = await Promise.all([
+                db.courseMaterial.findMany({
+                  where: {
                     courseId: scCourseId,
-                    fileName: mt.fileName,
-                    detectedType: existing.detectedType,
-                    sourceRole: existing.sourceRole,
-                    sourceKind,
-                    sourceKey,
-                    summary: existing.summary,
-                    relatedTopics: existing.relatedTopics,
-                    rawText: storedRawText,
-                    contentHash,
-                    sourceUpdatedAt: mt.remoteUpdatedAt ?? existing.sourceUpdatedAt ?? null,
-                    autoStoredForAI:
-                      existing.userStoredForAIOverride == null
-                        ? existing.autoStoredForAI || existing.storedForAI
-                        : existing.autoStoredForAI,
-                  });
-                  try {
-                    await ensureMaterialTranscriptChunks({
-                      materialId: material.id,
-                      courseId: scCourseId,
-                      sourceKind,
-                      text: pdfText,
-                      contentHash,
-                    });
-                  } catch { /* transcript chunk indexing never blocks import */ }
-                  dbg.materials.push({ fileName: mt.fileName, detectedType: existing.detectedType, chars: pdfText.length });
-                  return;
-                }
-
-                const analysis = await analyzeCourseMaterial(pdfText, topicLabels);
-                const detectedType =
-                  sourceKind === "canvas_media" && analysis.detectedType === "other"
-                    ? "lecture_notes"
-                    : analysis.detectedType;
-                const summary =
-                  sourceKind === "canvas_media" && analysis.summary === "Unable to analyze document."
-                    ? "Auto-imported lecture transcript from Canvas Media Gallery."
-                    : analysis.summary;
-                const autoStoredForAI =
-                  sourceKind === "canvas_media" ||
-                  ["lecture_notes", "lecture_slides", "textbook"].includes(detectedType);
-                const material = await saveSyncedMaterial({
-                  existing,
-                  courseId: scCourseId,
-                  fileName: mt.fileName,
-                  detectedType,
-                  sourceRole:
-                    sourceKind === "canvas_media"
-                      ? "content"
-                      : inferMaterialSourceRole(detectedType, mt.fileName),
-                  sourceKind,
-                  sourceKey,
-                  summary,
-                  relatedTopics: analysis.relatedTopics,
-                  rawText: storedRawText,
-                  contentHash,
-                  sourceUpdatedAt: mt.remoteUpdatedAt ?? null,
-                  autoStoredForAI,
-                });
-                try {
-                  await updateMaterialSearchIndex({
-                    materialId: material.id,
+                    sourceKind: { in: ["canvas_module", "canvas_media", "canvas_syllabus"] },
+                    sourceKey: { in: materialCandidates.map((candidate) => candidate.contentId) },
+                  },
+                  select: {
+                    sourceKind: true,
+                    sourceKey: true,
+                    sourceUpdatedAt: true,
+                  },
+                }),
+                db.canvasMaterialCandidate.findMany({
+                  where: {
                     courseId: scCourseId,
-                    sourceKind,
-                    text: pdfText,
-                    contentHash,
-                  });
-                } catch { /* search indexing never blocks import */ }
-                dbg.materials.push({ fileName: mt.fileName, detectedType, chars: pdfText.length });
-              } catch {
-                dbg.materials.push({ fileName: mt.fileName, detectedType: "error", chars: pdfText.length });
-              }
-            })
-        );
-      }
-
-      // ── b3) Material candidates — upsert all and preserve freshness state ──
-      // Candidates remain in the database even after import so future scouts can
-      // compare remote metadata against imported CourseMaterial freshness.
-      try {
-        const removedDuplicates = await dedupeCanvasFileMaterials(scCourseId);
-        if (removedDuplicates > 0) {
-          console.log(`[sync] ${c.name}: removed ${removedDuplicates} duplicate canvas file material row(s)`);
-        }
-      } catch (dedupeErr) {
-        console.error(`[sync] ${c.name}: duplicate material cleanup failed:`, dedupeErr);
-      }
-
-      const materialCandidates = c.materialCandidates ?? [];
-      if (materialCandidates.length > 0) {
-        try {
-          const [importedMaterials, existingCandidates] = await Promise.all([
-            db.courseMaterial.findMany({
-              where: {
-                courseId: scCourseId,
-                sourceKind: { in: ["canvas_module", "canvas_media"] },
-                sourceKey: { in: materialCandidates.map((candidate) => candidate.contentId) },
-              },
-              select: {
-                sourceKind: true,
-                sourceKey: true,
-                sourceUpdatedAt: true,
-              },
-            }),
-            db.canvasMaterialCandidate.findMany({
-              where: {
-                courseId: scCourseId,
-                contentId: { in: materialCandidates.map((candidate) => candidate.contentId) },
-              },
-              select: {
-                contentId: true,
-                requested: true,
-                remoteSize: true,
-              },
-            }),
-          ]);
-          const importedMaterialMap = new Map(
-            importedMaterials
-              .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
-              .map((material) => [
-                materialStateKey(material.sourceKind as MaterialSourceKind, material.sourceKey),
-                { sourceUpdatedAt: material.sourceUpdatedAt },
-              ]),
-          );
-          const existingCandidateMap = new Map(
-            existingCandidates.map((candidate) => [candidate.contentId, candidate]),
-          );
-
-          for (const candidate of materialCandidates) {
-            const sourceKind = candidate.sourceKind ?? "canvas_module";
-            const candidateKey = materialStateKey(sourceKind, candidate.contentId);
-            const importedMaterial = importedMaterialMap.get(candidateKey) ?? null;
-            const requested = importedMaterial
-              ? false
-              : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
-            const previousCandidate = existingCandidateMap.get(candidate.contentId) ?? null;
-            await db.canvasMaterialCandidate.upsert({
-              where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
-              update: {
-                fileName: candidate.fileName,
-                moduleName: candidate.moduleName,
-                sourceKind,
-                remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                remoteSize: candidate.remoteSize ?? null,
-                requested,
-                status: deriveCandidateStatus({
-                  requested,
-                  importedMaterial,
-                  remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                  remoteSize: candidate.remoteSize ?? null,
-                  previousRemoteSize: previousCandidate?.remoteSize ?? null,
+                    contentId: { in: materialCandidates.map((candidate) => candidate.contentId) },
+                  },
+                  select: {
+                    contentId: true,
+                    requested: true,
+                    remoteSize: true,
+                  },
                 }),
-                lastSeenAt: new Date(),
-              },
-              create: {
-                courseId: scCourseId,
-                fileName: candidate.fileName,
-                moduleName: candidate.moduleName,
-                contentId: candidate.contentId,
-                sourceKind,
-                remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                remoteSize: candidate.remoteSize ?? null,
-                requested,
-                status: deriveCandidateStatus({
-                  requested,
-                  importedMaterial,
-                  remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                  remoteSize: candidate.remoteSize ?? null,
-                  previousRemoteSize: previousCandidate?.remoteSize ?? null,
-                }),
-                lastSeenAt: new Date(),
-              },
-            });
-          }
-        } catch (candErr) {
-          console.error(`[sync] ${c.name}: candidate upsert failed:`, candErr);
-        }
-      }
+              ]);
 
-      if (syncMode === "scout") {
-        dbg.status = "scout:materials-only";
-        allCourseDebug.push(dbg);
-        console.log(`[sync] ${c.name}: scout-only refresh | materials=${dbg.materials.length} | candidates=${materialCandidates.length}`);
-        return;
-      }
-
-      // Fallback: if client didn't send syllabus text, try stored CourseMaterial
-      if (candidates.length === 0) {
-        try {
-          const storedSyllabus = await db.courseMaterial.findMany({
-            where: { courseId: scCourseId, detectedType: "syllabus" },
-            select: { fileName: true, rawText: true },
-          });
-          for (const stored of storedSyllabus) {
-            if (stored.rawText && stored.rawText.length >= 100) {
-              const win = bestWindow(stored.rawText);
-              const score = scheduleScore(win);
-              const storedClassification = classifyImportedPdfSource(stored.fileName, win, score);
-              if (storedClassification.authority !== "enrichment") {
-                candidates.push({
-                  text: stored.rawText,
-                  score,
-                  label: `stored:${stored.fileName}`,
-                  authority: storedClassification.authority,
-                });
-              }
-              console.log(`[sync] ${c.name}: using stored syllabus text "${stored.fileName}" (${stored.rawText.length}c, score=${score.toFixed(3)})`);
-            }
-          }
-        } catch { /* non-fatal */ }
-      }
-
-      // Pick highest-scoring candidate; fall back to longest if all score 0
-      candidates.sort((a, b) => b.score !== a.score ? b.score - a.score : b.text.length - a.text.length);
-      const best = candidates[0];
-      const syllabusText = best?.text ?? "";
-      const bestLabel = best ? `${best.label}(score=${best.score.toFixed(3)},${best.text.length}c)` : "none";
-      const hasStrongSyllabusCandidate = candidates.some(
-        (candidate) => candidate.authority !== "enrichment" && candidate.text.length >= 500,
-      );
-      const shouldRefreshWeakModuleScaffold =
-        !shouldRunAIBase &&
-        existingAiTopics > 0 &&
-        existingUsedModuleScaffold &&
-        existingTimelineQuality === "weak" &&
-        hasStrongSyllabusCandidate;
-      const shouldRunAI = shouldRunAIBase || shouldRefreshWeakModuleScaffold;
-      dbg.shouldRunAI = shouldRunAI;
-      if (shouldRefreshWeakModuleScaffold) {
-        dbg.status = "pending:refresh-weak-module-scaffold";
-      }
-
-      // Full candidate list for diagnostics (all sources, not just the winner)
-      const candidatesSummary = candidates.length === 0
-        ? "none"
-        : candidates.map((cd) => `${cd.label}(${cd.score.toFixed(2)},${cd.text.length}c)`).join(" | ");
-
-      // Record ranked candidates in debug info
-      dbg.candidates = candidates.map(cd => ({
-        label: cd.label,
-        chars: cd.text.length,
-        windowChars: bestWindow(cd.text).length,
-        score: cd.score,
-        authority: cd.authority,
-      }));
-      dbg.selectedSource = bestLabel;
-
-      // ── d-pre) Syllabus drop rule extraction ──────────────────────────────
-      // Only runs if at least one group still has syllabusDropLowest/Highest = 0.
-      // Skipped on subsequent syncs once rules are detected — avoids redundant AI calls.
-      if (syllabusText.length >= 200) {
-        try {
-          const groups = await db.assignmentGroup.findMany({
-            where: { courseId: scCourseId },
-            select: { id: true, name: true, dropLowest: true, dropHighest: true, syllabusDropLowest: true, syllabusDropHighest: true },
-          });
-          const needsDropRules = groups.some(
-            (g) => g.syllabusDropLowest === 0 && g.syllabusDropHighest === 0
-          );
-          const dropRules = needsDropRules ? await extractDropRules(syllabusText) : [];
-          if (dropRules.length > 0) {
-            const norm = (s: string) => s.toLowerCase().replace(/s+$/, "").trim();
-            for (const rule of dropRules) {
-              const match = groups.find(
-                (g) =>
-                  norm(g.name).includes(norm(rule.groupName)) ||
-                  norm(rule.groupName).includes(norm(g.name))
+              const importedMaterialMap = new Map(
+                importedMaterials
+                  .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
+                  .map((material) => [
+                    materialStateKey(material.sourceKind as MaterialSourceKind, material.sourceKey),
+                    { sourceUpdatedAt: material.sourceUpdatedAt },
+                  ]),
               );
-              if (!match) continue;
-              const data: { syllabusDropLowest?: number; syllabusDropHighest?: number } = {};
-              if (rule.dropLowest > 0 && match.dropLowest === 0) data.syllabusDropLowest = rule.dropLowest;
-              if (rule.dropHighest > 0 && match.dropHighest === 0) data.syllabusDropHighest = rule.dropHighest;
-              if (Object.keys(data).length > 0) {
-                await db.assignmentGroup.update({ where: { id: match.id }, data });
-              }
+              const existingCandidateMap = new Map(existingCandidates.map((candidate) => [candidate.contentId, candidate]));
+
+              await Promise.all(
+                materialCandidates.map((candidate) => {
+                  const sourceKind = candidate.sourceKind ?? "canvas_module";
+                  const candidateKey = materialStateKey(sourceKind, candidate.contentId);
+                  const importedMaterial = importedMaterialMap.get(candidateKey) ?? null;
+                  const requested = importedMaterial
+                    ? false
+                    : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
+                  const previousCandidate = existingCandidateMap.get(candidate.contentId) ?? null;
+
+                  return db.canvasMaterialCandidate.upsert({
+                    where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
+                    update: {
+                      fileName: candidate.fileName,
+                      moduleName: candidate.moduleName,
+                      sourceKind,
+                      remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                      remoteSize: candidate.remoteSize ?? null,
+                      requested,
+                      status: deriveCandidateStatus({
+                        requested,
+                        importedMaterial,
+                        remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                        remoteSize: candidate.remoteSize ?? null,
+                        previousRemoteSize: previousCandidate?.remoteSize ?? null,
+                      }),
+                      lastSeenAt: new Date(),
+                    },
+                    create: {
+                      courseId: scCourseId,
+                      fileName: candidate.fileName,
+                      moduleName: candidate.moduleName,
+                      contentId: candidate.contentId,
+                      sourceKind,
+                      remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                      remoteSize: candidate.remoteSize ?? null,
+                      requested,
+                      status: deriveCandidateStatus({
+                        requested,
+                        importedMaterial,
+                        remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+                        remoteSize: candidate.remoteSize ?? null,
+                        previousRemoteSize: previousCandidate?.remoteSize ?? null,
+                      }),
+                      lastSeenAt: new Date(),
+                    },
+                  });
+                }),
+              );
             }
+
+            const result = await runCanvasCourseCorpusSync({
+              courseId: scCourseId,
+              courseName: c.name,
+              termStartAt: c.termStartAt ?? null,
+              termEndAt: c.termEndAt ?? null,
+              calendarEvents: c.calendarEvents ?? [],
+              course: c,
+              assignments: courseAssignments,
+              modules: courseModules,
+              announcements: courseAnnouncements,
+            });
+
+            courseDebug.push({
+              name: c.name,
+              weeksWritten: result.weeksWritten,
+              classScheduleSource: result.classScheduleSource,
+              status: syncMode === "scout" ? "scout:corpus-refresh" : "ok",
+            });
+            console.log(
+              `[sync] ${c.name}: corpus-first rebuild → ${result.weeksWritten} weeks | classSchedule=${result.classScheduleSource}`,
+            );
+          } catch (courseErr) {
+            courseDebug.push({
+              name: c.name,
+              weeksWritten: 0,
+              classScheduleSource: "error",
+              status: "error",
+              error: String(courseErr),
+            });
+            console.error(`[sync] ${c.name}: corpus-first sync failed`, courseErr);
           }
-        } catch {
-          // Don't fail the whole import on this optional enrichment
-        }
-      }
+        }),
+      );
 
-      // ── d-pre2) Class schedule extraction ──────────────────────────────────
-      // Extracts recurring meeting patterns (days, times, room) so students
-      // can add class times to Google Calendar with one click.
-      // Only runs if the course doesn't already have a classSchedule stored.
-      // Source priority:
-      //   1. Syllabus text (AI extraction) — most descriptive, has room info
-      //   2. Canvas calendar events (deterministic) — reliable fallback when
-      //      the syllabus doesn't mention meeting times
-      try {
-        let classSchedule = null;
-        let classScheduleSource = "none";
-        let syllabusClassSchedule: ExtractedClassSchedule | null = null;
-        let calendarClassSchedule: ExtractedClassSchedule | null = null;
-        const debugClassScheduleCourse = /anthropology/i.test(c.name);
-
-        // Source 1: best-scoring syllabus text (from topic extraction pipeline)
-        if (syllabusText.length >= 200) {
-          if (debugClassScheduleCourse) {
-            console.log(`[sync-debug] ${c.name}: classSchedule source1 probe`, classScheduleProbe(syllabusText));
-          }
-          syllabusClassSchedule = await extractClassSchedule(syllabusText);
-          if (syllabusClassSchedule) classScheduleSource = "syllabus-ai";
-        }
-
-        // Source 1b: raw syllabusBody HTML — handles courses where the meeting
-        // times are in a short Canvas Page/syllabus tab that doesn't score well
-        // in the topic pipeline (e.g. just "Meeting Times: MWF 1-1:50PM")
-        if (!syllabusClassSchedule && c.syllabusBody) {
-          const rawBodyText = htmlToText(c.syllabusBody);
-          if (debugClassScheduleCourse) {
-            console.log(`[sync-debug] ${c.name}: classSchedule source1b probe`, classScheduleProbe(rawBodyText));
-          }
-          if (rawBodyText.length >= 50 && rawBodyText !== syllabusText) {
-            console.log(`[sync] ${c.name}: trying Source 1b (syllabusBody raw, ${rawBodyText.length}c)`);
-            syllabusClassSchedule = await extractClassSchedule(rawBodyText);
-            if (syllabusClassSchedule) classScheduleSource = "syllabus-body-raw";
-          }
-        }
-
-        // Source 2: Canvas calendar events (deterministic fallback)
-        if (c.calendarEvents && c.calendarEvents.length > 0) {
-          calendarClassSchedule = extractScheduleFromCalendarEvents(
-            c.calendarEvents,
-            c.termStartAt,
-            c.termEndAt,
-          );
-          if (!syllabusClassSchedule && calendarClassSchedule) {
-            classScheduleSource = `calEvents(${c.calendarEvents.length})`;
-          }
-        }
-
-        const normalizedSyllabusSchedule = normalizeScheduleForTerm(
-          syllabusClassSchedule,
-          c.termStartAt,
-          c.termEndAt,
-        );
-        const normalizedCalendarSchedule = normalizeScheduleForTerm(
-          calendarClassSchedule,
-          c.termStartAt,
-          c.termEndAt,
-        );
-
-        if (normalizedSyllabusSchedule && hasUsefulMeetingTimes(normalizedSyllabusSchedule)) {
-          classSchedule = normalizedSyllabusSchedule;
-        } else if (normalizedCalendarSchedule) {
-          classSchedule = normalizedCalendarSchedule;
-          classScheduleSource = `calEvents(${c.calendarEvents?.length ?? 0})`;
-          if (normalizedSyllabusSchedule?.finalExamDate && !classSchedule.finalExamDate) {
-            classSchedule.finalExamDate = normalizedSyllabusSchedule.finalExamDate;
-            classScheduleSource += "+syllabus-final";
-          }
-        } else if (normalizedSyllabusSchedule) {
-          classSchedule = normalizedSyllabusSchedule;
-        }
-
-        dbg.classScheduleSource = classScheduleSource + (classSchedule ? `(${classSchedule.meetings.length} meetings)` : "");
-        scheduleRows.push(
-          `${c.name}: ${classScheduleSource}` +
-          (classSchedule ? ` → ${classSchedule.meetings.length} meeting(s)` : "")
-        );
-
-        if (classSchedule) {
-          await db.course.update({
-            where: { id: scCourseId },
-            data: { classSchedule: classSchedule as object },
-          });
-        }
-      } catch {
-        // Don't fail the whole import on this optional enrichment
-      }
-
-      // ── d-pre3) Extract dated events for cross-source reconciliation ────────
-      // Runs parseSyllabusText to find exam/assignment dates in the syllabus.
-      // Stored on the Course so gradescope/import can fill in dates on assignments
-      // that Gradescope doesn't date (e.g. exams).
-      if (syllabusText.length >= 500) {
-        try {
-          const existingSyllabusEvents = await db.course.findUnique({
-            where: { id: scCourseId },
-            select: { syllabusEvents: true },
-          });
-          if (!existingSyllabusEvents?.syllabusEvents) {
-            const events = await parseSyllabusText(syllabusText);
-            if (events.length > 0) {
-              const storable = events.map((e) => ({
-                title: e.title,
-                dueDate: e.dueDate,
-                type: e.type,
-              }));
-              await db.course.update({
-                where: { id: scCourseId },
-                data: { syllabusEvents: storable as object[] },
-              });
-              console.log(`[sync] ${c.name}: extracted ${storable.length} syllabus events`);
-            }
-          }
-        } catch {
-          // Non-fatal — dates from syllabus are a bonus
-        }
-      }
-
-      // ── d) AI topic extraction ─────────────────────────────────────────────
-      // Count existing module topics to decide if pipeline should run for module cleanup
-      const existingModuleCount = await db.courseTopic.count({
-        where: { courseId: scCourseId, canvasModuleId: { not: null } },
+      bgLog.info("background corpus processing complete", {
+        coursesProcessed: courseDebug.length,
+        weeksWritten: courseDebug.reduce((sum, item) => sum + item.weeksWritten, 0),
+        statuses: courseDebug.map((item) => ({
+          name: item.name,
+          weeksWritten: item.weeksWritten,
+          classScheduleSource: item.classScheduleSource,
+          status: item.status,
+        })),
       });
-      const hasModulesToProcess = existingModuleCount > 0;
-
-      const aiStatus = !shouldRunAI ? `skip:has-ai-topics(${existingAiTopics})`
-        : syllabusText.length < 500 && !hasModulesToProcess ? `skip:too-short(${syllabusText.length}c)`
-        : `run(${syllabusText.length}c${hasModulesToProcess ? ',modules=' + existingModuleCount : ''})`;
-
-      if (!shouldRunAI || (syllabusText.length < 500 && !hasModulesToProcess)) {
-        dbg.status = aiStatus;
-        allCourseDebug.push(dbg);
-        console.log(`[sync] ${c.name}: ${aiStatus} | sources: ${candidatesSummary}`);
-        return;
-      }
-
-      try {
-        // ── Topic Pipeline: classify modules, extract topics, fuse timeline ──
-
-        // Fetch existing module-based topics
-        const existingModuleTopics = await db.courseTopic.findMany({
-          where: { courseId: scCourseId, canvasModuleId: { not: null } },
-          select: { id: true, weekNumber: true, weekLabel: true, topics: true, readings: true, canvasModuleId: true },
-        });
-
-        // Fetch class schedule (already stored earlier in this after() block)
-        const courseRecord = await db.course.findUnique({
-          where: { id: scCourseId },
-          select: { classSchedule: true, syllabusEvents: true },
-        });
-
-        // Fetch assignment due dates for date anchoring
-        const courseAssignments = await db.assignment.findMany({
-          where: { courseId: scCourseId, dueDate: { not: null } },
-          select: { title: true, dueDate: true },
-          orderBy: { dueDate: "asc" },
-        });
-
-        const pipelineInput: PipelineInput = {
-          courseId: scCourseId,
-          courseName: c.name,
-          candidates: candidates.map((src) => ({
-            text: src.text,
-            score: src.score,
-            label: src.label,
-            authority: src.authority,
-          })),
-          modules: existingModuleTopics.map((mt) => ({
-            id: mt.id,
-            canvasModuleId: mt.canvasModuleId!,
-            weekNumber: mt.weekNumber,
-            weekLabel: mt.weekLabel,
-            topics: mt.topics,
-            readings: mt.readings,
-          })),
-          classSchedule: (courseRecord?.classSchedule as PipelineInput["classSchedule"]) ?? null,
-          termStartDate: c.termStartAt ? c.termStartAt.split("T")[0] : null,
-          termEndDate: c.termEndAt
-            ? c.termEndAt.split("T")[0]
-            : (courseRecord?.classSchedule as { finalExamDate?: string | null })?.finalExamDate ?? null,
-          assignments: courseAssignments.map((a) => ({
-            title: a.title,
-            dueDate: a.dueDate,
-          })),
-          syllabusEvents: Array.isArray(courseRecord?.syllabusEvents)
-            ? (courseRecord.syllabusEvents as { title?: string; dueDate?: string; type?: string }[])
-                .filter(
-                  (event): event is { title: string; dueDate: string; type: string } =>
-                    typeof event?.title === "string" &&
-                    typeof event?.dueDate === "string" &&
-                    typeof event?.type === "string",
-                )
-                .map((event) => ({
-                  title: event.title,
-                  dueDate: event.dueDate,
-                  type: event.type,
-                }))
-            : [],
-        };
-
-        const pipelineResult = await runTopicPipeline(pipelineInput);
-        const topics = pipelineResult.topics;
-        const anchors = pipelineResult.anchors;
-
-        // Delete identified module topics
-        if (pipelineResult.moduleIdsToDelete.length > 0) {
-          await db.courseTopic.deleteMany({
-            where: { id: { in: pipelineResult.moduleIdsToDelete } },
-          });
-        }
-
-        // Delete any prior AI-sourced topics (avoid duplicates)
-        await db.courseTopic.deleteMany({
-          where: { courseId: scCourseId, canvasModuleId: null },
-        });
-        await db.courseTimelineAnchor.deleteMany({
-          where: { courseId: scCourseId },
-        });
-
-        // Write new unified timeline
-        await db.course.update({
-          where: { id: scCourseId },
-          data: {
-            timelineMode: pipelineResult.timelineMode,
-            timelineDiagnostics: {
-              ...(pipelineResult.timelineDiagnostics as Record<string, unknown>),
-              selectedSource: dbg.selectedSource,
-              candidateSources: dbg.candidates,
-              classScheduleSource: dbg.classScheduleSource,
-              importedMaterials: dbg.materials,
-              pipelineDebug: pipelineResult.debug as unknown as Prisma.InputJsonValue,
-            } as Prisma.InputJsonValue,
-          },
-        });
-
-        if (anchors.length > 0) {
-          await db.courseTimelineAnchor.createMany({
-            data: anchors.map((anchor) => ({
-              courseId: scCourseId,
-              sequenceNumber: anchor.sequenceNumber,
-              anchorDate: anchor.anchorDate,
-              anchorType: anchor.anchorType,
-              isInstructional: anchor.isInstructional,
-              calendarConfidence: anchor.calendarConfidence,
-              sourceRefs: anchor.sourceRefs as Prisma.InputJsonValue,
-              notes: anchor.notes ?? null,
-            })),
-          });
-        }
-
-        if (topics.length > 0) {
-          await db.courseTopic.createMany({
-            data: topics.map((t, i) => ({
-              courseId: scCourseId,
-              weekNumber: Number.isInteger(t.weekNumber) ? t.weekNumber : (parseInt(String(t.weekNumber), 10) || i + 1),
-              weekLabel: typeof t.weekLabel === "string" && t.weekLabel.trim() ? t.weekLabel.trim() : `Week ${i + 1}`,
-              startDate: typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate) ? t.startDate : null,
-              topics: Array.isArray(t.topics) ? t.topics.filter((x: unknown) => typeof x === "string") : [],
-              readings: Array.isArray(t.readings) ? t.readings.filter((x: unknown) => typeof x === "string") : [],
-              notes: typeof t.notes === "string" ? t.notes : null,
-              dateConfidence: t.dateConfidence,
-              contentConfidence: t.contentConfidence,
-              scheduleMode: t.scheduleMode,
-              provenance: t.provenance as Prisma.InputJsonValue,
-              verificationStatus: t.verificationStatus,
-              sourceBlock: t.sourceBlock,
-              canvasModuleId: null,
-            })),
-          });
-        }
-
-        aiTopicsCreated += topics.length;
-        dbg.weeksWritten = topics.length;
-        dbg.status = topics.length > 0 ? "ok" : "pipeline-0-weeks";
-
-        allCourseDebug.push(dbg);
-        console.log(
-          `[sync] ${c.name}: pipeline → ${topics.length} weeks` +
-          ` | deleted ${pipelineResult.moduleIdsToDelete.length} module topics` +
-          ` | stage1=${pipelineResult.debug.stage1Classifications.length} modules classified` +
-          ` | stage2=${pipelineResult.debug.stage2Weeks} extracted entries` +
-          ` | stage3=v${pipelineResult.debug.stage3Reconciliation.verified}/c${pipelineResult.debug.stage3Reconciliation.corroborated}/u${pipelineResult.debug.stage3Reconciliation.unverified}/x${pipelineResult.debug.stage3Reconciliation.conflicted}/g${pipelineResult.debug.stage3Reconciliation.gaps}` +
-          ` | stage4=${pipelineResult.debug.stage4OutputWeeks} fused weeks` +
-          (pipelineResult.debug.fallbackUsed ? " | FALLBACK" : "") +
-          (pipelineResult.debug.stage4Warnings.length > 0 ? ` | warnings=${pipelineResult.debug.stage4Warnings.length}` : "")
-        );
-      } catch (err) {
-        dbg.status = "error";
-        dbg.error = String(err);
-        allCourseDebug.push(dbg);
-        console.error(`[sync] ${c.name}: ERROR ${err} | sources: ${candidatesSummary}`);
-      }
-      } catch (courseErr) {
-        console.error(`[sync] ${c.name}: UNHANDLED course-level error:`, courseErr);
-      }
-    })
-  );
-
-  if (scheduleRows.length > 0) {
-    console.log("[sync] classSchedule:\n" + scheduleRows.join("\n"));
-  }
-
-  bgLog.info("background AI processing complete", {
-    aiWeeks: aiTopicsCreated,
-    filesImported: syllabusFilesImported,
-    coursesProcessed: allCourseDebug.length,
-  });
-  await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
-
-  } catch (err) {
-    bgLog.error("background AI processing CRASHED", {
-      error: String(err),
-      stack: err instanceof Error ? err.stack : undefined,
-    });
-    await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
-  }
+      await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
+    } catch (err) {
+      bgLog.error("background corpus processing crashed", {
+        error: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: null } }).catch(() => {});
+    }
 
   }); // end after()
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { ingestStandaloneEvidence, rebuildCourseCorpusProjections } from "@/lib/course-corpus/sync";
 import { type SyllabusEvent } from "@/types";
 
 const COLORS = ["blue", "green", "purple", "orange", "rose"];
@@ -14,16 +15,51 @@ type TopicData = {
   notes: string | null;
 };
 
+type ParsedCourseDocument = {
+  fileName: string;
+  text: string;
+};
+
+function matchCoursePayload<T>(payload: Record<string, T> | undefined, courseName: string): T | undefined {
+  if (!payload) return undefined;
+  if (payload[courseName] !== undefined) return payload[courseName];
+
+  const lc = courseName.toLowerCase();
+  return Object.entries(payload).find(
+    ([key]) =>
+      key.toLowerCase() === lc ||
+      key.toLowerCase().includes(lc) ||
+      lc.includes(key.toLowerCase()),
+  )?.[1];
+}
+
+function buildTopicFallbackDocument(courseName: string, courseTopics: TopicData[]): string {
+  return [
+    `${courseName} parsed syllabus outline`,
+    ...courseTopics.map((topic) => {
+      const lines = [
+        topic.weekLabel || `Week ${topic.weekNumber}`,
+        topic.startDate ? `Start date: ${topic.startDate}` : null,
+        topic.topics.length > 0 ? `Topics: ${topic.topics.join("; ")}` : null,
+        topic.readings.length > 0 ? `Readings: ${topic.readings.join("; ")}` : null,
+        topic.notes ? `Notes: ${topic.notes}` : null,
+      ].filter(Boolean);
+      return lines.join("\n");
+    }),
+  ].join("\n\n");
+}
+
 export async function POST(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { events, syncResults, topicsByCourse } = (await request.json()) as {
+  const { events, syncResults, topicsByCourse, documentsByCourse } = (await request.json()) as {
     events: SyllabusEvent[];
     syncResults: { title: string; success: boolean; googleEventId?: string | null }[];
     topicsByCourse?: Record<string, TopicData[]>;
+    documentsByCourse?: Record<string, ParsedCourseDocument[]>;
   };
 
   if (!events || events.length === 0) {
@@ -103,28 +139,33 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Save weekly topics — try exact match first, then fuzzy
-    const lc = courseName.toLowerCase();
-    const courseTopics =
-      topicsByCourse?.[courseName] ??
-      Object.entries(topicsByCourse ?? {}).find(
-        ([k]) =>
-          k.toLowerCase() === lc ||
-          k.toLowerCase().includes(lc) ||
-          lc.includes(k.toLowerCase())
-      )?.[1];
-    if (courseTopics && courseTopics.length > 0) {
-      await db.courseTopic.deleteMany({ where: { courseId: course.id } });
-      await db.courseTopic.createMany({
-        data: courseTopics.map((t) => ({
+    const courseTopics = matchCoursePayload(topicsByCourse, courseName) ?? [];
+    const courseDocuments = matchCoursePayload(documentsByCourse, courseName) ?? [];
+
+    if (courseDocuments.length > 0) {
+      for (const [index, document] of courseDocuments.entries()) {
+        await ingestStandaloneEvidence({
           courseId: course.id,
-          weekNumber: t.weekNumber,
-          weekLabel: t.weekLabel,
-          startDate: t.startDate ?? null,
-          topics: t.topics,
-          readings: t.readings,
-          notes: t.notes ?? null,
-        })),
+          rawSourceKind: "manual_upload",
+          sourceKey: `manual-syllabus:${index}:${document.fileName.toLowerCase()}`,
+          title: document.fileName,
+          text: document.text,
+        });
+      }
+    } else if (courseTopics.length > 0) {
+      await ingestStandaloneEvidence({
+        courseId: course.id,
+        rawSourceKind: "manual_upload",
+        sourceKey: `manual-syllabus-outline:${courseName.toLowerCase()}`,
+        title: `${courseName} parsed syllabus outline`,
+        text: buildTopicFallbackDocument(courseName, courseTopics),
+      });
+    }
+
+    if (courseDocuments.length > 0 || courseTopics.length > 0) {
+      await rebuildCourseCorpusProjections({
+        courseId: course.id,
+        courseName: course.name,
       });
     }
   }

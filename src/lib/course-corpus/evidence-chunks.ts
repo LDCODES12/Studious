@@ -2,9 +2,9 @@ import crypto from "crypto";
 import { db } from "@/lib/db";
 import { generateEmbeddings } from "@/lib/embeddings";
 
-const TRANSCRIPT_CHUNK_TARGET_CHARS = 2_400;
-const TRANSCRIPT_CHUNK_OVERLAP_CHARS = 350;
-const TRANSCRIPT_CHUNK_MIN_CHARS = 300;
+const CHUNK_TARGET_CHARS = 2_400;
+const CHUNK_OVERLAP_CHARS = 350;
+const CHUNK_MIN_CHARS = 300;
 const EMBEDDING_BATCH_SIZE = 48;
 const MAX_CHUNK_KEYWORDS = 12;
 
@@ -64,32 +64,24 @@ const DEFINITION_RX = /\b(defined as|definition|is called|we call|refers to|mean
 const CLARIFICATION_RX = /\b(not the same|confusing|common mistake|to be clear|clarif|don't confuse|important distinction|the reason why)\b/i;
 const EMPHASIS_RX = /\b(important|key|remember|focus on|pay attention|notice that|big idea|main point|emphasize|high yield)\b/i;
 
-export type TranscriptEvidenceType =
-  | "content"
-  | "worked_example"
-  | "review"
-  | "clarification"
-  | "formula"
-  | "definition";
-
-export interface TranscriptChunkMetadata {
-  evidenceType: TranscriptEvidenceType;
+export interface EvidenceChunkMetadata {
+  evidenceType: "content" | "worked_example" | "review" | "clarification" | "formula" | "definition";
   signals: string[];
   keywords: string[];
   importance: number;
 }
 
-export interface TranscriptChunk {
+export interface EvidenceChunk {
   chunkIndex: number;
   charStart: number;
   charEnd: number;
   text: string;
   tokenEstimate: number;
-  metadata: TranscriptChunkMetadata;
+  metadata: EvidenceChunkMetadata;
 }
 
-interface TranscriptChunkIndexInput {
-  materialId: string;
+interface EvidenceChunkIndexInput {
+  evidenceId: string;
   courseId: string;
   text: string;
   contentHash: string;
@@ -103,7 +95,7 @@ function enqueueChunkIndex<T>(job: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function normalizeTranscriptText(text: string): string {
+function normalizeText(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
     .replace(/\u00a0/g, " ")
@@ -112,13 +104,10 @@ function normalizeTranscriptText(text: string): string {
 }
 
 function chooseChunkEnd(text: string, start: number): number {
-  const hardEnd = Math.min(start + TRANSCRIPT_CHUNK_TARGET_CHARS, text.length);
+  const hardEnd = Math.min(start + CHUNK_TARGET_CHARS, text.length);
   if (hardEnd >= text.length) return text.length;
 
-  const minEnd = Math.min(
-    hardEnd,
-    start + Math.floor(TRANSCRIPT_CHUNK_TARGET_CHARS * 0.6),
-  );
+  const minEnd = Math.min(hardEnd, start + Math.floor(CHUNK_TARGET_CHARS * 0.6));
   const window = text.slice(minEnd, hardEnd);
   const sentenceBreak = Math.max(
     window.lastIndexOf(". "),
@@ -159,9 +148,9 @@ function extractKeywords(text: string): string[] {
     .map(([token]) => token);
 }
 
-export function analyzeTranscriptChunk(text: string): TranscriptChunkMetadata {
+export function analyzeEvidenceChunk(text: string): EvidenceChunkMetadata {
   const signals: string[] = [];
-  let evidenceType: TranscriptEvidenceType = "content";
+  let evidenceType: EvidenceChunkMetadata["evidenceType"] = "content";
   let importance = 0;
 
   if (REVIEW_RX.test(text)) {
@@ -205,18 +194,18 @@ export function analyzeTranscriptChunk(text: string): TranscriptChunkMetadata {
   };
 }
 
-export function buildTranscriptChunks(rawText: string): TranscriptChunk[] {
-  const text = normalizeTranscriptText(rawText);
+export function buildEvidenceChunks(rawText: string): EvidenceChunk[] {
+  const text = normalizeText(rawText);
   if (text.length === 0) return [];
 
-  const chunks: TranscriptChunk[] = [];
+  const chunks: EvidenceChunk[] = [];
   let start = 0;
 
   while (start < text.length) {
     const end = chooseChunkEnd(text, start);
     const chunkText = text.slice(start, end).trim();
-    if (chunkText.length >= TRANSCRIPT_CHUNK_MIN_CHARS || chunks.length === 0) {
-      const metadata = analyzeTranscriptChunk(chunkText);
+    if (chunkText.length >= CHUNK_MIN_CHARS || chunks.length === 0) {
+      const metadata = analyzeEvidenceChunk(chunkText);
       chunks.push({
         chunkIndex: chunks.length,
         charStart: start,
@@ -228,22 +217,19 @@ export function buildTranscriptChunks(rawText: string): TranscriptChunk[] {
     }
 
     if (end >= text.length) break;
-    const nextStart = Math.max(0, end - TRANSCRIPT_CHUNK_OVERLAP_CHARS);
+    const nextStart = Math.max(0, end - CHUNK_OVERLAP_CHARS);
     start = nextStart > start ? nextStart : end;
   }
 
   return chunks;
 }
 
-async function getChunkIndexState(materialId: string, contentHash: string): Promise<{
-  total: number;
-  embedded: number;
-}> {
+async function getChunkIndexState(evidenceId: string, contentHash: string): Promise<{ total: number; embedded: number }> {
   const rows = await db.$queryRaw<{ total: number; embedded: number }[]>`
     SELECT COUNT(*)::int AS total,
            COUNT(*) FILTER (WHERE embedding IS NOT NULL)::int AS embedded
-    FROM "CourseMaterialChunk"
-    WHERE "materialId" = ${materialId}
+    FROM "CourseEvidenceChunk"
+    WHERE "evidenceId" = ${evidenceId}
       AND "contentHash" = ${contentHash}
   `;
   return rows[0] ?? { total: 0, embedded: 0 };
@@ -251,26 +237,26 @@ async function getChunkIndexState(materialId: string, contentHash: string): Prom
 
 async function updateChunkEmbedding(chunkId: string, embedding: number[]): Promise<void> {
   await db.$executeRaw`
-    UPDATE "CourseMaterialChunk"
+    UPDATE "CourseEvidenceChunk"
     SET embedding = ${JSON.stringify(embedding)}::vector
     WHERE id = ${chunkId}
   `;
 }
 
-export async function rebuildTranscriptChunks({
-  materialId,
+export async function rebuildEvidenceChunks({
+  evidenceId,
   courseId,
   text,
   contentHash,
-}: TranscriptChunkIndexInput): Promise<{ chunks: number }> {
-  const chunks = buildTranscriptChunks(text);
+}: EvidenceChunkIndexInput): Promise<{ chunks: number }> {
+  const chunks = buildEvidenceChunks(text);
 
-  await db.courseMaterialChunk.deleteMany({ where: { materialId } });
+  await db.courseEvidenceChunk.deleteMany({ where: { evidenceId } });
   if (chunks.length === 0) return { chunks: 0 };
 
   const rows = chunks.map((chunk) => ({
     id: crypto.randomUUID(),
-    materialId,
+    evidenceId,
     courseId,
     chunkIndex: chunk.chunkIndex,
     charStart: chunk.charStart,
@@ -284,7 +270,7 @@ export async function rebuildTranscriptChunks({
     importance: chunk.metadata.importance,
   }));
 
-  await db.courseMaterialChunk.createMany({ data: rows });
+  await db.courseEvidenceChunk.createMany({ data: rows });
 
   for (let index = 0; index < rows.length; index += EMBEDDING_BATCH_SIZE) {
     const batch = rows.slice(index, index + EMBEDDING_BATCH_SIZE);
@@ -297,16 +283,16 @@ export async function rebuildTranscriptChunks({
   return { chunks: rows.length };
 }
 
-export async function ensureTranscriptChunks(input: TranscriptChunkIndexInput): Promise<{ chunks: number; rebuilt: boolean }> {
+export async function ensureEvidenceChunks(input: EvidenceChunkIndexInput): Promise<{ chunks: number; rebuilt: boolean }> {
   return enqueueChunkIndex(async () => {
-    const expectedChunks = buildTranscriptChunks(input.text).length;
-    const state = await getChunkIndexState(input.materialId, input.contentHash);
+    const expectedChunks = buildEvidenceChunks(input.text).length;
+    const state = await getChunkIndexState(input.evidenceId, input.contentHash);
 
     if (expectedChunks > 0 && state.total === expectedChunks && state.embedded === expectedChunks) {
       return { chunks: expectedChunks, rebuilt: false };
     }
 
-    const result = await rebuildTranscriptChunks(input);
+    const result = await rebuildEvidenceChunks(input);
     return { chunks: result.chunks, rebuilt: true };
   });
 }

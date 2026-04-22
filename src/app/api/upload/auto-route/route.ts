@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { autoRouteMaterial, inferMaterialSourceRole } from "@/lib/analyze-material";
-import { hashMaterialText, updateMaterialEmbedding } from "@/lib/material-sync";
+import { autoRouteMaterial } from "@/lib/analyze-material";
+import { ingestStandaloneEvidence, rebuildCourseCorpusProjections } from "@/lib/course-corpus/sync";
 
 export async function POST(request: NextRequest) {
   const session = await auth();
@@ -61,25 +61,18 @@ export async function POST(request: NextRequest) {
         };
       }
 
-      const material = await db.courseMaterial.create({
-        data: {
-          courseId: analysis.courseId,
-          fileName: file.name,
-          detectedType: analysis.detectedType,
-          sourceRole: inferMaterialSourceRole(analysis.detectedType, file.name),
-          sourceKind: "auto_route",
-          summary: analysis.summary,
-          relatedTopics: analysis.relatedTopics,
-          rawText: file.text.slice(0, 25000),
-          storedForAI: analysis.storedForAI,
-          autoStoredForAI: analysis.storedForAI,
-          contentHash: hashMaterialText(file.text),
-          syncStatus: "ready",
-        },
+      await ingestStandaloneEvidence({
+        courseId: analysis.courseId,
+        rawSourceKind: "auto_route",
+        sourceKey: file.name,
+        title: file.name,
+        text: file.text,
       });
-      try {
-        await updateMaterialEmbedding(material.id, file.text);
-      } catch { /* embedding failure never blocks upload */ }
+
+      await rebuildCourseCorpusProjections({
+        courseId: analysis.courseId,
+        courseName: course.name,
+      });
 
       return {
         fileName: file.name,

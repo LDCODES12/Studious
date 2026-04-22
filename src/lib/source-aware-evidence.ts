@@ -282,13 +282,15 @@ function materialFreshnessPriority(material: Pick<EvidenceMaterial, "sourceUpdat
 export function classifyMaterialSourceRole(
   material: Pick<MaterialRecord | EvidenceMaterial, "sourceKind">
 ): Exclude<MaterialSourceRole, "structural"> {
-  return material.sourceKind === "canvas_media" ? "transcript" : "canonical";
+  return material.sourceKind === "canvas_media" || material.sourceKind === "canvas_media_transcript"
+    ? "transcript"
+    : "canonical";
 }
 
 function isCanonicalBackboneMaterial(
   material: Pick<EvidenceMaterial, "detectedType" | "fileName" | "summary" | "sourceKind" | "sourceRole">
 ): boolean {
-  if (material.sourceKind === "canvas_syllabus") return false;
+  if (material.sourceKind === "canvas_syllabus" || material.sourceKind === "canvas_syllabus_pdf") return false;
   if (material.sourceRole === "timeline") return false;
   if (CANONICAL_BACKBONE_TYPES.has(material.detectedType)) return true;
   if (material.detectedType === "other") {
@@ -354,34 +356,101 @@ async function fetchMaterialDetails(
   ids?: string[],
   storedForAIOnly = false,
 ): Promise<MaterialRecord[]> {
-  return db.courseMaterial.findMany({
-    where: {
-      courseId,
-      ...(ids ? { id: { in: ids } } : {}),
-      ...(storedForAIOnly ? { storedForAI: true } : {}),
-    },
-    select: {
-      id: true,
-      courseId: true,
-      course: { select: { name: true } },
-      fileName: true,
-      detectedType: true,
-      sourceKind: true,
-      sourceRole: true,
-      summary: true,
-      relatedTopics: true,
-      rawText: true,
-      storedForAI: true,
-      contentHash: true,
-      sourceUpdatedAt: true,
-      uploadedAt: true,
-    },
-  }).then((materials) =>
-    materials.map(({ course, ...material }) => ({
-      ...material,
-      courseName: course?.name ?? null,
-    }))
+  const [evidenceRows, projectedMaterials] = await Promise.all([
+    db.courseEvidence.findMany({
+      where: {
+        courseId,
+        ...(ids ? { id: { in: ids } } : {}),
+      },
+      select: {
+        id: true,
+        courseId: true,
+        title: true,
+        sourceKind: true,
+        sourceKey: true,
+        bodyText: true,
+        contentHash: true,
+        remoteUpdatedAt: true,
+        capturedAt: true,
+        course: { select: { name: true } },
+      },
+    }),
+    db.courseMaterial.findMany({
+      where: { courseId },
+      select: {
+        sourceKey: true,
+        detectedType: true,
+        sourceKind: true,
+        sourceRole: true,
+        summary: true,
+        relatedTopics: true,
+        storedForAI: true,
+        contentHash: true,
+        sourceUpdatedAt: true,
+        uploadedAt: true,
+      },
+    }),
+  ]);
+
+  const projectedBySourceKey = new Map(
+    projectedMaterials
+      .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
+      .map((material) => [material.sourceKey, material]),
   );
+
+  return evidenceRows
+    .map((evidence) => {
+      const projected = projectedBySourceKey.get(evidence.sourceKey);
+      const sourceKind = evidence.sourceKind;
+      const detectedType =
+        projected?.detectedType ??
+        (sourceKind === "canvas_media_transcript"
+          ? "lecture_notes"
+          : sourceKind === "canvas_syllabus_pdf" || sourceKind === "canvas_syllabus_page"
+            ? "syllabus"
+            : /\b(slides?|delivered)\b/i.test(evidence.title)
+              ? "lecture_slides"
+              : /\b(problem set|worksheet|homework)\b/i.test(evidence.title)
+                ? "problem_set"
+                : /\b(chapter|textbook|reading)\b/i.test(evidence.title)
+                  ? "textbook"
+                  : "other");
+      const storedForAI = projected?.storedForAI ?? sourceKind === "canvas_media_transcript";
+      return {
+        id: evidence.id,
+        courseId: evidence.courseId,
+        courseName: evidence.course?.name ?? null,
+        fileName: evidence.title,
+        detectedType,
+        sourceKind,
+        sourceRole:
+          projected?.sourceRole ??
+          (sourceKind === "canvas_syllabus_pdf"
+            ? "timeline"
+            : sourceKind === "canvas_syllabus_page"
+              ? "mixed"
+              : sourceKind === "canvas_media_transcript"
+                ? "content"
+                : "content"),
+        summary:
+          projected?.summary ??
+          (sourceKind === "canvas_media_transcript"
+            ? "Auto-imported lecture transcript from Canvas Media Gallery."
+            : sourceKind === "canvas_announcement"
+              ? "Canvas announcement imported into the study corpus."
+              : sourceKind === "canvas_page"
+                ? "Canvas page imported into the study corpus."
+                : "Course evidence imported into the study corpus."),
+        relatedTopics: projected?.relatedTopics ?? [],
+        rawText: evidence.bodyText ?? "",
+        storedForAI,
+        contentHash: evidence.contentHash ?? projected?.contentHash ?? null,
+        sourceUpdatedAt: evidence.remoteUpdatedAt ?? projected?.sourceUpdatedAt ?? null,
+        uploadedAt: projected?.uploadedAt ?? evidence.capturedAt,
+      };
+    })
+    .filter((material) => material.rawText.length > 0)
+    .filter((material) => !storedForAIOnly || material.storedForAI);
 }
 
 async function searchMaterialIds(courseId: string, query: string, limit: number): Promise<string[]> {
@@ -389,11 +458,14 @@ async function searchMaterialIds(courseId: string, query: string, limit: number)
   const vector = await generateEmbedding(query);
   const vectorStr = JSON.stringify(vector);
   const rows = await db.$queryRaw<{ id: string }[]>`
-    SELECT id
-    FROM "CourseMaterial"
-    WHERE "courseId" = ${courseId}
-      AND embedding IS NOT NULL
-    ORDER BY embedding <=> ${vectorStr}::vector
+    SELECT ce.id
+    FROM "CourseEvidenceChunk" cec
+    INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+    WHERE cec."courseId" = ${courseId}
+      AND cec.embedding IS NOT NULL
+      AND ce."sourceKind" <> 'canvas_media_transcript'
+    GROUP BY ce.id
+    ORDER BY MIN(cec.embedding <=> ${vectorStr}::vector)
     LIMIT ${limit}
   `;
   return rows.map((row) => row.id);
@@ -413,28 +485,28 @@ async function searchTranscriptChunkCandidates(
       SELECT websearch_to_tsquery('english', ${query}) AS tsquery
     ),
     vector_matches AS (
-      SELECT cmc.id,
-             row_number() OVER (ORDER BY cmc.embedding <=> ${vectorStr}::vector) AS vector_rank
-      FROM "CourseMaterialChunk" cmc
-      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-      WHERE cmc."courseId" = ${courseId}
-        AND cmc.embedding IS NOT NULL
-        AND cm."sourceKind" = 'canvas_media'
-      ORDER BY cmc.embedding <=> ${vectorStr}::vector
+      SELECT cec.id,
+             row_number() OVER (ORDER BY cec.embedding <=> ${vectorStr}::vector) AS vector_rank
+      FROM "CourseEvidenceChunk" cec
+      INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+      WHERE cec."courseId" = ${courseId}
+        AND cec.embedding IS NOT NULL
+        AND ce."sourceKind" = 'canvas_media_transcript'
+      ORDER BY cec.embedding <=> ${vectorStr}::vector
       LIMIT ${candidateLimit}
     ),
     keyword_matches AS (
-      SELECT cmc.id,
+      SELECT cec.id,
              row_number() OVER (
-               ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+               ORDER BY ts_rank_cd(to_tsvector('english', cec.text), search_query.tsquery) DESC
              ) AS keyword_rank
-      FROM "CourseMaterialChunk" cmc
-      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
+      FROM "CourseEvidenceChunk" cec
+      INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
       CROSS JOIN search_query
-      WHERE cmc."courseId" = ${courseId}
-        AND cm."sourceKind" = 'canvas_media'
-        AND to_tsvector('english', cmc.text) @@ search_query.tsquery
-      ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+      WHERE cec."courseId" = ${courseId}
+        AND ce."sourceKind" = 'canvas_media_transcript'
+        AND to_tsvector('english', cec.text) @@ search_query.tsquery
+      ORDER BY ts_rank_cd(to_tsvector('english', cec.text), search_query.tsquery) DESC
       LIMIT ${candidateLimit}
     ),
     fused AS (
@@ -448,56 +520,56 @@ async function searchTranscriptChunkCandidates(
       ) matches
       GROUP BY id
     )
-    SELECT cmc.id AS "chunkId",
-           cmc."materialId" AS "materialId",
-           cmc."courseId" AS "courseId",
+    SELECT cec.id AS "chunkId",
+           ce.id AS "materialId",
+           cec."courseId" AS "courseId",
            c.name AS "courseName",
-           cm."fileName" AS "fileName",
-           cm."detectedType" AS "detectedType",
-           cm."sourceKind" AS "sourceKind",
-           cm."sourceRole" AS "sourceRole",
-           cm.summary AS "summary",
-           cm."relatedTopics" AS "relatedTopics",
-           cm."storedForAI" AS "storedForAI",
-           cm."contentHash" AS "contentHash",
-           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
-           cm."uploadedAt" AS "uploadedAt",
-           cmc."chunkIndex" AS "chunkIndex",
-           cmc."charStart" AS "charStart",
-           cmc."charEnd" AS "charEnd",
-           cmc.text AS "chunkText",
-           cmc."contentHash" AS "chunkContentHash",
-           cmc."evidenceType" AS "evidenceType",
-           cmc.signals AS "signals",
-           cmc.keywords AS "keywords",
-           cmc.importance AS "importance",
+           ce.title AS "fileName",
+           'lecture_notes' AS "detectedType",
+           ce."sourceKind" AS "sourceKind",
+           'content' AS "sourceRole",
+           'Auto-imported lecture transcript from Canvas Media Gallery.' AS "summary",
+           ARRAY[]::text[] AS "relatedTopics",
+           true AS "storedForAI",
+           ce."contentHash" AS "contentHash",
+           ce."remoteUpdatedAt" AS "sourceUpdatedAt",
+           ce."capturedAt" AS "uploadedAt",
+           cec."chunkIndex" AS "chunkIndex",
+           cec."charStart" AS "charStart",
+           cec."charEnd" AS "charEnd",
+           cec.text AS "chunkText",
+           cec."contentHash" AS "chunkContentHash",
+           cec."evidenceType" AS "evidenceType",
+           cec.signals AS "signals",
+           cec.keywords AS "keywords",
+           cec.importance AS "importance",
            (
              COALESCE(70.0 / (60.0 + fused.vector_rank), 0) +
              COALESCE(45.0 / (60.0 + fused.keyword_rank), 0) +
-             LEAST(cmc.importance, 20) * 0.03 +
+             LEAST(cec.importance, 20) * 0.03 +
              CASE
                WHEN ${query} ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
-                 AND (cm."fileName" || ' ' || array_to_string(cmc.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+                 AND (ce.title || ' ' || array_to_string(cec.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
                THEN 1.4
                ELSE 0
              END +
              CASE
                WHEN ${query} ~* '\\m(example|problem|calculate|calculation|solve)\\M'
-                 AND 'worked_example' = ANY(cmc.signals)
+                 AND 'worked_example' = ANY(cec.signals)
                THEN 1.1
                ELSE 0
              END +
              CASE
                WHEN ${query} ~* '\\m(important|emphasize|focus|remember|key)\\M'
-                 AND 'instructor_emphasis' = ANY(cmc.signals)
+                 AND 'instructor_emphasis' = ANY(cec.signals)
                THEN 1.1
                ELSE 0
              END
            )::float AS "hybridScore"
     FROM fused
-    INNER JOIN "CourseMaterialChunk" cmc ON cmc.id = fused.id
-    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-    INNER JOIN "Course" c ON c.id = cm."courseId"
+    INNER JOIN "CourseEvidenceChunk" cec ON cec.id = fused.id
+    INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+    INNER JOIN "Course" c ON c.id = ce."courseId"
     ORDER BY "hybridScore" DESC
     LIMIT ${limit}
   `;
@@ -509,7 +581,7 @@ async function fetchUserMaterialDetails(
   ids: string[],
 ): Promise<MaterialRecord[]> {
   if (ids.length === 0) return [];
-  return db.courseMaterial.findMany({
+  const evidence = await db.courseEvidence.findMany({
     where: {
       id: { in: ids },
       course: { userId },
@@ -517,25 +589,61 @@ async function fetchUserMaterialDetails(
     select: {
       id: true,
       courseId: true,
+      title: true,
+      sourceKind: true,
+      sourceKey: true,
+      bodyText: true,
+      contentHash: true,
+      remoteUpdatedAt: true,
+      capturedAt: true,
       course: { select: { name: true } },
-      fileName: true,
+    },
+  });
+  const projectedMaterials = await db.courseMaterial.findMany({
+    where: {
+      course: { userId },
+      sourceKey: { in: evidence.map((item) => item.sourceKey) },
+    },
+    select: {
+      sourceKey: true,
       detectedType: true,
       sourceKind: true,
       sourceRole: true,
       summary: true,
       relatedTopics: true,
-      rawText: true,
       storedForAI: true,
       contentHash: true,
       sourceUpdatedAt: true,
       uploadedAt: true,
     },
-  }).then((materials) =>
-    materials.map(({ course, ...material }) => ({
-      ...material,
-      courseName: course?.name ?? null,
-    }))
+  });
+  const projectedBySourceKey = new Map(
+    projectedMaterials
+      .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
+      .map((material) => [material.sourceKey, material]),
   );
+
+  return evidence
+    .map((item) => {
+      const projected = projectedBySourceKey.get(item.sourceKey);
+      return {
+        id: item.id,
+        courseId: item.courseId,
+        courseName: item.course?.name ?? null,
+        fileName: item.title,
+        detectedType: projected?.detectedType ?? "other",
+        sourceKind: item.sourceKind,
+        sourceRole: projected?.sourceRole ?? "content",
+        summary: projected?.summary ?? "Course evidence imported into the study corpus.",
+        relatedTopics: projected?.relatedTopics ?? [],
+        rawText: item.bodyText ?? "",
+        storedForAI: projected?.storedForAI ?? item.sourceKind === "canvas_media_transcript",
+        contentHash: item.contentHash ?? projected?.contentHash ?? null,
+        sourceUpdatedAt: item.remoteUpdatedAt ?? projected?.sourceUpdatedAt ?? null,
+        uploadedAt: projected?.uploadedAt ?? item.capturedAt,
+      };
+    })
+    .filter((material) => material.rawText.length > 0);
 }
 
 async function searchUserMaterialIds(userId: string, query: string, limit: number): Promise<string[]> {
@@ -543,12 +651,15 @@ async function searchUserMaterialIds(userId: string, query: string, limit: numbe
   const vector = await generateEmbedding(query);
   const vectorStr = JSON.stringify(vector);
   const rows = await db.$queryRaw<{ id: string }[]>`
-    SELECT cm.id
-    FROM "CourseMaterial" cm
-    INNER JOIN "Course" c ON c.id = cm."courseId"
+    SELECT ce.id
+    FROM "CourseEvidenceChunk" cec
+    INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+    INNER JOIN "Course" c ON c.id = ce."courseId"
     WHERE c."userId" = ${userId}
-      AND cm.embedding IS NOT NULL
-    ORDER BY cm.embedding <=> ${vectorStr}::vector
+      AND cec.embedding IS NOT NULL
+      AND ce."sourceKind" <> 'canvas_media_transcript'
+    GROUP BY ce.id
+    ORDER BY MIN(cec.embedding <=> ${vectorStr}::vector)
     LIMIT ${limit}
   `;
   return rows.map((row) => row.id);
@@ -568,30 +679,30 @@ async function searchUserTranscriptChunkCandidates(
       SELECT websearch_to_tsquery('english', ${query}) AS tsquery
     ),
     vector_matches AS (
-      SELECT cmc.id,
-             row_number() OVER (ORDER BY cmc.embedding <=> ${vectorStr}::vector) AS vector_rank
-      FROM "CourseMaterialChunk" cmc
-      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-      INNER JOIN "Course" c ON c.id = cm."courseId"
+      SELECT cec.id,
+             row_number() OVER (ORDER BY cec.embedding <=> ${vectorStr}::vector) AS vector_rank
+      FROM "CourseEvidenceChunk" cec
+      INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+      INNER JOIN "Course" c ON c.id = ce."courseId"
       WHERE c."userId" = ${userId}
-        AND cmc.embedding IS NOT NULL
-        AND cm."sourceKind" = 'canvas_media'
-      ORDER BY cmc.embedding <=> ${vectorStr}::vector
+        AND cec.embedding IS NOT NULL
+        AND ce."sourceKind" = 'canvas_media_transcript'
+      ORDER BY cec.embedding <=> ${vectorStr}::vector
       LIMIT ${candidateLimit}
     ),
     keyword_matches AS (
-      SELECT cmc.id,
+      SELECT cec.id,
              row_number() OVER (
-               ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+               ORDER BY ts_rank_cd(to_tsvector('english', cec.text), search_query.tsquery) DESC
              ) AS keyword_rank
-      FROM "CourseMaterialChunk" cmc
-      INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-      INNER JOIN "Course" c ON c.id = cm."courseId"
+      FROM "CourseEvidenceChunk" cec
+      INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+      INNER JOIN "Course" c ON c.id = ce."courseId"
       CROSS JOIN search_query
       WHERE c."userId" = ${userId}
-        AND cm."sourceKind" = 'canvas_media'
-        AND to_tsvector('english', cmc.text) @@ search_query.tsquery
-      ORDER BY ts_rank_cd(to_tsvector('english', cmc.text), search_query.tsquery) DESC
+        AND ce."sourceKind" = 'canvas_media_transcript'
+        AND to_tsvector('english', cec.text) @@ search_query.tsquery
+      ORDER BY ts_rank_cd(to_tsvector('english', cec.text), search_query.tsquery) DESC
       LIMIT ${candidateLimit}
     ),
     fused AS (
@@ -605,56 +716,56 @@ async function searchUserTranscriptChunkCandidates(
       ) matches
       GROUP BY id
     )
-    SELECT cmc.id AS "chunkId",
-           cmc."materialId" AS "materialId",
-           cmc."courseId" AS "courseId",
+    SELECT cec.id AS "chunkId",
+           ce.id AS "materialId",
+           cec."courseId" AS "courseId",
            c.name AS "courseName",
-           cm."fileName" AS "fileName",
-           cm."detectedType" AS "detectedType",
-           cm."sourceKind" AS "sourceKind",
-           cm."sourceRole" AS "sourceRole",
-           cm.summary AS "summary",
-           cm."relatedTopics" AS "relatedTopics",
-           cm."storedForAI" AS "storedForAI",
-           cm."contentHash" AS "contentHash",
-           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
-           cm."uploadedAt" AS "uploadedAt",
-           cmc."chunkIndex" AS "chunkIndex",
-           cmc."charStart" AS "charStart",
-           cmc."charEnd" AS "charEnd",
-           cmc.text AS "chunkText",
-           cmc."contentHash" AS "chunkContentHash",
-           cmc."evidenceType" AS "evidenceType",
-           cmc.signals AS "signals",
-           cmc.keywords AS "keywords",
-           cmc.importance AS "importance",
+           ce.title AS "fileName",
+           'lecture_notes' AS "detectedType",
+           ce."sourceKind" AS "sourceKind",
+           'content' AS "sourceRole",
+           'Auto-imported lecture transcript from Canvas Media Gallery.' AS "summary",
+           ARRAY[]::text[] AS "relatedTopics",
+           true AS "storedForAI",
+           ce."contentHash" AS "contentHash",
+           ce."remoteUpdatedAt" AS "sourceUpdatedAt",
+           ce."capturedAt" AS "uploadedAt",
+           cec."chunkIndex" AS "chunkIndex",
+           cec."charStart" AS "charStart",
+           cec."charEnd" AS "charEnd",
+           cec.text AS "chunkText",
+           cec."contentHash" AS "chunkContentHash",
+           cec."evidenceType" AS "evidenceType",
+           cec.signals AS "signals",
+           cec.keywords AS "keywords",
+           cec.importance AS "importance",
            (
              COALESCE(70.0 / (60.0 + fused.vector_rank), 0) +
              COALESCE(45.0 / (60.0 + fused.keyword_rank), 0) +
-             LEAST(cmc.importance, 20) * 0.03 +
+             LEAST(cec.importance, 20) * 0.03 +
              CASE
                WHEN ${query} ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
-                 AND (cm."fileName" || ' ' || array_to_string(cmc.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
+                 AND (ce.title || ' ' || array_to_string(cec.signals, ' ')) ~* '\\m(exam|quiz|midterm|final|review|practice)\\M'
                THEN 1.4
                ELSE 0
              END +
              CASE
                WHEN ${query} ~* '\\m(example|problem|calculate|calculation|solve)\\M'
-                 AND 'worked_example' = ANY(cmc.signals)
+                 AND 'worked_example' = ANY(cec.signals)
                THEN 1.1
                ELSE 0
              END +
              CASE
                WHEN ${query} ~* '\\m(important|emphasize|focus|remember|key)\\M'
-                 AND 'instructor_emphasis' = ANY(cmc.signals)
+                 AND 'instructor_emphasis' = ANY(cec.signals)
                THEN 1.1
                ELSE 0
              END
            )::float AS "hybridScore"
     FROM fused
-    INNER JOIN "CourseMaterialChunk" cmc ON cmc.id = fused.id
-    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-    INNER JOIN "Course" c ON c.id = cm."courseId"
+    INNER JOIN "CourseEvidenceChunk" cec ON cec.id = fused.id
+    INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+    INNER JOIN "Course" c ON c.id = ce."courseId"
     ORDER BY "hybridScore" DESC
     LIMIT ${limit}
   `;
@@ -667,50 +778,50 @@ async function fetchHighValueTranscriptChunkCandidates(
   limit: number,
 ): Promise<SelectionCandidate[]> {
   const materialFilter = materialIds && materialIds.length > 0
-    ? Prisma.sql`AND cmc."materialId" IN (${Prisma.join(materialIds)})`
+    ? Prisma.sql`AND ce.id IN (${Prisma.join(materialIds)})`
     : Prisma.empty;
 
   const rows = await db.$queryRaw<TranscriptChunkSearchRow[]>(Prisma.sql`
-    SELECT cmc.id AS "chunkId",
-           cmc."materialId" AS "materialId",
-           cmc."courseId" AS "courseId",
+    SELECT cec.id AS "chunkId",
+           ce.id AS "materialId",
+           cec."courseId" AS "courseId",
            c.name AS "courseName",
-           cm."fileName" AS "fileName",
-           cm."detectedType" AS "detectedType",
-           cm."sourceKind" AS "sourceKind",
-           cm."sourceRole" AS "sourceRole",
-           cm.summary AS "summary",
-           cm."relatedTopics" AS "relatedTopics",
-           cm."storedForAI" AS "storedForAI",
-           cm."contentHash" AS "contentHash",
-           cm."sourceUpdatedAt" AS "sourceUpdatedAt",
-           cm."uploadedAt" AS "uploadedAt",
-           cmc."chunkIndex" AS "chunkIndex",
-           cmc."charStart" AS "charStart",
-           cmc."charEnd" AS "charEnd",
-           cmc.text AS "chunkText",
-           cmc."contentHash" AS "chunkContentHash",
-           cmc."evidenceType" AS "evidenceType",
-           cmc.signals AS "signals",
-           cmc.keywords AS "keywords",
-           cmc.importance AS "importance",
+           ce.title AS "fileName",
+           'lecture_notes' AS "detectedType",
+           ce."sourceKind" AS "sourceKind",
+           'content' AS "sourceRole",
+           'Auto-imported lecture transcript from Canvas Media Gallery.' AS "summary",
+           ARRAY[]::text[] AS "relatedTopics",
+           true AS "storedForAI",
+           ce."contentHash" AS "contentHash",
+           ce."remoteUpdatedAt" AS "sourceUpdatedAt",
+           ce."capturedAt" AS "uploadedAt",
+           cec."chunkIndex" AS "chunkIndex",
+           cec."charStart" AS "charStart",
+           cec."charEnd" AS "charEnd",
+           cec.text AS "chunkText",
+           cec."contentHash" AS "chunkContentHash",
+           cec."evidenceType" AS "evidenceType",
+           cec.signals AS "signals",
+           cec.keywords AS "keywords",
+           cec.importance AS "importance",
            (
-             cmc.importance +
-             CASE WHEN 'review' = ANY(cmc.signals) THEN 8 ELSE 0 END +
-             CASE WHEN 'worked_example' = ANY(cmc.signals) THEN 5 ELSE 0 END +
-             CASE WHEN 'instructor_emphasis' = ANY(cmc.signals) THEN 5 ELSE 0 END +
-             CASE WHEN cmc."evidenceType" IN ('formula', 'definition', 'clarification') THEN 3 ELSE 0 END
+             cec.importance +
+             CASE WHEN 'review' = ANY(cec.signals) THEN 8 ELSE 0 END +
+             CASE WHEN 'worked_example' = ANY(cec.signals) THEN 5 ELSE 0 END +
+             CASE WHEN 'instructor_emphasis' = ANY(cec.signals) THEN 5 ELSE 0 END +
+             CASE WHEN cec."evidenceType" IN ('formula', 'definition', 'clarification') THEN 3 ELSE 0 END
            )::float AS "hybridScore"
-    FROM "CourseMaterialChunk" cmc
-    INNER JOIN "CourseMaterial" cm ON cm.id = cmc."materialId"
-    INNER JOIN "Course" c ON c.id = cm."courseId"
-    WHERE cmc."courseId" = ${courseId}
-      AND cm."sourceKind" = 'canvas_media'
+    FROM "CourseEvidenceChunk" cec
+    INNER JOIN "CourseEvidence" ce ON ce.id = cec."evidenceId"
+    INNER JOIN "Course" c ON c.id = ce."courseId"
+    WHERE cec."courseId" = ${courseId}
+      AND ce."sourceKind" = 'canvas_media_transcript'
       ${materialFilter}
     ORDER BY "hybridScore" DESC,
-             cm."sourceUpdatedAt" DESC NULLS LAST,
-             cm."uploadedAt" DESC,
-             cmc."chunkIndex" ASC
+             ce."remoteUpdatedAt" DESC NULLS LAST,
+             ce."capturedAt" DESC,
+             cec."chunkIndex" ASC
     LIMIT ${limit}
   `);
 
@@ -719,38 +830,68 @@ async function fetchHighValueTranscriptChunkCandidates(
 
 async function fetchRecentUserMaterials(userId: string, limit: number): Promise<MaterialRecord[]> {
   const cutoff = subDays(new Date(), 10);
-  return db.courseMaterial.findMany({
+  return db.courseEvidence.findMany({
     where: {
       course: { userId },
       OR: [
-        { sourceUpdatedAt: { gte: cutoff } },
-        { uploadedAt: { gte: cutoff } },
+        { remoteUpdatedAt: { gte: cutoff } },
+        { capturedAt: { gte: cutoff } },
       ],
+      bodyText: { not: null },
+      sourceKind: { not: "canvas_media_transcript" },
     },
     select: {
       id: true,
       courseId: true,
-      course: { select: { name: true } },
-      fileName: true,
-      detectedType: true,
+      title: true,
       sourceKind: true,
-      sourceRole: true,
-      summary: true,
-      relatedTopics: true,
-      rawText: true,
-      storedForAI: true,
+      bodyText: true,
       contentHash: true,
-      sourceUpdatedAt: true,
-      uploadedAt: true,
+      remoteUpdatedAt: true,
+      capturedAt: true,
+      course: { select: { name: true } },
     },
-    orderBy: [{ sourceUpdatedAt: "desc" }, { uploadedAt: "desc" }],
+    orderBy: [{ remoteUpdatedAt: "desc" }, { capturedAt: "desc" }],
     take: limit,
   }).then((materials) =>
-    materials.map(({ course, ...material }) => ({
-      ...material,
-      courseName: course?.name ?? null,
+    materials.map((material) => ({
+      id: material.id,
+      courseId: material.courseId,
+      courseName: material.course?.name ?? null,
+      fileName: material.title,
+      detectedType: "other",
+      sourceKind: material.sourceKind,
+      sourceRole: "content",
+      summary: "Recently updated course evidence.",
+      relatedTopics: [],
+      rawText: material.bodyText ?? "",
+      storedForAI: true,
+      contentHash: material.contentHash,
+      sourceUpdatedAt: material.remoteUpdatedAt,
+      uploadedAt: material.capturedAt,
     }))
   );
+}
+
+async function resolveEvidenceIdsFromMaterialIds(courseId: string, materialIds: string[]): Promise<string[]> {
+  if (materialIds.length === 0) return [];
+  const materials = await db.courseMaterial.findMany({
+    where: {
+      id: { in: materialIds },
+      courseId,
+      sourceKey: { not: null },
+    },
+    select: { sourceKey: true },
+  });
+  if (materials.length === 0) return [];
+  const evidence = await db.courseEvidence.findMany({
+    where: {
+      courseId,
+      sourceKey: { in: materials.map((material) => material.sourceKey!).filter(Boolean) },
+    },
+    select: { id: true },
+  });
+  return evidence.map((item) => item.id);
 }
 
 function mergeRankedMaterials(
@@ -804,8 +945,8 @@ export function selectSourceAwareMaterials(
     .filter((material) => material.materialSourceRole === "transcript")
     .sort((a, b) => {
       const delta = Number(b.preferred) - Number(a.preferred)
-        || b.matchScore - a.matchScore
         || transcriptPriority(b) - transcriptPriority(a)
+        || b.matchScore - a.matchScore
         || materialFreshnessPriority(b) - materialFreshnessPriority(a)
         || (b.transcriptImportance ?? 0) - (a.transcriptImportance ?? 0);
       return delta || a.fileName.localeCompare(b.fileName);
@@ -1077,9 +1218,10 @@ export async function resolveStudyEvidence({
 
   let rankedMaterials: SelectionCandidate[] = [];
   if (materialIds && materialIds.length > 0) {
-    const selectedMaterials = await fetchMaterialDetails(courseId, materialIds, storedForAIOnly);
+    const selectedEvidenceIds = await resolveEvidenceIdsFromMaterialIds(courseId, materialIds);
+    const selectedMaterials = await fetchMaterialDetails(courseId, selectedEvidenceIds, storedForAIOnly);
     const transcriptMaterialIds = selectedMaterials
-      .filter((material) => material.sourceKind === "canvas_media")
+      .filter((material) => material.sourceKind === "canvas_media" || material.sourceKind === "canvas_media_transcript")
       .map((material) => material.id);
     const transcriptChunkCandidates = transcriptMaterialIds.length > 0
       ? await fetchHighValueTranscriptChunkCandidates(courseId, transcriptMaterialIds, 24)

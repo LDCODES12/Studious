@@ -9,6 +9,10 @@ import { extractTextFromPDF } from "@/lib/extract-pdf-text";
 import { type SyllabusEvent } from "@/types";
 
 type Stage = "upload" | "parsing" | "review" | "syncing";
+type ParsedCourseDocument = {
+  fileName: string;
+  text: string;
+};
 
 function UploadPageInner() {
   const searchParams = useSearchParams();
@@ -17,6 +21,7 @@ function UploadPageInner() {
   const [events, setEvents] = useState<SyllabusEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [topicsByCourse, setTopicsByCourse] = useState<Record<string, unknown[]>>({});
+  const [documentsByCourse, setDocumentsByCourse] = useState<Record<string, ParsedCourseDocument[]>>({});
 
   const googleConnected = searchParams.get("google") === "connected";
 
@@ -32,6 +37,12 @@ function UploadPageInner() {
     if (savedTopics) {
       try {
         setTopicsByCourse(JSON.parse(savedTopics));
+      } catch {}
+    }
+    const savedDocuments = sessionStorage.getItem("pendingDocumentsByCourse");
+    if (savedDocuments) {
+      try {
+        setDocumentsByCourse(JSON.parse(savedDocuments));
       } catch {}
     }
   }, []);
@@ -53,11 +64,16 @@ function UploadPageInner() {
     setError(null);
 
     try {
-      const texts = await Promise.all(files.map(extractTextFromPDF));
+      const documents = await Promise.all(
+        files.map(async (file) => ({
+          fileName: file.name,
+          text: await extractTextFromPDF(file),
+        })),
+      );
       const res = await fetch("/api/syllabus/parse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ texts }),
+        body: JSON.stringify({ documents }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -66,8 +82,10 @@ function UploadPageInner() {
       const data = await res.json();
       setEvents(data.events);
       setTopicsByCourse(data.topicsByCourse ?? {});
+      setDocumentsByCourse(data.documentsByCourse ?? {});
       sessionStorage.setItem("pendingEvents", JSON.stringify(data.events));
       sessionStorage.setItem("pendingTopicsByCourse", JSON.stringify(data.topicsByCourse ?? {}));
+      sessionStorage.setItem("pendingDocumentsByCourse", JSON.stringify(data.documentsByCourse ?? {}));
       setStage("review");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -108,11 +126,12 @@ function UploadPageInner() {
       const saveRes = await fetch("/api/syllabus/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ events: selected, syncResults: calendarResults, topicsByCourse }),
+        body: JSON.stringify({ events: selected, syncResults: calendarResults, topicsByCourse, documentsByCourse }),
       });
 
       sessionStorage.removeItem("pendingEvents");
       sessionStorage.removeItem("pendingTopicsByCourse");
+      sessionStorage.removeItem("pendingDocumentsByCourse");
 
       const saveData = await saveRes.json();
       const courses: { id: string; name: string }[] = saveData.courses ?? [];
@@ -131,10 +150,12 @@ function UploadPageInner() {
     setFiles([]);
     setEvents([]);
     setTopicsByCourse({});
+    setDocumentsByCourse({});
     setError(null);
     setStage("upload");
     sessionStorage.removeItem("pendingEvents");
     sessionStorage.removeItem("pendingTopicsByCourse");
+    sessionStorage.removeItem("pendingDocumentsByCourse");
   };
 
   const selectedCount = events.filter((e) => e.selected).length;

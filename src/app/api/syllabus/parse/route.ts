@@ -13,6 +13,16 @@ type TopicRow = {
   notes: string | null;
 };
 
+type ParsedDocumentInput = {
+  fileName?: string | null;
+  text: string;
+};
+
+type ParsedCourseDocument = {
+  fileName: string;
+  text: string;
+};
+
 export async function POST(request: NextRequest) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -22,54 +32,79 @@ export async function POST(request: NextRequest) {
   const log = apiLogger("POST /api/syllabus/parse", session.user.id);
 
   try {
-    const { texts } = (await request.json()) as { texts: string[] };
+    const payload = (await request.json()) as {
+      texts?: string[];
+      documents?: ParsedDocumentInput[];
+    };
+    const documents = (payload.documents ?? payload.texts?.map((text, index) => ({
+      fileName: `Uploaded syllabus ${index + 1}.pdf`,
+      text,
+    })) ?? [])
+      .map((document, index) => ({
+        fileName: document.fileName?.trim() || `Uploaded syllabus ${index + 1}.pdf`,
+        text: document.text,
+      }))
+      .filter((document) => document.text.trim());
 
-    if (!texts || texts.length === 0) {
+    if (documents.length === 0) {
       return log.respond(NextResponse.json({ error: "No text provided" }, { status: 400 }));
     }
 
-    log.info("parsing syllabus", { textCount: texts.length });
+    log.info("parsing syllabus", { textCount: documents.length });
 
     const allEvents: SyllabusEvent[] = [];
     const topicsByCourse: Record<string, TopicRow[]> = {};
+    const documentsByCourse: Record<string, ParsedCourseDocument[]> = {};
 
     await Promise.all(
-      texts
-        .filter((t) => t.trim())
-        .map(async (text) => {
-          const [events, topics] = await Promise.all([
-            parseSyllabusText(text),
-            parseSyllabusTopics(text),
-          ]);
+      documents.map(async (document) => {
+        const text = document.text.trim();
+        const [events, topics] = await Promise.all([
+          parseSyllabusText(text),
+          parseSyllabusTopics(text),
+        ]);
 
-          for (const event of events) {
-            allEvents.push({
-              id: crypto.randomUUID(),
-              title: event.title,
-              type: event.type,
-              dueDate: event.dueDate,
-              courseName: event.courseName,
-              description: event.description,
-              selected: true,
-            });
-          }
+        for (const event of events) {
+          allEvents.push({
+            id: crypto.randomUUID(),
+            title: event.title,
+            type: event.type,
+            dueDate: event.dueDate,
+            courseName: event.courseName,
+            description: event.description,
+            selected: true,
+          });
+        }
 
-          if (topics.length > 0) {
-            // Key by the event courseName (same source the save route uses) to
-            // guarantee the lookup matches. Fall back to what the AI returned.
-            const courseKey = events[0]?.courseName ?? topics[0]?.courseName;
-            if (courseKey) {
-              topicsByCourse[courseKey] = topics.map(
-                ({ courseName: _cn, ...rest }) => rest
-              );
-            }
-          }
-        })
+        const courseKey = events[0]?.courseName ?? topics[0]?.courseName;
+        if (!courseKey) return;
+
+        documentsByCourse[courseKey] = [
+          ...(documentsByCourse[courseKey] ?? []),
+          {
+            fileName: document.fileName,
+            text,
+          },
+        ];
+
+        if (topics.length > 0) {
+          topicsByCourse[courseKey] = topics.map(
+            ({ courseName, ...rest }) => {
+              void courseName;
+              return rest;
+            },
+          );
+        }
+      }),
     );
 
     return log.respond(
-      NextResponse.json({ events: allEvents, topicsByCourse }),
-      { events: allEvents.length, topicCourses: Object.keys(topicsByCourse).length },
+      NextResponse.json({ events: allEvents, topicsByCourse, documentsByCourse }),
+      {
+        events: allEvents.length,
+        topicCourses: Object.keys(topicsByCourse).length,
+        documentCourses: Object.keys(documentsByCourse).length,
+      },
     );
   } catch (error) {
     log.error("syllabus parse failed", { error: error instanceof Error ? error.message : String(error) });
