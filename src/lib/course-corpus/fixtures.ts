@@ -31,6 +31,8 @@ function makeEvidence(overrides: Partial<LoadedEvidence> & Pick<LoadedEvidence, 
     contentHash: overrides.contentHash ?? `hash-${overrides.id}`,
     derivedHints: overrides.derivedHints ?? {
       roles: [],
+      structuralAuthority: "content_only",
+      authoritySignals: [],
       dateMentions: [],
       weekNumbers: [],
       lectureNumbers: [],
@@ -116,6 +118,8 @@ export const pcsProjectionFixture: {
       bodyText: "Course schedule with weekly lecture cadence.",
       derivedHints: {
         roles: ["schedule_like"],
+        structuralAuthority: "schedule_authority",
+        authoritySignals: ["trusted_schedule_source", "explicit_schedule_structure"],
         dateMentions: [],
         weekNumbers: [],
         lectureNumbers: [],
@@ -134,6 +138,8 @@ export const pcsProjectionFixture: {
       bodyText: "Exam 2 Review Session on March 4 at 6pm.",
       derivedHints: {
         roles: ["event_like"],
+        structuralAuthority: "schedule_support",
+        authoritySignals: ["event_record", "date_mentions"],
         dateMentions: [{ raw: "March 4", isoDate: "2026-03-04" }],
         weekNumbers: [],
         lectureNumbers: [],
@@ -152,6 +158,8 @@ export const pcsProjectionFixture: {
       bodyText: "Lecture 13 content.",
       derivedHints: {
         roles: ["content_like"],
+        structuralAuthority: "content_only",
+        authoritySignals: ["content_source"],
         dateMentions: [],
         weekNumbers: [],
         lectureNumbers: [13],
@@ -218,6 +226,8 @@ export const genChemLabProjectionFixture: {
       bodyText: "Weekly experiment schedule with spring break.",
       derivedHints: {
         roles: ["schedule_like"],
+        structuralAuthority: "schedule_authority",
+        authoritySignals: ["trusted_schedule_source", "explicit_schedule_structure"],
         dateMentions: [],
         weekNumbers: [],
         lectureNumbers: [],
@@ -236,6 +246,8 @@ export const genChemLabProjectionFixture: {
       bodyText: "Prepare buffer calculations before lab on February 10.",
       derivedHints: {
         roles: ["content_like"],
+        structuralAuthority: "content_only",
+        authoritySignals: ["content_source"],
         dateMentions: [{ raw: "February 10", isoDate: "2026-02-10" }],
         weekNumbers: [],
         lectureNumbers: [],
@@ -254,6 +266,8 @@ export const genChemLabProjectionFixture: {
       bodyText: "Experiment 4 instructions.",
       derivedHints: {
         roles: ["content_like"],
+        structuralAuthority: "content_only",
+        authoritySignals: ["content_source"],
         dateMentions: [{ raw: "2/10", isoDate: "2026-02-10" }],
         weekNumbers: [],
         lectureNumbers: [],
@@ -272,6 +286,8 @@ export const genChemLabProjectionFixture: {
       bodyText: "No class during spring break on March 10.",
       derivedHints: {
         roles: ["schedule_like", "event_like", "break_like"],
+        structuralAuthority: "schedule_support",
+        authoritySignals: ["event_record", "explicit_break_signal"],
         dateMentions: [{ raw: "March 10", isoDate: "2026-03-10" }],
         weekNumbers: [],
         lectureNumbers: [],

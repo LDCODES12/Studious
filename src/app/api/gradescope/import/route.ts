@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
+import {
+  ingestGradescopeAssignmentEvidence,
+  rebuildCourseCorpusProjections,
+} from "@/lib/course-corpus/sync";
 import crypto from "crypto";
 
 const CORS_HEADERS = {
@@ -487,6 +491,16 @@ export async function POST(request: NextRequest) {
         }
       }
     }
+
+    await ingestGradescopeAssignmentEvidence({
+      courseId,
+      assignments: gsCourse.assignments,
+    }).catch(() => undefined);
+
+    await rebuildCourseCorpusProjections({
+      courseId,
+      courseName: matchedCourse.name,
+    }).catch(() => undefined);
 
     log.info("course matched", {
       gsId: gradescopeCourseId,

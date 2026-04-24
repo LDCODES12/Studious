@@ -1,5 +1,12 @@
 import { bestWindow, scheduleScore } from "@/lib/parse-syllabus";
-import type { CourseEvidenceHints, CourseEvidenceSourceKind, EvidenceDateHint, EvidenceRoleSignal } from "@/lib/course-corpus/types";
+import { classScheduleProbe } from "@/lib/canvas-sync/import-support";
+import type {
+  CourseEvidenceHints,
+  CourseEvidenceSourceKind,
+  EvidenceDateHint,
+  EvidenceRoleSignal,
+  StructuralAuthority,
+} from "@/lib/course-corpus/types";
 
 const MONTHS: Record<string, string> = {
   jan: "01",
@@ -33,6 +40,8 @@ const ADMIN_RX = /\b(policy|attendance|grading|office hours?|contact info|academ
 const EVENT_RX = /\b(assignment|due|deadline|exam|quiz|midterm|final|review session|lab report|project)\b/i;
 const CONTENT_RX = /\b(lecture|slides?|notes?|chapter|unit|worksheet|problem set|review|transcript|reading|lab|experiment)\b/i;
 const SCHEDULE_RX = /\b(week\s+\d+|lecture\s+\d+|class schedule|course schedule|calendar|meeting times?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+const AUTHORITY_TITLE_RX = /\b(syllab|schedule|calendar|course outline|course schedule|course calendar)\b/i;
+const SUPPORTING_SCHEDULE_TITLE_RX = /\b(announcement|assignment|quiz|exam|midterm|final|review session|review)\b/i;
 
 export interface HintExtractionInput {
   sourceKind: CourseEvidenceSourceKind;
@@ -149,6 +158,7 @@ function collectRoleSignals(input: HintExtractionInput, combinedText: string, br
     input.sourceKind === "canvas_assignment" ||
     input.sourceKind === "canvas_calendar_event" ||
     input.sourceKind === "canvas_announcement" ||
+    input.sourceKind === "gradescope_assignment" ||
     EVENT_RX.test(titleText)
   ) {
     roles.add("event_like");
@@ -181,28 +191,171 @@ function collectRoleSignals(input: HintExtractionInput, combinedText: string, br
   return [...roles];
 }
 
+function hasExplicitScheduleStructure(args: {
+  combinedText: string;
+  scheduleWindow: string;
+  dateMentions: EvidenceDateHint[];
+  weekNumbers: number[];
+  lectureNumbers: number[];
+  unitNumbers: number[];
+  breakSignals: string[];
+}): boolean {
+  const probe = classScheduleProbe(args.combinedText);
+  const hasClassScheduleBlock = (probe.hasDayNames || probe.hasCompactDays) && probe.hasTimeRange;
+  const hasNumberedStructure =
+    args.weekNumbers.length > 0 ||
+    args.unitNumbers.length > 0 ||
+    args.lectureNumbers.length >= 2 ||
+    args.dateMentions.length >= 2;
+  return hasClassScheduleBlock || hasNumberedStructure || args.breakSignals.length > 0 || scheduleScore(args.scheduleWindow) >= 1.75;
+}
+
+function deriveStructuralAuthority(input: HintExtractionInput, args: {
+  combinedText: string;
+  scheduleWindow: string;
+  roles: EvidenceRoleSignal[];
+  dateMentions: EvidenceDateHint[];
+  weekNumbers: number[];
+  lectureNumbers: number[];
+  unitNumbers: number[];
+  breakSignals: string[];
+}): {
+  structuralAuthority: StructuralAuthority;
+  authoritySignals: string[];
+} {
+  const authoritySignals: string[] = [];
+  const titleText = normalizeWhitespace(`${input.title}\n${args.combinedText}`);
+  const scheduleDensity = scheduleScore(args.scheduleWindow);
+  const explicitScheduleStructure = hasExplicitScheduleStructure({
+    combinedText: args.combinedText,
+    scheduleWindow: args.scheduleWindow,
+    dateMentions: args.dateMentions,
+    weekNumbers: args.weekNumbers,
+    lectureNumbers: args.lectureNumbers,
+    unitNumbers: args.unitNumbers,
+    breakSignals: args.breakSignals,
+  });
+  const probe = classScheduleProbe(args.combinedText);
+  const hasClassScheduleBlock = (probe.hasDayNames || probe.hasCompactDays) && probe.hasTimeRange;
+  const scheduleNamed = AUTHORITY_TITLE_RX.test(titleText);
+  const eventNamed = SUPPORTING_SCHEDULE_TITLE_RX.test(titleText);
+
+  if (scheduleNamed) authoritySignals.push("authority_named_source");
+  if (explicitScheduleStructure) authoritySignals.push("explicit_schedule_structure");
+  if (hasClassScheduleBlock) authoritySignals.push("class_schedule_block");
+  if (args.breakSignals.length > 0) authoritySignals.push("explicit_break_signal");
+  if (args.dateMentions.length > 0) authoritySignals.push("date_mentions");
+  if (args.weekNumbers.length > 0) authoritySignals.push("week_number_hints");
+  if (args.lectureNumbers.length > 0) authoritySignals.push("lecture_number_hints");
+  if (eventNamed) authoritySignals.push("event_named_source");
+
+  switch (input.sourceKind) {
+    case "canvas_assignment":
+    case "canvas_calendar_event":
+    case "canvas_announcement":
+    case "gradescope_assignment":
+      return {
+        structuralAuthority: "schedule_support",
+        authoritySignals: uniqueStrings([...authoritySignals, "event_record"]),
+      };
+    case "canvas_media_transcript":
+      return {
+        structuralAuthority: "content_only",
+        authoritySignals: uniqueStrings([...authoritySignals, "transcript_source"]),
+      };
+    case "canvas_module_item":
+      return {
+        structuralAuthority: explicitScheduleStructure && scheduleNamed
+          ? "schedule_support"
+          : "content_only",
+        authoritySignals: uniqueStrings([...authoritySignals, "module_metadata"]),
+      };
+    case "manual_upload":
+    case "auto_route":
+    case "canvas_syllabus_pdf":
+    case "canvas_syllabus_page":
+      if (scheduleNamed || explicitScheduleStructure || hasClassScheduleBlock) {
+        return {
+          structuralAuthority: "schedule_authority",
+          authoritySignals: uniqueStrings([...authoritySignals, "trusted_schedule_source"]),
+        };
+      }
+      return {
+        structuralAuthority: args.roles.includes("schedule_like") ? "schedule_support" : "content_only",
+        authoritySignals: uniqueStrings([...authoritySignals, "uploaded_or_syllabus_source"]),
+      };
+    case "canvas_page":
+    case "canvas_linked_file":
+      if (
+        (scheduleNamed && explicitScheduleStructure) ||
+        (input.sourceKind === "canvas_page" && explicitScheduleStructure && scheduleDensity >= 2.5)
+      ) {
+        return {
+          structuralAuthority: "schedule_authority",
+          authoritySignals: uniqueStrings([...authoritySignals, "explicit_schedule_page"]),
+        };
+      }
+      if (scheduleNamed || (input.sourceKind === "canvas_page" && args.roles.includes("schedule_like") && explicitScheduleStructure)) {
+        return {
+          structuralAuthority: "schedule_support",
+          authoritySignals: uniqueStrings([...authoritySignals, "schedule_like_content"]),
+        };
+      }
+      return {
+        structuralAuthority: "content_only",
+        authoritySignals: uniqueStrings([...authoritySignals, "content_source"]),
+      };
+    default:
+      return {
+        structuralAuthority: args.roles.includes("schedule_like") && explicitScheduleStructure
+          ? "schedule_support"
+          : "content_only",
+        authoritySignals: uniqueStrings([...authoritySignals, "default_content_source"]),
+      };
+  }
+}
+
 export function extractCourseEvidenceHints(input: HintExtractionInput): CourseEvidenceHints {
   const bodyText = normalizeWhitespace(input.bodyText ?? "");
   const structuredText = input.structuredPayload ? normalizeWhitespace(JSON.stringify(input.structuredPayload)) : "";
   const combinedText = normalizeWhitespace([input.title, bodyText, structuredText].filter(Boolean).join("\n"));
   const year = extractReferenceYear(input);
+  const scheduleWindow = bestWindow(combinedText);
 
   const breakSignals = uniqueStrings(
     Array.from(combinedText.matchAll(BREAK_RX)).map((match) => match[0] ?? ""),
   );
   const noClassSignals = breakSignals.filter((signal) => /\b(no class|cancelled|holiday|break)\b/i.test(signal));
+  const dateMentions = extractDateMentions(combinedText, year);
+  const weekNumbers = extractSequenceHints(combinedText, /\bweek\s+(\d{1,2})\b/gi);
+  const lectureNumbers = extractSequenceHints(combinedText, /\blecture\s+(\d{1,3})\b/gi);
+  const unitNumbers = extractSequenceHints(combinedText, /\bunit\s+(\d{1,2})\b/gi);
   const roles = collectRoleSignals(input, combinedText, breakSignals);
+  const { structuralAuthority, authoritySignals } = deriveStructuralAuthority(input, {
+    combinedText,
+    scheduleWindow,
+    roles,
+    dateMentions,
+    weekNumbers,
+    lectureNumbers,
+    unitNumbers,
+    breakSignals,
+  });
 
   return {
     roles,
-    dateMentions: extractDateMentions(combinedText, year),
-    weekNumbers: extractSequenceHints(combinedText, /\bweek\s+(\d{1,2})\b/gi),
-    lectureNumbers: extractSequenceHints(combinedText, /\blecture\s+(\d{1,3})\b/gi),
-    unitNumbers: extractSequenceHints(combinedText, /\bunit\s+(\d{1,2})\b/gi),
+    structuralAuthority,
+    authoritySignals,
+    dateMentions,
+    weekNumbers,
+    lectureNumbers,
+    unitNumbers,
     breakSignals,
     noClassSignals,
     sourceRoleSignals: uniqueStrings([
       ...roles,
+      structuralAuthority,
+      ...authoritySignals,
       ...(EVENT_RX.test(combinedText) ? ["dated_event"] : []),
       ...(ADMIN_RX.test(combinedText) ? ["administrative"] : []),
       ...(CONTENT_RX.test(combinedText) ? ["content"] : []),

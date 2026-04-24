@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { addDays, addWeeks, differenceInCalendarDays, isValid, parseISO, startOfWeek } from "date-fns";
 import { db } from "@/lib/db";
+import { generateEmbedding } from "@/lib/embeddings";
 import { inferMaterialSourceRole, type MaterialAnalysis } from "@/lib/analyze-material";
 import { hashMaterialText, normalizeSourceUpdatedAt } from "@/lib/material-sync";
 import {
@@ -22,6 +23,14 @@ import {
   type ParsedTopic,
 } from "@/lib/parse-syllabus";
 import { ensureEvidenceChunks } from "@/lib/course-corpus/evidence-chunks";
+import {
+  synthesizeTimelineFromCourseContext,
+  type CourseTimelineContextBundle,
+  type CourseTimelineContextChunk,
+  type CourseTimelineContextEvidence,
+  type CourseTimelineWeekContext,
+  type TimelineSynthesisDecision,
+} from "@/lib/course-corpus/derivation-ai";
 import { extractCourseEvidenceHints } from "@/lib/course-corpus/hints";
 import type {
   CorpusWeekBucket,
@@ -32,6 +41,7 @@ import type {
   EvidenceProvenanceEntry,
   PlacementDecision,
   ProjectedMaterialRecord,
+  StructuralAuthority,
 } from "@/lib/course-corpus/types";
 
 interface SyllabusText {
@@ -106,6 +116,19 @@ interface CanvasAnnouncementSyncInput {
   postedAt: string | null;
 }
 
+interface GradescopeAssignmentSyncInput {
+  title: string;
+  score: number | null;
+  maxScore: number | null;
+  status: string;
+  gradescopeAssignmentId: string | null;
+  gradescopeFingerprint?: string | null;
+  dueDate: string | null;
+  dueAt?: string | null;
+  releasedAt?: string | null;
+  lateDueAt?: string | null;
+}
+
 export interface LoadedEvidence {
   id: string;
   courseId: string;
@@ -132,12 +155,31 @@ interface WeekPlacementContext {
   hasNonAnnouncementScheduleEvidence: boolean;
 }
 
+interface ProjectionDiagnostics {
+  emptyWeeksPruned: number;
+  prunedWeeks: Array<{ startDate: string | null; reason: string }>;
+  authoritySourcesUsed: Array<{ evidenceId: string; title: string; authority: StructuralAuthority }>;
+  rejectedLowAuthorityScheduleSources: Array<{ evidenceId: string; title: string; authority: StructuralAuthority }>;
+  retrievalDecisionCounts: {
+    timelineSyntheses: number;
+  };
+  ragContext?: {
+    evidenceItems: number;
+    chunkItems: number;
+    queries: string[];
+    synthesisConfidence?: "high" | "medium" | "low";
+    concerns?: string[];
+  };
+}
+
 export interface CorpusProjectionResult {
   termRange: { startDate: string; endDate: string };
   placementDecisions: PlacementDecision[];
   finalPlacements: PlacementDecision[];
+  provisionalBuckets: CorpusWeekBucket[];
   finalBuckets: CorpusWeekBucket[];
   projectedMaterials: ProjectedMaterialRecord[];
+  diagnostics: ProjectionDiagnostics;
 }
 
 interface RebuildCourseCorpusInput {
@@ -239,6 +281,8 @@ function evidenceKindPriority(kind: string): number {
       return 2;
     case "canvas_calendar_event":
       return 2;
+    case "gradescope_assignment":
+      return 2;
     case "canvas_announcement":
       return 1;
     default:
@@ -276,6 +320,8 @@ function ensureHints(value: unknown): CourseEvidenceHints {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {
       roles: [],
+      structuralAuthority: "content_only",
+      authoritySignals: [],
       dateMentions: [],
       weekNumbers: [],
       lectureNumbers: [],
@@ -289,6 +335,13 @@ function ensureHints(value: unknown): CourseEvidenceHints {
   const raw = value as Partial<CourseEvidenceHints>;
   return {
     roles: Array.isArray(raw.roles) ? raw.roles.filter((item): item is CourseEvidenceHints["roles"][number] => typeof item === "string") : [],
+    structuralAuthority:
+      raw.structuralAuthority === "schedule_authority" ||
+      raw.structuralAuthority === "schedule_support" ||
+      raw.structuralAuthority === "content_only"
+        ? raw.structuralAuthority
+        : "content_only",
+    authoritySignals: Array.isArray(raw.authoritySignals) ? raw.authoritySignals.filter((item): item is string => typeof item === "string") : [],
     dateMentions: Array.isArray(raw.dateMentions)
       ? raw.dateMentions
           .filter((item): item is CourseEvidenceHints["dateMentions"][number] => !!item && typeof item === "object")
@@ -312,8 +365,16 @@ function mergeHints(existing: CourseEvidenceHints, incoming: CourseEvidenceHints
     const key = `${hint.raw.toLowerCase()}:${hint.isoDate ?? "none"}`;
     return all.findIndex((other) => `${other.raw.toLowerCase()}:${other.isoDate ?? "none"}` === key) === index;
   });
+  const structuralAuthority =
+    existing.structuralAuthority === "schedule_authority" || incoming.structuralAuthority === "schedule_authority"
+      ? "schedule_authority"
+      : existing.structuralAuthority === "schedule_support" || incoming.structuralAuthority === "schedule_support"
+        ? "schedule_support"
+        : "content_only";
   return {
     roles: uniqueStrings([...existing.roles, ...incoming.roles]) as CourseEvidenceHints["roles"],
+    structuralAuthority,
+    authoritySignals: uniqueStrings([...existing.authoritySignals, ...incoming.authoritySignals]),
     dateMentions,
     weekNumbers: [...new Set([...existing.weekNumbers, ...incoming.weekNumbers])].sort((a, b) => a - b),
     lectureNumbers: [...new Set([...existing.lectureNumbers, ...incoming.lectureNumbers])].sort((a, b) => a - b),
@@ -358,6 +419,8 @@ function deriveCanonicalSourceKey(args: {
       return `canvas-media:${rawSourceKey || args.contentHash || slugify(args.title)}`;
     case "canvas_assignment":
       return `canvas-assignment:${rawSourceKey || slugify(args.title)}`;
+    case "gradescope_assignment":
+      return `gradescope-assignment:${rawSourceKey || slugify(args.title)}`;
     case "canvas_calendar_event":
       return `canvas-calendar:${args.calendarSeed || rawSourceKey || hashMaterialText(args.title).slice(0, 16)}`;
     case "canvas_module_item":
@@ -375,6 +438,8 @@ function inferEvidenceSourceKind(args: {
 }): CourseEvidenceSourceKind {
   const title = `${args.title}\n${args.bodyText ?? ""}`;
   switch (args.rawSourceKind) {
+    case "canvas_syllabus":
+      return "canvas_syllabus_pdf";
     case "canvas_syllabus_page":
       return "canvas_syllabus_page";
     case "canvas_page":
@@ -387,6 +452,8 @@ function inferEvidenceSourceKind(args: {
       return "canvas_assignment";
     case "canvas_calendar_event":
       return "canvas_calendar_event";
+    case "gradescope_assignment":
+      return "gradescope_assignment";
     case "canvas_module_item":
       return "canvas_module_item";
     case "manual_upload":
@@ -396,7 +463,10 @@ function inferEvidenceSourceKind(args: {
     default:
       if (
         /\bsyllab|course schedule|course calendar\b/i.test(title) ||
-        (args.hints.roles.includes("schedule_like") && /\b(week|lecture|schedule|calendar)\b/i.test(title))
+        (
+          args.hints.structuralAuthority !== "content_only" &&
+          /\b(week|lecture|schedule|calendar)\b/i.test(title)
+        )
       ) {
         return "canvas_syllabus_pdf";
       }
@@ -573,6 +643,8 @@ function buildEvidenceInput(args: {
       bodyText: normalizedBodyText,
       hints: {
         roles: [],
+        structuralAuthority: "content_only",
+        authoritySignals: [],
         dateMentions: [],
         weekNumbers: [],
         lectureNumbers: [],
@@ -847,6 +919,48 @@ function getEvidenceDateSet(evidence: LoadedEvidence[]): string[] {
     .sort();
 }
 
+function structuralAuthorityPriority(authority: StructuralAuthority): number {
+  switch (authority) {
+    case "schedule_authority":
+      return 3;
+    case "schedule_support":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function isScheduleAuthorityEvidence(item: LoadedEvidence): boolean {
+  return item.derivedHints.structuralAuthority === "schedule_authority";
+}
+
+function authoritySourcesForDiagnostics(evidence: LoadedEvidence[]): ProjectionDiagnostics["authoritySourcesUsed"] {
+  return evidence
+    .filter((item) => item.derivedHints.structuralAuthority !== "content_only")
+    .sort((a, b) =>
+      structuralAuthorityPriority(b.derivedHints.structuralAuthority) - structuralAuthorityPriority(a.derivedHints.structuralAuthority) ||
+      evidenceKindPriority(b.sourceKind) - evidenceKindPriority(a.sourceKind),
+    )
+    .map((item) => ({
+      evidenceId: item.id,
+      title: item.title,
+      authority: item.derivedHints.structuralAuthority,
+    }));
+}
+
+function rejectedLowAuthorityScheduleSources(evidence: LoadedEvidence[]): ProjectionDiagnostics["rejectedLowAuthorityScheduleSources"] {
+  return evidence
+    .filter((item) =>
+      item.derivedHints.roles.includes("schedule_like") &&
+      item.derivedHints.structuralAuthority !== "schedule_authority",
+    )
+    .map((item) => ({
+      evidenceId: item.id,
+      title: item.title,
+      authority: item.derivedHints.structuralAuthority,
+    }));
+}
+
 function deriveTermRange(args: {
   termStartAt?: string | null;
   termEndAt?: string | null;
@@ -939,13 +1053,15 @@ async function deriveClassSchedule(args: RebuildCourseCorpusInput & { evidence: 
   classScheduleSource: string;
 }> {
   const scheduleCandidates = args.evidence
-    .filter((item) => item.bodyText && item.derivedHints.roles.includes("schedule_like"))
+    .filter((item) => item.bodyText && isScheduleAuthorityEvidence(item))
     .sort((a, b) => {
-      const scoreDelta = evidenceKindPriority(b.sourceKind) - evidenceKindPriority(a.sourceKind);
+      const scoreDelta = structuralAuthorityPriority(b.derivedHints.structuralAuthority) - structuralAuthorityPriority(a.derivedHints.structuralAuthority);
       if (scoreDelta !== 0) return scoreDelta;
-      return (scheduleScore(bestWindow(b.bodyText ?? "")) - scheduleScore(bestWindow(a.bodyText ?? "")));
+      const kindDelta = evidenceKindPriority(b.sourceKind) - evidenceKindPriority(a.sourceKind);
+      if (kindDelta !== 0) return kindDelta;
+      return scheduleScore(bestWindow(b.bodyText ?? "")) - scheduleScore(bestWindow(a.bodyText ?? ""));
     })
-    .slice(0, 3);
+    .slice(0, 4);
 
   let syllabusClassSchedule: ExtractedClassSchedule | null = null;
   let classScheduleSource = "none";
@@ -1022,17 +1138,20 @@ async function deriveParsedScheduleWeeks(args: { courseName: string; evidence: L
     .filter((item) =>
       item.bodyText &&
       item.bodyText.length >= 250 &&
-      item.derivedHints.roles.includes("schedule_like") &&
+      isScheduleAuthorityEvidence(item) &&
       item.sourceKind !== "canvas_announcement" &&
       item.sourceKind !== "canvas_assignment" &&
+      item.sourceKind !== "gradescope_assignment" &&
       item.sourceKind !== "canvas_calendar_event",
     )
     .sort((a, b) => {
-      const priority = evidenceKindPriority(b.sourceKind) - evidenceKindPriority(a.sourceKind);
+      const priority = structuralAuthorityPriority(b.derivedHints.structuralAuthority) - structuralAuthorityPriority(a.derivedHints.structuralAuthority);
       if (priority !== 0) return priority;
+      const kindDelta = evidenceKindPriority(b.sourceKind) - evidenceKindPriority(a.sourceKind);
+      if (kindDelta !== 0) return kindDelta;
       return scheduleScore(bestWindow(b.bodyText ?? "")) - scheduleScore(bestWindow(a.bodyText ?? ""));
     })
-    .slice(0, 3);
+    .slice(0, 4);
 
   const parsed: Array<{ evidenceId: string; weeks: ParsedTopic[] }> = [];
   for (const source of scheduleSources) {
@@ -1080,21 +1199,30 @@ function applyParsedWeeksToBuckets(
 
 function placementKindFromEvidence(evidence: LoadedEvidence, context: WeekPlacementContext): EvidencePlacementKind {
   const roles = evidence.derivedHints.roles;
+  const authority = evidence.derivedHints.structuralAuthority;
   if (evidence.derivedHints.breakSignals.length > 0) return "explicit_break";
   if (evidence.sourceKind === "canvas_announcement") {
-    if (roles.includes("schedule_like") && !context.hasNonAnnouncementScheduleEvidence) {
+    if (
+      authority !== "content_only" &&
+      roles.includes("schedule_like") &&
+      !context.hasNonAnnouncementScheduleEvidence
+    ) {
       return "instructional_week";
     }
     return "event_only";
   }
-  if (evidence.sourceKind === "canvas_assignment" || evidence.sourceKind === "canvas_calendar_event") {
+  if (
+    evidence.sourceKind === "canvas_assignment" ||
+    evidence.sourceKind === "canvas_calendar_event" ||
+    evidence.sourceKind === "gradescope_assignment"
+  ) {
     return "event_only";
   }
-  if (
-    evidence.sourceKind === "canvas_syllabus_pdf" ||
-    evidence.sourceKind === "canvas_syllabus_page"
-  ) {
+  if (authority === "schedule_authority") {
     return "global";
+  }
+  if (authority === "schedule_support" && !roles.includes("content_like")) {
+    return roles.includes("event_like") ? "event_only" : "global";
   }
   if (roles.includes("event_like") && !roles.includes("schedule_like")) {
     return "event_only";
@@ -1149,10 +1277,15 @@ function buildPlacementDecisions(evidence: LoadedEvidence[], context: WeekPlacem
       decisions.push({
         evidenceId: item.id,
         placementKind,
-        confidence: item.derivedHints.roles.includes("schedule_like") ? "high" : "medium",
+        confidence:
+          item.derivedHints.structuralAuthority === "schedule_authority"
+            ? "high"
+            : item.derivedHints.structuralAuthority === "schedule_support"
+              ? "medium"
+              : "low",
         rationale: "course-wide evidence",
         signals: item.derivedHints.sourceRoleSignals,
-        isPrimary: item.derivedHints.roles.includes("schedule_like"),
+        isPrimary: item.derivedHints.structuralAuthority === "schedule_authority",
       });
       continue;
     }
@@ -1192,6 +1325,8 @@ function buildPlacementDecisions(evidence: LoadedEvidence[], context: WeekPlacem
       confidence:
         item.derivedHints.dateMentions.length > 0
           ? "high"
+          : item.derivedHints.structuralAuthority === "schedule_authority"
+            ? "high"
           : item.derivedHints.weekNumbers.length > 0 || item.derivedHints.lectureNumbers.length > 0
             ? "medium"
             : "low",
@@ -1206,8 +1341,10 @@ function buildPlacementDecisions(evidence: LoadedEvidence[], context: WeekPlacem
       signals: item.derivedHints.sourceRoleSignals,
       isPrimary:
         placementKind === "instructional_week" &&
+        item.derivedHints.structuralAuthority !== "content_only" &&
         item.sourceKind !== "canvas_announcement" &&
         item.sourceKind !== "canvas_assignment" &&
+        item.sourceKind !== "gradescope_assignment" &&
         item.sourceKind !== "canvas_calendar_event",
     });
   }
@@ -1268,25 +1405,71 @@ function applyPlacementsToBuckets(
   }
 }
 
-function pruneAndRenumberBuckets(buckets: CorpusWeekBucket[]): CorpusWeekBucket[] {
-  const kept = buckets.filter((bucket) =>
-    bucket.placementKind === "explicit_break" ||
-    bucket.sourceEvidenceIds.length > 0 ||
-    bucket.eventEvidenceIds.length > 0 ||
-    bucket.topics.length > 0 ||
-    bucket.readings.length > 0,
-  );
+const GENERIC_WEEK_LABEL_RX = /^week\s+\d+$/i;
+const STRUCTURAL_NOTE_RX = /\b(spring break|fall break|reading days?|reading period|no class|holiday|cancelled|final exam|midterm|quiz|review session|assignment due)\b/i;
 
-  return kept.map((bucket, index) => ({
-    ...bucket,
-    weekNumber: index + 1,
-    weekLabel:
-      bucket.placementKind === "explicit_break"
-        ? bucket.weekLabel
-        : bucket.weekLabel?.trim()
+function isMeaningfulWeekLabel(label: string | null | undefined): boolean {
+  if (!label?.trim()) return false;
+  return !GENERIC_WEEK_LABEL_RX.test(label.trim());
+}
+
+function isTrulyEmptyWeek(bucket: CorpusWeekBucket): boolean {
+  return (
+    !isMeaningfulWeekLabel(bucket.weekLabel) &&
+    bucket.placementKind !== "explicit_break" &&
+    bucket.sourceEvidenceIds.length === 0 &&
+    bucket.eventEvidenceIds.length === 0 &&
+    bucket.topics.length === 0 &&
+    bucket.readings.length === 0 &&
+    !bucket.notes.some((note) => STRUCTURAL_NOTE_RX.test(note))
+  );
+}
+
+function pruneAndRenumberBuckets(buckets: CorpusWeekBucket[]): {
+  finalBuckets: CorpusWeekBucket[];
+  emptyWeeksPruned: number;
+  prunedWeeks: Array<{ startDate: string | null; reason: string }>;
+} {
+  const prunedWeeks: Array<{ startDate: string | null; reason: string }> = [];
+  const kept = buckets.filter((bucket) => {
+    if (isTrulyEmptyWeek(bucket)) {
+      prunedWeeks.push({
+        startDate: bucket.startDate,
+        reason: "truly empty week",
+      });
+      return false;
+    }
+    if (
+      bucket.placementKind !== "explicit_break" &&
+      bucket.sourceEvidenceIds.length === 0 &&
+      bucket.eventEvidenceIds.length === 0 &&
+      bucket.topics.length === 0 &&
+      bucket.readings.length === 0 &&
+      !bucket.notes.length
+    ) {
+      prunedWeeks.push({
+        startDate: bucket.startDate,
+        reason: "phantom placeholder",
+      });
+      return false;
+    }
+    return true;
+  });
+
+  return {
+    finalBuckets: kept.map((bucket, index) => ({
+      ...bucket,
+      weekNumber: index + 1,
+      weekLabel:
+        bucket.placementKind === "explicit_break"
           ? bucket.weekLabel
-          : `Week ${index + 1}`,
-  }));
+          : isMeaningfulWeekLabel(bucket.weekLabel)
+            ? bucket.weekLabel
+            : `Week ${index + 1}`,
+    })),
+    emptyWeeksPruned: prunedWeeks.length,
+    prunedWeeks,
+  };
 }
 
 function mapFinalBucketsByStartDate(buckets: CorpusWeekBucket[]): Map<string, CorpusWeekBucket> {
@@ -1295,6 +1478,17 @@ function mapFinalBucketsByStartDate(buckets: CorpusWeekBucket[]): Map<string, Co
     if (bucket.startDate) map.set(bucket.startDate, bucket);
   }
   return map;
+}
+
+function cloneBucket(bucket: CorpusWeekBucket): CorpusWeekBucket {
+  return {
+    ...bucket,
+    sourceEvidenceIds: [...bucket.sourceEvidenceIds],
+    eventEvidenceIds: [...bucket.eventEvidenceIds],
+    topics: [...bucket.topics],
+    readings: [...bucket.readings],
+    notes: [...bucket.notes],
+  };
 }
 
 function remapPlacementDecisions(decisions: PlacementDecision[], finalBuckets: CorpusWeekBucket[]): PlacementDecision[] {
@@ -1343,20 +1537,22 @@ export function deriveCorpusProjection(args: {
     evidence: args.evidence,
   });
 
-  const baseBuckets = buildEmptyWeekBuckets(termRange.startDate, termRange.endDate);
-  applyParsedWeeksToBuckets(baseBuckets, args.parsedScheduleWeeks ?? []);
+  const skeletonBuckets = buildEmptyWeekBuckets(termRange.startDate, termRange.endDate);
+  const deterministicBuckets = skeletonBuckets.map(cloneBucket);
+  applyParsedWeeksToBuckets(deterministicBuckets, args.parsedScheduleWeeks ?? []);
 
   const placementContext: WeekPlacementContext = {
-    buckets: baseBuckets,
+    buckets: deterministicBuckets,
     meetingsPerWeek: inferMeetingsPerWeek(args.classSchedule, args.calendarEvents),
     hasNonAnnouncementScheduleEvidence: args.evidence.some((item) =>
-      item.sourceKind !== "canvas_announcement" && item.derivedHints.roles.includes("schedule_like"),
+      item.sourceKind !== "canvas_announcement" && item.derivedHints.structuralAuthority === "schedule_authority",
     ),
   };
 
   const placementDecisions = buildPlacementDecisions(args.evidence, placementContext);
-  applyPlacementsToBuckets(baseBuckets, evidenceById, placementDecisions);
-  const finalBuckets = pruneAndRenumberBuckets(baseBuckets);
+  applyPlacementsToBuckets(deterministicBuckets, evidenceById, placementDecisions);
+  const pruneResult = pruneAndRenumberBuckets(deterministicBuckets);
+  const finalBuckets = pruneResult.finalBuckets;
   const finalPlacements = remapPlacementDecisions(placementDecisions, finalBuckets);
   const projectedMaterials = projectMaterials(args.evidence, finalPlacements, finalBuckets);
 
@@ -1364,8 +1560,466 @@ export function deriveCorpusProjection(args: {
     termRange,
     placementDecisions,
     finalPlacements,
+    provisionalBuckets: skeletonBuckets,
     finalBuckets,
     projectedMaterials,
+    diagnostics: {
+      emptyWeeksPruned: pruneResult.emptyWeeksPruned,
+      prunedWeeks: pruneResult.prunedWeeks,
+      authoritySourcesUsed: authoritySourcesForDiagnostics(args.evidence),
+      rejectedLowAuthorityScheduleSources: rejectedLowAuthorityScheduleSources(args.evidence),
+      retrievalDecisionCounts: {
+        timelineSyntheses: 0,
+      },
+    },
+  };
+}
+
+function summarizeEvidenceExcerpt(item: LoadedEvidence, maxChars = 700): string | null {
+  const text = item.bodyText?.trim();
+  if (!text) return null;
+  const excerpt = item.derivedHints.structuralAuthority === "schedule_authority"
+    ? bestWindow(text, maxChars)
+    : text;
+  return excerpt.replace(/\s+/g, " ").slice(0, maxChars);
+}
+
+function evidenceContextPriority(item: LoadedEvidence): number {
+  let score = structuralAuthorityPriority(item.derivedHints.structuralAuthority) * 100;
+  score += evidenceKindPriority(item.sourceKind) * 10;
+  if (item.derivedHints.breakSignals.length > 0) score += 45;
+  if (item.derivedHints.dateMentions.length > 0) score += 30;
+  if (item.derivedHints.weekNumbers.length > 0) score += 18;
+  if (item.derivedHints.lectureNumbers.length > 0) score += 10;
+  if (item.derivedHints.roles.includes("event_like")) score += 8;
+  if (item.bodyText) score += Math.min(12, Math.ceil(item.bodyText.length / 1500));
+  return score;
+}
+
+function provenanceSummary(entry: EvidenceProvenanceEntry): string {
+  return uniqueStrings([
+    entry.discoveredVia,
+    entry.moduleName,
+    entry.pageName,
+    entry.label,
+    entry.sourceUrl,
+  ]).join(" > ");
+}
+
+function buildTimelineContextEvidence(evidence: LoadedEvidence[], limit = 90): CourseTimelineContextEvidence[] {
+  return [...evidence]
+    .sort((a, b) => evidenceContextPriority(b) - evidenceContextPriority(a))
+    .slice(0, limit)
+    .map((item) => ({
+      evidenceId: item.id,
+      title: item.title,
+      sourceKind: item.sourceKind,
+      structuralAuthority: item.derivedHints.structuralAuthority,
+      roles: item.derivedHints.roles,
+      isoDates: item.derivedHints.dateMentions
+        .map((hint) => hint.isoDate)
+        .filter((value): value is string => Boolean(value))
+        .slice(0, 8),
+      weekNumbers: item.derivedHints.weekNumbers.slice(0, 6),
+      lectureNumbers: item.derivedHints.lectureNumbers.slice(0, 6),
+      breakSignals: item.derivedHints.breakSignals.slice(0, 6),
+      provenance: item.provenance.map(provenanceSummary).filter(Boolean).slice(0, 4),
+      excerpt: summarizeEvidenceExcerpt(item),
+    }));
+}
+
+interface CorpusChunkSearchRow {
+  chunkId: string;
+  evidenceId: string;
+  chunkIndex: number;
+  text: string;
+  evidenceType: string;
+  signals: string[];
+  keywords: string[];
+  importance: number;
+}
+
+async function searchCourseContextChunks(courseId: string, query: string, limit: number): Promise<CorpusChunkSearchRow[]> {
+  if (!query.trim()) return [];
+  const vector = await generateEmbedding(query);
+  const vectorStr = JSON.stringify(vector);
+  return db.$queryRaw<CorpusChunkSearchRow[]>`
+    SELECT cec.id AS "chunkId",
+           cec."evidenceId" AS "evidenceId",
+           cec."chunkIndex" AS "chunkIndex",
+           cec.text AS "text",
+           cec."evidenceType" AS "evidenceType",
+           cec.signals AS "signals",
+           cec.keywords AS "keywords",
+           cec.importance AS "importance"
+    FROM "CourseEvidenceChunk" cec
+    WHERE cec."courseId" = ${courseId}
+      AND cec.embedding IS NOT NULL
+    ORDER BY cec.embedding <=> ${vectorStr}::vector
+    LIMIT ${limit}
+  `;
+}
+
+function buildChunkContextItem(row: CorpusChunkSearchRow, evidenceById: Map<string, LoadedEvidence>): CourseTimelineContextChunk | null {
+  const evidence = evidenceById.get(row.evidenceId);
+  if (!evidence) return null;
+  return {
+    chunkId: row.chunkId,
+    evidenceId: row.evidenceId,
+    title: evidence.title,
+    sourceKind: evidence.sourceKind,
+    structuralAuthority: evidence.derivedHints.structuralAuthority,
+    chunkIndex: row.chunkIndex,
+    text: row.text.replace(/\s+/g, " ").slice(0, 1_100),
+    evidenceType: row.evidenceType,
+    signals: row.signals.slice(0, 8),
+    keywords: row.keywords.slice(0, 12),
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function isoDateFallsInWeek(isoDate: string | null | undefined, startDate: string | null): boolean {
+  if (!isoDate || !startDate) return false;
+  const parsedDate = tryParseDate(isoDate);
+  const parsedStart = tryParseDate(startDate);
+  if (!parsedDate || !parsedStart) return false;
+  const dayOffset = differenceInCalendarDays(parsedDate, parsedStart);
+  return dayOffset >= 0 && dayOffset <= 6;
+}
+
+function evidenceMatchesSkeletonWeek(item: LoadedEvidence, bucket: CorpusWeekBucket): boolean {
+  if (item.derivedHints.dateMentions.some((hint) => isoDateFallsInWeek(hint.isoDate, bucket.startDate))) return true;
+  if (item.derivedHints.weekNumbers.includes(bucket.weekNumber)) return true;
+  const modulePosition = typeof item.structuredPayload?.modulePosition === "number"
+    ? item.structuredPayload.modulePosition
+    : null;
+  return modulePosition === bucket.weekNumber;
+}
+
+function buildWeekContextQuery(courseName: string, bucket: CorpusWeekBucket, evidence: LoadedEvidence[]): string {
+  const matchedTitles = evidence
+    .slice(0, 6)
+    .map((item) => item.title)
+    .filter(Boolean)
+    .join(" ");
+  const weekEnd = bucket.startDate
+    ? addDays(parseISO(bucket.startDate), 6).toISOString().slice(0, 10)
+    : null;
+  return normalizeWhitespace([
+    courseName,
+    `week ${bucket.weekNumber}`,
+    bucket.startDate && weekEnd ? `${bucket.startDate} ${weekEnd}` : null,
+    matchedTitles,
+    "lecture lab reading assignment topic review",
+  ].filter(Boolean).join(" "));
+}
+
+async function buildCourseTimelineContextBundle(args: {
+  courseId: string;
+  courseName: string;
+  evidence: LoadedEvidence[];
+  skeleton: CorpusWeekBucket[];
+}): Promise<CourseTimelineContextBundle> {
+  const evidenceById = new Map(args.evidence.map((item) => [item.id, item]));
+  const queries = uniqueStrings([
+    `${args.courseName} syllabus course schedule weekly topics readings dates`,
+    `${args.courseName} lecture lab unit experiment module week topic`,
+    `${args.courseName} spring break no class reading days holiday`,
+    `${args.courseName} exam quiz review session assignment due date`,
+    `${args.courseName} lecture slides notes transcript important concepts`,
+  ]);
+
+  const chunkMap = new Map<string, CourseTimelineContextChunk>();
+  const weekContexts: CourseTimelineWeekContext[] = [];
+  const genericRowsByQuery = await mapWithConcurrency(queries, 4, (query) =>
+    searchCourseContextChunks(args.courseId, query, 8).catch(() => []),
+  );
+  for (const rows of genericRowsByQuery) {
+    for (const row of rows) {
+      const item = buildChunkContextItem(row, evidenceById);
+      if (item) chunkMap.set(item.chunkId, item);
+    }
+  }
+
+  const weekSeeds = args.skeleton.filter((item) => item.startDate).map((bucket) => {
+    const matchedEvidence = args.evidence
+      .filter((item) => evidenceMatchesSkeletonWeek(item, bucket))
+      .sort((a, b) => evidenceContextPriority(b) - evidenceContextPriority(a))
+      .slice(0, 10);
+    const query = buildWeekContextQuery(args.courseName, bucket, matchedEvidence);
+    return { bucket, matchedEvidence, query };
+  });
+
+  const weekRows = await mapWithConcurrency(weekSeeds, 4, (seed) =>
+    searchCourseContextChunks(args.courseId, seed.query, 3).catch(() => []),
+  );
+
+  for (const [index, seed] of weekSeeds.entries()) {
+    const rows = weekRows[index] ?? [];
+    const chunkIds: string[] = [];
+    for (const row of rows) {
+      const item = buildChunkContextItem(row, evidenceById);
+      if (!item) continue;
+      chunkMap.set(item.chunkId, item);
+      chunkIds.push(item.chunkId);
+    }
+    weekContexts.push({
+      weekNumber: seed.bucket.weekNumber,
+      startDate: seed.bucket.startDate,
+      query: seed.query,
+      evidenceIds: seed.matchedEvidence.map((item) => item.id),
+      chunkIds: uniqueStrings(chunkIds),
+    });
+  }
+
+  return {
+    queries: uniqueStrings([...queries, ...weekContexts.map((context) => context.query)]),
+    evidence: buildTimelineContextEvidence(args.evidence),
+    chunks: [...chunkMap.values()].slice(0, 56),
+    weekContexts,
+  };
+}
+
+function emptySynthesisBucket(bucket: CorpusWeekBucket): CorpusWeekBucket {
+  return {
+    ...bucket,
+    weekLabel: `Week ${bucket.weekNumber}`,
+    placementKind: "instructional_week",
+    sourceEvidenceIds: [],
+    eventEvidenceIds: [],
+    topics: [],
+    readings: [],
+    notes: [],
+  };
+}
+
+function validEvidenceIds(ids: string[], allowed: Set<string>, limit = 12): string[] {
+  return uniqueStrings(ids.filter((id) => allowed.has(id))).slice(0, limit);
+}
+
+function hasExplicitBreakEvidence(ids: string[], evidenceById: Map<string, LoadedEvidence>): boolean {
+  return ids.some((id) => {
+    const item = evidenceById.get(id);
+    return Boolean(item && (item.derivedHints.breakSignals.length > 0 || item.derivedHints.noClassSignals.length > 0));
+  });
+}
+
+function uncitedSynthesisPlacement(decision: PlacementDecision, evidence: LoadedEvidence): PlacementDecision {
+  const placementKind: EvidencePlacementKind =
+    evidence.sourceKind === "canvas_announcement" ||
+    evidence.sourceKind === "canvas_assignment" ||
+    evidence.sourceKind === "canvas_calendar_event" ||
+    evidence.sourceKind === "gradescope_assignment" ||
+    evidence.derivedHints.roles.includes("event_like")
+      ? "event_only"
+      : evidence.bodyText || evidence.derivedHints.structuralAuthority !== "content_only"
+        ? "global"
+        : "unplaced";
+
+  return {
+    ...decision,
+    placementKind,
+    weekNumber: null,
+    weekLabel: null,
+    startDate: null,
+    confidence:
+      evidence.derivedHints.structuralAuthority === "schedule_authority"
+        ? "high"
+        : evidence.derivedHints.structuralAuthority === "schedule_support"
+          ? "medium"
+          : "low",
+    rationale: "not cited by course-local RAG synthesis",
+    signals: uniqueStrings([...decision.signals, "rag_uncited"]),
+    isPrimary: false,
+  };
+}
+
+function applyTimelineSynthesisToProjection(args: {
+  courseName: string;
+  evidence: LoadedEvidence[];
+  projection: CorpusProjectionResult;
+  context: CourseTimelineContextBundle;
+  synthesis: TimelineSynthesisDecision;
+}): CorpusProjectionResult | null {
+  const allowedStartDates = new Set(
+    args.projection.provisionalBuckets.map((bucket) => bucket.startDate).filter((value): value is string => Boolean(value)),
+  );
+  const evidenceById = new Map(args.evidence.map((item) => [item.id, item]));
+  const allowedEvidenceIds = new Set(evidenceById.keys());
+  const synthesizedWeeks = args.synthesis.weeks.filter((week) =>
+    allowedStartDates.has(week.startDate) &&
+    (
+      week.weekLabel.trim() ||
+      week.topics.length > 0 ||
+      week.readings.length > 0 ||
+      week.notes.length > 0 ||
+      week.sourceEvidenceIds.length > 0 ||
+      week.eventEvidenceIds.length > 0
+    ),
+  );
+  if (synthesizedWeeks.length === 0) return null;
+
+  const buckets = args.projection.provisionalBuckets.map(emptySynthesisBucket);
+  const bucketByStartDate = new Map(
+    buckets.filter((bucket) => bucket.startDate).map((bucket) => [bucket.startDate!, bucket]),
+  );
+  const placementOverrides = new Map<string, { placementKind: EvidencePlacementKind; startDate: string }>();
+
+  for (const week of synthesizedWeeks) {
+    const bucket = bucketByStartDate.get(week.startDate);
+    if (!bucket) continue;
+    const sourceEvidenceIds = validEvidenceIds(week.sourceEvidenceIds, allowedEvidenceIds);
+    const eventEvidenceIds = validEvidenceIds(week.eventEvidenceIds, allowedEvidenceIds);
+    const citedIds = uniqueStrings([...sourceEvidenceIds, ...eventEvidenceIds]);
+    if (citedIds.length === 0) continue;
+    const placementKind =
+      week.placementKind === "explicit_break" && hasExplicitBreakEvidence(citedIds, evidenceById)
+        ? "explicit_break"
+        : "instructional_week";
+
+    bucket.weekLabel = normalizeWhitespace(week.weekLabel) || bucket.weekLabel;
+    bucket.placementKind = placementKind;
+    bucket.topics = uniqueStrings(week.topics).slice(0, 10);
+    bucket.readings = uniqueStrings(week.readings).slice(0, 10);
+    bucket.notes = uniqueStrings(week.notes).slice(0, 8);
+    bucket.sourceEvidenceIds = sourceEvidenceIds;
+    bucket.eventEvidenceIds = eventEvidenceIds;
+
+    for (const evidenceId of sourceEvidenceIds) {
+      placementOverrides.set(evidenceId, {
+        placementKind,
+        startDate: week.startDate,
+      });
+    }
+    for (const evidenceId of eventEvidenceIds) {
+      placementOverrides.set(evidenceId, {
+        placementKind: "event_only",
+        startDate: week.startDate,
+      });
+    }
+  }
+
+  const synthesizedPlacements = args.projection.placementDecisions.map((decision) => {
+    const override = placementOverrides.get(decision.evidenceId);
+    const evidence = evidenceById.get(decision.evidenceId);
+    if (!evidence) return decision;
+    if (!override) return uncitedSynthesisPlacement(decision, evidence);
+    const bucket = bucketByStartDate.get(override.startDate);
+    if (!bucket) return uncitedSynthesisPlacement(decision, evidence);
+    return {
+      ...decision,
+      placementKind: override.placementKind,
+      weekNumber: bucket.weekNumber,
+      weekLabel: bucket.weekLabel,
+      startDate: bucket.startDate,
+      confidence: args.synthesis.confidence,
+      rationale: "course-local RAG synthesis",
+      signals: uniqueStrings([...decision.signals, "course_rag_synthesis"]),
+      isPrimary:
+        override.placementKind === "instructional_week" &&
+        evidence.derivedHints.structuralAuthority !== "content_only",
+    };
+  });
+
+  const pruneResult = pruneAndRenumberBuckets(buckets);
+  const finalBuckets = pruneResult.finalBuckets;
+  if (finalBuckets.length === 0) return null;
+
+  const finalPlacements = remapPlacementDecisions(synthesizedPlacements, finalBuckets);
+  const projectedMaterials = projectMaterials(args.evidence, finalPlacements, finalBuckets);
+
+  return {
+    ...args.projection,
+    finalPlacements,
+    finalBuckets,
+    projectedMaterials,
+    diagnostics: {
+      ...args.projection.diagnostics,
+      emptyWeeksPruned: pruneResult.emptyWeeksPruned,
+      prunedWeeks: pruneResult.prunedWeeks,
+      retrievalDecisionCounts: {
+        timelineSyntheses: 1,
+      },
+      ragContext: {
+        evidenceItems: args.context.evidence.length,
+        chunkItems: args.context.chunks.length,
+        queries: args.context.queries,
+        synthesisConfidence: args.synthesis.confidence,
+        concerns: args.synthesis.concerns,
+      },
+    },
+  };
+}
+
+async function synthesizeProjectionWithCourseRag(args: {
+  courseId: string;
+  courseName: string;
+  evidence: LoadedEvidence[];
+  projection: CorpusProjectionResult;
+}): Promise<CorpusProjectionResult> {
+  const context = await buildCourseTimelineContextBundle({
+    courseId: args.courseId,
+    courseName: args.courseName,
+    evidence: args.evidence,
+    skeleton: args.projection.provisionalBuckets,
+  });
+  const synthesis = await synthesizeTimelineFromCourseContext({
+    courseName: args.courseName,
+    termRange: args.projection.termRange,
+    skeleton: args.projection.provisionalBuckets,
+    fallbackDraft: args.projection.finalBuckets,
+    context,
+  });
+  if (!synthesis) {
+    return {
+      ...args.projection,
+      diagnostics: {
+        ...args.projection.diagnostics,
+        ragContext: {
+          evidenceItems: context.evidence.length,
+          chunkItems: context.chunks.length,
+          queries: context.queries,
+          concerns: ["timeline synthesis unavailable; used deterministic fallback"],
+        },
+      },
+    };
+  }
+
+  return applyTimelineSynthesisToProjection({
+    courseName: args.courseName,
+    evidence: args.evidence,
+    projection: args.projection,
+    context,
+    synthesis,
+  }) ?? {
+    ...args.projection,
+    diagnostics: {
+      ...args.projection.diagnostics,
+      ragContext: {
+        evidenceItems: context.evidence.length,
+        chunkItems: context.chunks.length,
+        queries: context.queries,
+        synthesisConfidence: synthesis.confidence,
+        concerns: ["timeline synthesis rejected by deterministic guards", ...synthesis.concerns],
+      },
+    },
   };
 }
 
@@ -1381,8 +2035,8 @@ function materialTypeFromEvidence(item: LoadedEvidence): MaterialAnalysis["detec
 }
 
 function sourceRoleFromEvidence(item: LoadedEvidence, detectedType: MaterialAnalysis["detectedType"]): "timeline" | "content" | "mixed" | "unknown" {
-  if (item.sourceKind === "canvas_syllabus_pdf") return "timeline";
-  if (item.sourceKind === "canvas_syllabus_page") return "mixed";
+  if (item.derivedHints.structuralAuthority === "schedule_authority") return "timeline";
+  if (item.derivedHints.structuralAuthority === "schedule_support") return "mixed";
   return inferMaterialSourceRole(detectedType, item.title);
 }
 
@@ -1706,11 +2360,17 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
     calendarEvents: input.calendarEvents,
     parsedScheduleWeeks,
   });
+  const refinedProjection = await synthesizeProjectionWithCourseRag({
+    courseId: input.courseId,
+    courseName: input.courseName,
+    evidence,
+    projection,
+  }).catch(() => projection);
 
   await Promise.all([
-    persistPlacements(input.courseId, projection.finalPlacements),
-    persistProjectedTopicsAndAnchors(input.courseId, projection.finalBuckets),
-    persistProjectedMaterials(input.courseId, projection.projectedMaterials),
+    persistPlacements(input.courseId, refinedProjection.finalPlacements),
+    persistProjectedTopicsAndAnchors(input.courseId, refinedProjection.finalBuckets),
+    persistProjectedMaterials(input.courseId, refinedProjection.projectedMaterials),
     db.course.update({
       where: { id: input.courseId },
       data: {
@@ -1718,22 +2378,34 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
           ? classSchedule as unknown as Prisma.InputJsonValue
           : Prisma.JsonNull,
         syllabusEvents: syllabusEvents as unknown as Prisma.InputJsonValue,
-        timelineMode: projection.finalBuckets.length > 0 ? "weekly" : "unknown",
+        timelineMode: refinedProjection.finalBuckets.length > 0 ? "weekly" : "unknown",
         timelineDiagnostics: {
-          timelineQuality: projection.finalBuckets.length > 0 ? "corpus-first" : "empty",
+          timelineQuality: refinedProjection.finalBuckets.length > 0 ? "corpus-first" : "empty",
           corpusFirst: true,
-          termRange: projection.termRange,
+          termRange: refinedProjection.termRange,
           classScheduleSource,
           evidenceCount: evidence.length,
+          structuralAuthorityCounts: evidence.reduce<Record<string, number>>((acc, item) => {
+            acc[item.derivedHints.structuralAuthority] = (acc[item.derivedHints.structuralAuthority] ?? 0) + 1;
+            return acc;
+          }, {}),
+          authoritySourcesUsed: refinedProjection.diagnostics.authoritySourcesUsed,
+          rejectedLowAuthorityScheduleSources: refinedProjection.diagnostics.rejectedLowAuthorityScheduleSources,
           parsedScheduleSources: parsedScheduleWeeks.map((source) => ({
             evidenceId: source.evidenceId,
             weekCount: source.weeks.length,
           })),
-          projectedMaterialCount: projection.projectedMaterials.length,
-          placementCounts: projection.finalPlacements.reduce<Record<string, number>>((acc, placement) => {
+          projectedMaterialCount: refinedProjection.projectedMaterials.length,
+          placementCounts: refinedProjection.finalPlacements.reduce<Record<string, number>>((acc, placement) => {
             acc[placement.placementKind] = (acc[placement.placementKind] ?? 0) + 1;
             return acc;
           }, {}),
+          retrievalDecisionCounts: refinedProjection.diagnostics.retrievalDecisionCounts,
+          ...(refinedProjection.diagnostics.ragContext
+            ? { ragContext: refinedProjection.diagnostics.ragContext }
+            : {}),
+          emptyWeeksPruned: refinedProjection.diagnostics.emptyWeeksPruned,
+          prunedWeeks: refinedProjection.diagnostics.prunedWeeks,
         } as Prisma.InputJsonValue,
       },
     }),
@@ -1742,7 +2414,7 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
   await refreshCanvasCandidateStates(input.courseId).catch(() => undefined);
 
   return {
-    weeksWritten: projection.finalBuckets.length,
+    weeksWritten: refinedProjection.finalBuckets.length,
     classScheduleSource,
     classSchedule,
     syllabusEvents,
@@ -1796,7 +2468,61 @@ export async function ingestStandaloneEvidence(args: {
   }
 }
 
+export async function ingestGradescopeAssignmentEvidence(args: {
+  courseId: string;
+  assignments: GradescopeAssignmentSyncInput[];
+}): Promise<void> {
+  for (const assignment of args.assignments) {
+    if (!assignment.title.trim()) continue;
+    const sourceKey =
+      assignment.gradescopeAssignmentId?.trim() ||
+      assignment.gradescopeFingerprint?.trim() ||
+      `${assignment.title}|${assignment.dueAt ?? assignment.dueDate ?? "no-date"}`;
+    const evidence = await upsertCourseEvidence(
+      buildEvidenceInput({
+        courseId: args.courseId,
+        rawSourceKind: "gradescope_assignment",
+        rawSourceKey: sourceKey,
+        title: assignment.title,
+        bodyText: [
+          assignment.title,
+          assignment.dueAt ?? assignment.dueDate ? `Due: ${assignment.dueAt ?? assignment.dueDate}` : null,
+          assignment.releasedAt ? `Released: ${assignment.releasedAt}` : null,
+          assignment.lateDueAt ? `Late due: ${assignment.lateDueAt}` : null,
+          assignment.status ? `Status: ${assignment.status}` : null,
+          assignment.score != null && assignment.maxScore != null
+            ? `Score: ${assignment.score}/${assignment.maxScore}`
+            : null,
+        ].filter((value): value is string => Boolean(value)).join("\n"),
+        structuredPayload: {
+          dueDate: assignment.dueDate,
+          dueAt: assignment.dueAt ?? null,
+          releasedAt: assignment.releasedAt ?? null,
+          lateDueAt: assignment.lateDueAt ?? null,
+          status: assignment.status,
+          score: assignment.score,
+          maxScore: assignment.maxScore,
+        },
+        remoteUpdatedAt: assignment.dueAt ?? assignment.dueDate ?? assignment.releasedAt ?? null,
+        discoveredVia: "gradescope import",
+        remoteId: assignment.gradescopeAssignmentId ?? null,
+      }),
+    );
+
+    if (evidence.bodyText && evidence.contentHash) {
+      await ensureEvidenceChunks({
+        evidenceId: evidence.id,
+        courseId: evidence.courseId,
+        text: evidence.bodyText,
+        contentHash: evidence.contentHash,
+      }).catch(() => undefined);
+    }
+  }
+}
+
 export const __testables = {
+  applyTimelineSynthesisToProjection,
+  buildTimelineContextEvidence,
   deriveCanonicalSourceKey,
   deriveCorpusProjection,
   mergeProvenance,

@@ -10,6 +10,7 @@ export type CourseEvidenceSourceKind =
   | "canvas_media_transcript"
   | "canvas_assignment"
   | "canvas_calendar_event"
+  | "gradescope_assignment"
   | "manual_upload"
   | "auto_route";
 
@@ -19,6 +20,11 @@ export type EvidencePlacementKind =
   | "event_only"
   | "global"
   | "unplaced";
+
+export type StructuralAuthority =
+  | "schedule_authority"
+  | "schedule_support"
+  | "content_only";
 
 export type EvidenceRoleSignal =
   | "schedule_like"
@@ -34,6 +40,8 @@ export interface EvidenceDateHint {
 
 export interface CourseEvidenceHints {
   roles: EvidenceRoleSignal[];
+  structuralAuthority: StructuralAuthority;
+  authoritySignals: string[];
   dateMentions: EvidenceDateHint[];
   weekNumbers: number[];
   lectureNumbers: number[];
