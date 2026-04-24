@@ -65,6 +65,12 @@ interface GradescopeCourse {
   assignments: GradescopeAssignment[];
 }
 
+interface GradescopeImportPayload {
+  courses: GradescopeCourse[];
+  deferProjection?: boolean;
+  uploadPhase?: string;
+}
+
 function normalizeTitle(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -167,19 +173,19 @@ export async function POST(request: NextRequest) {
 
   const log = apiLogger("POST /api/gradescope/import", user.id);
 
-  let body: { courses: GradescopeCourse[] };
+  let body: GradescopeImportPayload;
   try {
     body = await request.json();
   } catch {
     return log.respond(withCors(NextResponse.json({ error: "Invalid JSON" }, { status: 400 })));
   }
 
-  const { courses } = body;
+  const { courses, deferProjection = false, uploadPhase = null } = body;
   if (!Array.isArray(courses) || courses.length === 0) {
     return log.respond(withCors(NextResponse.json({ updated: 0, created: 0 })), { gsCourses: 0 });
   }
 
-  log.info("import started", { gsCourses: courses.length });
+  log.info("import started", { gsCourses: courses.length, deferProjection, uploadPhase });
 
   // Look up all user courses that have a Gradescope ID — direct, deterministic matching
   const userCourses = await db.course.findMany({
@@ -498,6 +504,7 @@ export async function POST(request: NextRequest) {
     await ingestGradescopeAssignmentEvidence({
       courseId,
       assignments: gsCourse.assignments,
+      ensureChunks: false,
     }).catch(() => undefined);
 
     corpusRefreshes.push({
@@ -515,7 +522,7 @@ export async function POST(request: NextRequest) {
     debugCourses.push({ gsId: gradescopeCourseId, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
   }
 
-  if (corpusRefreshes.length > 0) {
+  if (!deferProjection && corpusRefreshes.length > 0) {
     after(async () => {
       const bgLog = apiLogger("POST /api/gradescope/import [after]", user.id);
       bgLog.info("background corpus refresh started", { courses: corpusRefreshes.length });

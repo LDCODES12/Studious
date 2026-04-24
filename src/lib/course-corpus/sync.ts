@@ -698,8 +698,12 @@ function buildEvidenceInput(args: {
   };
 }
 
-async function ingestCanvasCourseEvidence(input: CanvasCourseCorpusSyncInput): Promise<void> {
+export async function ingestCanvasCourseEvidence(
+  input: CanvasCourseCorpusSyncInput,
+  options: { ensureChunks?: boolean } = {},
+): Promise<void> {
   const { courseId, course, assignments, modules, announcements } = input;
+  const ensureChunks = options.ensureChunks ?? true;
   const evidenceInputs: EvidenceIngestInput[] = [];
 
   if (course.syllabusBody?.trim()) {
@@ -880,7 +884,7 @@ async function ingestCanvasCourseEvidence(input: CanvasCourseCorpusSyncInput): P
   for (const evidenceInput of evidenceInputs) {
     const evidence = await upsertCourseEvidence(evidenceInput);
     touched.add(evidence.id);
-    if (evidence.bodyText && evidence.contentHash) {
+    if (ensureChunks && evidence.bodyText && evidence.contentHash) {
       await ensureEvidenceChunks({
         evidenceId: evidence.id,
         courseId: evidence.courseId,
@@ -1517,6 +1521,18 @@ function remapPlacementDecisions(decisions: PlacementDecision[], finalBuckets: C
       weekLabel: bucket.weekLabel,
       startDate: bucket.startDate,
     };
+  });
+}
+
+async function ensureChunksForLoadedEvidence(evidence: LoadedEvidence[]): Promise<void> {
+  const chunkable = evidence.filter((item) => item.bodyText && item.contentHash);
+  await mapWithConcurrency(chunkable, 4, async (item) => {
+    await ensureEvidenceChunks({
+      evidenceId: item.id,
+      courseId: item.courseId,
+      text: item.bodyText ?? "",
+      contentHash: item.contentHash ?? "",
+    }).catch(() => undefined);
   });
 }
 
@@ -2342,6 +2358,7 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
   syllabusEvents: Array<{ title: string; dueDate: string; type: string }>;
 }> {
   const evidence = await loadCourseEvidence(input.courseId);
+  await ensureChunksForLoadedEvidence(evidence);
   const { classSchedule, classScheduleSource } = await deriveClassSchedule({
     ...input,
     evidence,
@@ -2425,7 +2442,7 @@ export async function runCanvasCourseCorpusSync(input: CanvasCourseCorpusSyncInp
   weeksWritten: number;
   classScheduleSource: string;
 }> {
-  await ingestCanvasCourseEvidence(input);
+  await ingestCanvasCourseEvidence(input, { ensureChunks: false });
   const rebuilt = await rebuildCourseCorpusProjections({
     courseId: input.courseId,
     courseName: input.courseName,
@@ -2471,7 +2488,9 @@ export async function ingestStandaloneEvidence(args: {
 export async function ingestGradescopeAssignmentEvidence(args: {
   courseId: string;
   assignments: GradescopeAssignmentSyncInput[];
+  ensureChunks?: boolean;
 }): Promise<void> {
+  const ensureChunks = args.ensureChunks ?? true;
   for (const assignment of args.assignments) {
     if (!assignment.title.trim()) continue;
     const sourceKey =
@@ -2509,7 +2528,7 @@ export async function ingestGradescopeAssignmentEvidence(args: {
       }),
     );
 
-    if (evidence.bodyText && evidence.contentHash) {
+    if (ensureChunks && evidence.bodyText && evidence.contentHash) {
       await ensureEvidenceChunks({
         evidenceId: evidence.id,
         courseId: evidence.courseId,

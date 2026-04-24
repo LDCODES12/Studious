@@ -10,7 +10,10 @@ import {
   materialStateKey,
 } from "@/lib/canvas-sync/import-support";
 import type { MaterialSourceKind } from "@/lib/material-sync";
-import { runCanvasCourseCorpusSync } from "@/lib/course-corpus/sync";
+import {
+  ingestCanvasCourseEvidence,
+  rebuildCourseCorpusProjections,
+} from "@/lib/course-corpus/sync";
 
 export const maxDuration = 300; // allow up to 5 min for parallel AI syllabus parsing
 
@@ -149,6 +152,9 @@ interface CanvasAssignmentGroup {
 
 interface ImportPayload {
   syncMode?: "manual" | "scout";
+  deferProjection?: boolean;
+  finalizeProjection?: boolean;
+  uploadPhase?: string;
   courses: CanvasCourse[];
   assignments: CanvasAssignment[];
   modules: CanvasModule[];
@@ -216,6 +222,99 @@ export async function GET(request: NextRequest) {
   return withCors(log.respond(NextResponse.json({ courses, assignments, topics }), { courses, assignments, topics }));
 }
 
+async function persistCanvasMaterialCandidates(
+  courseId: string,
+  materialCandidates: MaterialCandidate[],
+): Promise<void> {
+  if (materialCandidates.length === 0) return;
+
+  const [importedMaterials, existingCandidates] = await Promise.all([
+    db.courseMaterial.findMany({
+      where: {
+        courseId,
+        sourceKind: { in: ["canvas_module", "canvas_media", "canvas_syllabus"] },
+        sourceKey: { in: materialCandidates.map((candidate) => candidate.contentId) },
+      },
+      select: {
+        sourceKind: true,
+        sourceKey: true,
+        sourceUpdatedAt: true,
+      },
+    }),
+    db.canvasMaterialCandidate.findMany({
+      where: {
+        courseId,
+        contentId: { in: materialCandidates.map((candidate) => candidate.contentId) },
+      },
+      select: {
+        contentId: true,
+        requested: true,
+        remoteSize: true,
+      },
+    }),
+  ]);
+
+  const importedMaterialMap = new Map(
+    importedMaterials
+      .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
+      .map((material) => [
+        materialStateKey(material.sourceKind as MaterialSourceKind, material.sourceKey),
+        { sourceUpdatedAt: material.sourceUpdatedAt },
+      ]),
+  );
+  const existingCandidateMap = new Map(existingCandidates.map((candidate) => [candidate.contentId, candidate]));
+
+  await Promise.all(
+    materialCandidates.map((candidate) => {
+      const sourceKind = candidate.sourceKind ?? "canvas_module";
+      const candidateKey = materialStateKey(sourceKind, candidate.contentId);
+      const importedMaterial = importedMaterialMap.get(candidateKey) ?? null;
+      const requested = importedMaterial
+        ? false
+        : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
+      const previousCandidate = existingCandidateMap.get(candidate.contentId) ?? null;
+
+      return db.canvasMaterialCandidate.upsert({
+        where: { courseId_contentId: { courseId, contentId: candidate.contentId } },
+        update: {
+          fileName: candidate.fileName,
+          moduleName: candidate.moduleName,
+          sourceKind,
+          remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+          remoteSize: candidate.remoteSize ?? null,
+          requested,
+          status: deriveCandidateStatus({
+            requested,
+            importedMaterial,
+            remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+            remoteSize: candidate.remoteSize ?? null,
+            previousRemoteSize: previousCandidate?.remoteSize ?? null,
+          }),
+          lastSeenAt: new Date(),
+        },
+        create: {
+          courseId,
+          fileName: candidate.fileName,
+          moduleName: candidate.moduleName,
+          contentId: candidate.contentId,
+          sourceKind,
+          remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+          remoteSize: candidate.remoteSize ?? null,
+          requested,
+          status: deriveCandidateStatus({
+            requested,
+            importedMaterial,
+            remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
+            remoteSize: candidate.remoteSize ?? null,
+            previousRemoteSize: previousCandidate?.remoteSize ?? null,
+          }),
+          lastSeenAt: new Date(),
+        },
+      });
+    }),
+  );
+}
+
 // ─── POST — full Canvas sync ──────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -229,6 +328,9 @@ export async function POST(request: NextRequest) {
   const payload: ImportPayload = await request.json();
   const {
     syncMode = "manual",
+    deferProjection = false,
+    finalizeProjection = false,
+    uploadPhase = null,
     courses = [],
     assignments = [],
     modules = [],
@@ -238,6 +340,9 @@ export async function POST(request: NextRequest) {
 
   log.info("sync started", {
     syncMode,
+    deferProjection,
+    finalizeProjection,
+    uploadPhase,
     courses: courses.length,
     assignments: assignments.length,
     modules: modules.length,
@@ -468,11 +573,51 @@ export async function POST(request: NextRequest) {
     await Promise.all(annUpdates.map(({ id, data }) => db.announcement.update({ where: { id }, data })));
   }
 
-  // 9. Auto-generate tasks from assignments (fast — runs before response)
+  // 9. Persist canonical course evidence now, but leave expensive chunking/RAG
+  // projection to the final server-side background pass.
+  const corpusInputs: Array<{
+    canvasCourse: CanvasCourse;
+    courseId: string;
+    courseAssignments: CanvasAssignment[];
+    courseModules: CanvasModule[];
+    courseAnnouncements: CanvasAnnouncement[];
+  }> = [];
+
+  for (const c of courses) {
+    const scCourseId = courseIdMap.get(c.id);
+    if (!scCourseId) continue;
+
+    const courseAssignments = assignments.filter((assignment) => assignment.courseId === c.id);
+    const courseModules = modules.filter((module) => module.courseId === c.id);
+    const courseAnnouncements = announcements.filter((announcement) => announcement.courseId === c.id);
+
+    await persistCanvasMaterialCandidates(scCourseId, c.materialCandidates ?? []);
+    await ingestCanvasCourseEvidence({
+      courseId: scCourseId,
+      courseName: c.name,
+      termStartAt: c.termStartAt ?? null,
+      termEndAt: c.termEndAt ?? null,
+      calendarEvents: c.calendarEvents ?? [],
+      course: c,
+      assignments: courseAssignments,
+      modules: courseModules,
+      announcements: courseAnnouncements,
+    }, { ensureChunks: false });
+
+    corpusInputs.push({
+      canvasCourse: c,
+      courseId: scCourseId,
+      courseAssignments,
+      courseModules,
+      courseAnnouncements,
+    });
+  }
+
+  // 10. Auto-generate tasks from assignments (fast — runs before response)
   const tasksCreated = await generateTasksForUser(user.id);
 
-  // Return the response immediately so the extension can proceed to Gradescope.
-  // AI syllabus processing runs in the background via after().
+  // Return the response immediately so the extension can keep collecting browser-only data.
+  // Corpus chunking/RAG projection runs in the background only on final handoff.
   const summary = {
     courses: { new: newCourses, updated: updatedCourses },
     assignments: { new: newAssignments, updated: updatedAssignments },
@@ -480,15 +625,19 @@ export async function POST(request: NextRequest) {
     modules: { new: newModules, updated: updatedModules },
     announcements: { new: newAnnouncements },
     tasks: { autoGenerated: tasksCreated },
-    syllabus: { aiWeeks: 0, filesImported: 0, background: true },
+    syllabus: { aiWeeks: 0, filesImported: 0, background: !deferProjection || finalizeProjection },
   };
 
-  // Schedule AI syllabus processing to run after the response is sent.
-  // This avoids the Vercel function timeout killing the response before
-  // the extension receives it.
-  after(async () => {
+  // Schedule corpus processing only when the extension has finished uploading
+  // browser-only evidence, or for older clients that do not send deferProjection.
+  if (!deferProjection || finalizeProjection) after(async () => {
     const bgLog = apiLogger("POST /api/canvas/import [after]", user.id);
-    bgLog.info("background AI processing started", { courses: courses.length, syncMode });
+    bgLog.info("background corpus processing started", {
+      courses: courses.length,
+      syncMode,
+      finalizeProjection,
+      uploadPhase,
+    });
     await db.user.update({ where: { id: user.id }, data: { bgSyncProcessingAt: new Date() } });
 
     try {
@@ -501,114 +650,15 @@ export async function POST(request: NextRequest) {
       }> = [];
 
       await Promise.all(
-        courses.map(async (c) => {
-          const scCourseId = courseIdMap.get(c.id);
-          if (!scCourseId) return;
-
+        corpusInputs.map(async (input) => {
+          const c = input.canvasCourse;
           try {
-            const courseAssignments = assignments.filter((assignment) => assignment.courseId === c.id);
-            const courseModules = modules.filter((module) => module.courseId === c.id);
-            const courseAnnouncements = announcements.filter((announcement) => announcement.courseId === c.id);
-
-            const materialCandidates = c.materialCandidates ?? [];
-            if (materialCandidates.length > 0) {
-              const [importedMaterials, existingCandidates] = await Promise.all([
-                db.courseMaterial.findMany({
-                  where: {
-                    courseId: scCourseId,
-                    sourceKind: { in: ["canvas_module", "canvas_media", "canvas_syllabus"] },
-                    sourceKey: { in: materialCandidates.map((candidate) => candidate.contentId) },
-                  },
-                  select: {
-                    sourceKind: true,
-                    sourceKey: true,
-                    sourceUpdatedAt: true,
-                  },
-                }),
-                db.canvasMaterialCandidate.findMany({
-                  where: {
-                    courseId: scCourseId,
-                    contentId: { in: materialCandidates.map((candidate) => candidate.contentId) },
-                  },
-                  select: {
-                    contentId: true,
-                    requested: true,
-                    remoteSize: true,
-                  },
-                }),
-              ]);
-
-              const importedMaterialMap = new Map(
-                importedMaterials
-                  .filter((material): material is typeof material & { sourceKey: string } => Boolean(material.sourceKey))
-                  .map((material) => [
-                    materialStateKey(material.sourceKind as MaterialSourceKind, material.sourceKey),
-                    { sourceUpdatedAt: material.sourceUpdatedAt },
-                  ]),
-              );
-              const existingCandidateMap = new Map(existingCandidates.map((candidate) => [candidate.contentId, candidate]));
-
-              await Promise.all(
-                materialCandidates.map((candidate) => {
-                  const sourceKind = candidate.sourceKind ?? "canvas_module";
-                  const candidateKey = materialStateKey(sourceKind, candidate.contentId);
-                  const importedMaterial = importedMaterialMap.get(candidateKey) ?? null;
-                  const requested = importedMaterial
-                    ? false
-                    : (existingCandidateMap.get(candidate.contentId)?.requested ?? false);
-                  const previousCandidate = existingCandidateMap.get(candidate.contentId) ?? null;
-
-                  return db.canvasMaterialCandidate.upsert({
-                    where: { courseId_contentId: { courseId: scCourseId, contentId: candidate.contentId } },
-                    update: {
-                      fileName: candidate.fileName,
-                      moduleName: candidate.moduleName,
-                      sourceKind,
-                      remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                      remoteSize: candidate.remoteSize ?? null,
-                      requested,
-                      status: deriveCandidateStatus({
-                        requested,
-                        importedMaterial,
-                        remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                        remoteSize: candidate.remoteSize ?? null,
-                        previousRemoteSize: previousCandidate?.remoteSize ?? null,
-                      }),
-                      lastSeenAt: new Date(),
-                    },
-                    create: {
-                      courseId: scCourseId,
-                      fileName: candidate.fileName,
-                      moduleName: candidate.moduleName,
-                      contentId: candidate.contentId,
-                      sourceKind,
-                      remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                      remoteSize: candidate.remoteSize ?? null,
-                      requested,
-                      status: deriveCandidateStatus({
-                        requested,
-                        importedMaterial,
-                        remoteUpdatedAt: candidate.remoteUpdatedAt ?? null,
-                        remoteSize: candidate.remoteSize ?? null,
-                        previousRemoteSize: previousCandidate?.remoteSize ?? null,
-                      }),
-                      lastSeenAt: new Date(),
-                    },
-                  });
-                }),
-              );
-            }
-
-            const result = await runCanvasCourseCorpusSync({
-              courseId: scCourseId,
+            const result = await rebuildCourseCorpusProjections({
+              courseId: input.courseId,
               courseName: c.name,
               termStartAt: c.termStartAt ?? null,
               termEndAt: c.termEndAt ?? null,
               calendarEvents: c.calendarEvents ?? [],
-              course: c,
-              assignments: courseAssignments,
-              modules: courseModules,
-              announcements: courseAnnouncements,
             });
 
             courseDebug.push({

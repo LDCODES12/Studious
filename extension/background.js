@@ -6,8 +6,8 @@
  *            → sends COURSE_SELECTION to popup for user to pick
  *   Phase 2: popup sends SYNC_SELECTED → set window.__sc_selectedIds → re-inject content.js
  *            → receives CANVAS_DATA → resolve Gradescope IDs from Canvas LTI tabs
- *            → extract PDF text via offscreen doc → POST canvas/import
- *            → scrape Gradescope assignments (linked courses only) → POST gradescope/import
+ *            → extract browser-only PDF/transcript/Gradescope data → upload-only POSTs
+ *            → final handoff POST tells Study Circle to process corpus/RAG in the site
  *            → SYNC_COMPLETE
  *
  * Gradescope integration: content.js discovers Gradescope LTI tabs in Canvas
@@ -249,6 +249,27 @@ function buildMediaTranscriptPayload(entries) {
   return {
     syncMode: "scout",
     courses: [...courseMap.values()],
+    assignments: [],
+    modules: [],
+    announcements: [],
+    assignmentGroups: [],
+  };
+}
+
+function buildFinalizeCanvasProcessingPayload(sourcePayload, syncMode) {
+  return {
+    syncMode: syncMode === "scout" ? "scout" : "manual",
+    finalizeProjection: true,
+    deferProjection: false,
+    uploadPhase: "finalize",
+    courses: (sourcePayload.courses ?? []).map((course) => {
+      const clone = cloneCourseForMaterialBatch(course);
+      clone.syllabusTexts = [];
+      clone.materialTexts = [];
+      clone.pageTexts = [];
+      clone.materialCandidates = [];
+      return clone;
+    }),
     assignments: [],
     modules: [],
     announcements: [],
@@ -531,12 +552,22 @@ function createMediaTranscriptBatches(entries) {
   return batches;
 }
 
-async function postCanvasImportPayload(scUrl, apiToken, payload, contextLabel) {
-  const bytes = importPayloadByteLength(payload);
+function withCanvasUploadControl(payload, options = {}) {
+  return {
+    ...payload,
+    ...(options.deferProjection !== undefined ? { deferProjection: options.deferProjection } : {}),
+    ...(options.finalizeProjection !== undefined ? { finalizeProjection: options.finalizeProjection } : {}),
+    ...(options.uploadPhase ? { uploadPhase: options.uploadPhase } : {}),
+  };
+}
+
+async function postCanvasImportPayload(scUrl, apiToken, payload, contextLabel, options = {}) {
+  const controlledPayload = withCanvasUploadControl(payload, options);
+  const bytes = importPayloadByteLength(controlledPayload);
   const res = await fetch(`https://${scUrl}/api/canvas/import`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(controlledPayload),
   });
 
   if (!res.ok) {
@@ -999,8 +1030,8 @@ async function handleCanvasData(payload) {
       type: "SYNC_PROGRESS",
       percent: 93,
       label: courseCount > 0
-        ? `AI is reading ${courseCount} syllab${courseCount !== 1 ? "i" : "us"}… (may take ~60s)`
-        : "Saving to Study Circle…",
+        ? `Uploading ${courseCount} course${courseCount !== 1 ? "s" : ""} to Study Circle…`
+        : "Uploading to Study Circle…",
     });
 
     const payloadPrep = prepareCanvasImportPayload(payload);
@@ -1028,7 +1059,13 @@ async function handleCanvasData(payload) {
       });
     }
 
-    const canvasImport = await postCanvasImportPayload(scUrl, apiToken, payload, "main Canvas sync");
+    const canvasImport = await postCanvasImportPayload(
+      scUrl,
+      apiToken,
+      payload,
+      "main Canvas upload",
+      { deferProjection: true, uploadPhase: "canvas-main" },
+    );
     const result = canvasImport.result;
 
     if (result.debug) {
@@ -1052,6 +1089,7 @@ async function handleCanvasData(payload) {
           apiToken,
           batch.payload,
           `course material batch ${index + 1}/${canvasModuleMaterialBatches.length}`,
+          { deferProjection: true, uploadPhase: "canvas-material-batch" },
         );
         uploadedMaterials += batch.materialCount;
         syncLog("canvas_module_material_batch_done", {
@@ -1085,6 +1123,7 @@ async function handleCanvasData(payload) {
           apiToken,
           batch.payload,
           `Canvas page batch ${index + 1}/${canvasPageTextBatches.length}`,
+          { deferProjection: true, uploadPhase: "canvas-page-batch" },
         );
         uploadedPages += batch.pageCount;
         syncLog("canvas_page_text_batch_done", {
@@ -1150,6 +1189,7 @@ async function handleCanvasData(payload) {
           apiToken,
           batch.payload,
           `lecture transcript batch ${index + 1}/${mediaTranscriptBatches.length}`,
+          { deferProjection: true, uploadPhase: "canvas-media-transcript-batch" },
         );
         uploadedTranscripts += batch.transcriptCount;
         syncLog("media_batch_done", {
@@ -1185,6 +1225,31 @@ async function handleCanvasData(payload) {
       }
     } else {
       syncLog("gs_skipped", { reason: scoutMode ? "scout_mode" : "no linked courses" });
+    }
+
+    const finalizePayload = buildFinalizeCanvasProcessingPayload(payload, syncContext.syncMode);
+    if ((finalizePayload.courses ?? []).length > 0) {
+      broadcastToPopup({
+        type: "SYNC_PROGRESS",
+        percent: 99,
+        label: "Starting Study Circle processing…",
+      });
+      const finalizeImport = await postCanvasImportPayload(
+        scUrl,
+        apiToken,
+        finalizePayload,
+        "final Study Circle processing handoff",
+        { deferProjection: false, finalizeProjection: true, uploadPhase: "finalize" },
+      );
+      result.processing = {
+        background: true,
+        courses: finalizePayload.courses.length,
+      };
+      syncLog("canvas_processing_handoff_done", {
+        status: finalizeImport.status,
+        bytes: finalizeImport.bytes,
+        courses: finalizePayload.courses.length,
+      });
     }
 
     await flushSyncLog(scUrl, apiToken);
@@ -2231,7 +2296,7 @@ async function syncCanvasMediaTranscripts(scUrl, apiToken, canvasUrl, courses) {
  * Navigates to each course page and reads the rendered DOM.
  */
 async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
-  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Syncing Gradescope grades…" });
+  broadcastToPopup({ type: "SYNC_PROGRESS", percent: 96, label: "Gathering Gradescope grades…" });
 
   const tab = await chrome.tabs.create({ url: "https://www.gradescope.com/", active: false });
   const gsTabId = tab.id;
@@ -2673,7 +2738,11 @@ async function scrapeGradescopeAssignments(scUrl, apiToken, linkedCourses) {
     const gsRes = await fetch(`https://${scUrl}/api/gradescope/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiToken}` },
-      body: JSON.stringify({ courses: allCourses }),
+      body: JSON.stringify({
+        courses: allCourses,
+        deferProjection: true,
+        uploadPhase: "gradescope",
+      }),
     });
 
     if (!gsRes.ok) {

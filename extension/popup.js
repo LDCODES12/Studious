@@ -399,6 +399,9 @@ function showResult(result) {
   if (s.announcements?.new > 0) {
     notes.push(`${s.announcements.new} announcement${s.announcements.new !== 1 ? "s" : ""}`);
   }
+  if (result.processing?.background) {
+    notes.push("Study Circle is processing course content");
+  }
   resultNote.textContent = notes.join(" · ");
   resultSection.hidden = false;
 }
