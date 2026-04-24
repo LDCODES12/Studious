@@ -208,9 +208,53 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+// Strips bytes Postgres/Prisma-JSON cannot store: NUL (0x00), other C0 controls
+// except \t \n \r, and unpaired UTF-16 surrogates. PDF/HTML extraction leaks both.
+function sanitizeTextForStorage(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      out += value[i];
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) continue;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += value[i] + value[i + 1];
+        i += 1;
+        continue;
+      }
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) continue;
+    out += value[i];
+  }
+  return out;
+}
+
+function sanitizeJsonValue<T>(value: T): T {
+  if (typeof value === "string") {
+    return sanitizeTextForStorage(value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeJsonValue(item)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = sanitizeJsonValue(entry);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 function normalizeTextBody(value: string | null | undefined): string | null {
   if (!value) return null;
-  const normalized = value.trim();
+  const sanitized = sanitizeTextForStorage(value);
+  const normalized = sanitized.trim();
   return normalized.length > 0 ? normalized : null;
 }
 
@@ -634,12 +678,17 @@ function buildEvidenceInput(args: {
   label?: string | null;
   calendarSeed?: string | null;
 }): EvidenceIngestInput {
+  const sanitizedTitle = sanitizeTextForStorage(args.title);
+  const sanitizedLabel = args.label ? sanitizeTextForStorage(args.label) : args.label ?? null;
+  const sanitizedModuleName = args.moduleName ? sanitizeTextForStorage(args.moduleName) : args.moduleName ?? null;
+  const sanitizedPageName = args.pageName ? sanitizeTextForStorage(args.pageName) : args.pageName ?? null;
+  const sanitizedStructuredPayload = args.structuredPayload ? sanitizeJsonValue(args.structuredPayload) : null;
   const normalizedBodyText = normalizeTextBody(args.bodyText);
   const contentHash = normalizedBodyText ? hashMaterialText(normalizedBodyText) : null;
   const hints = extractCourseEvidenceHints({
     sourceKind: inferEvidenceSourceKind({
       rawSourceKind: args.rawSourceKind,
-      title: args.title,
+      title: sanitizedTitle,
       bodyText: normalizedBodyText,
       hints: {
         roles: [],
@@ -654,21 +703,21 @@ function buildEvidenceInput(args: {
         sourceRoleSignals: [],
       },
     }),
-    title: args.title,
+    title: sanitizedTitle,
     bodyText: normalizedBodyText,
-    structuredPayload: args.structuredPayload ?? null,
+    structuredPayload: sanitizedStructuredPayload,
     remoteUpdatedAt: args.remoteUpdatedAt ?? null,
   });
   const sourceKind = inferEvidenceSourceKind({
     rawSourceKind: args.rawSourceKind,
-    title: args.title,
+    title: sanitizedTitle,
     bodyText: normalizedBodyText,
     hints,
   });
   const sourceKey = deriveCanonicalSourceKey({
     rawSourceKind: args.rawSourceKind,
     rawSourceKey: args.rawSourceKey,
-    title: args.title,
+    title: sanitizedTitle,
     contentHash,
     announcedId: args.remoteId ?? null,
     calendarSeed: args.calendarSeed ?? null,
@@ -677,19 +726,19 @@ function buildEvidenceInput(args: {
     courseId: args.courseId,
     sourceKind,
     sourceKey,
-    title: args.title,
+    title: sanitizedTitle,
     bodyText: normalizedBodyText,
-    structuredPayload: args.structuredPayload ?? null,
+    structuredPayload: sanitizedStructuredPayload,
     provenanceEntry: {
       discoveredVia: args.discoveredVia,
       rawSourceKind: args.rawSourceKind,
       sourceKey: args.rawSourceKey ?? null,
       remoteId: args.remoteId ?? null,
       sourceUrl: args.sourceUrl ?? null,
-      moduleName: args.moduleName ?? null,
-      pageName: args.pageName ?? null,
-      fileName: args.title,
-      label: args.label ?? null,
+      moduleName: sanitizedModuleName,
+      pageName: sanitizedPageName,
+      fileName: sanitizedTitle,
+      label: sanitizedLabel,
       capturedAt: new Date().toISOString(),
     },
     remoteUpdatedAt: args.remoteUpdatedAt ?? null,
