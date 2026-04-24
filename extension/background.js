@@ -866,6 +866,10 @@ async function startScout(trigger = "manual") {
 
 // ── Handle full Canvas payload → extract PDFs → POST to Study Circle ──────────
 async function handleCanvasData(payload) {
+  // Flips to true once canvas-main has succeeded and the popup has been told
+  // the sync is done. After that, later-phase failures are silent enhancements
+  // and must not flip the popup into an error state.
+  let handedOffToWebsite = false;
   try {
     const { scUrl, apiToken, canvasUrl } = await chrome.storage.local.get(["scUrl", "apiToken", "canvasUrl"]);
     const syncContext = await chrome.storage.session.get(["syncMode", "syncSelectedIds", "syncTrigger"]);
@@ -1074,6 +1078,36 @@ async function handleCanvasData(payload) {
 
     syncLog("canvas_import_done", { status: canvasImport.status, bytes: canvasImport.bytes });
 
+    // Hand progress off to the website. Canvas-main has kicked off server-side
+    // processing, and the "Analyzing syllabi…" banner will take over. The
+    // popup flips to a done state now so the user can close it; remaining
+    // browser-only phases (materials, pages, transcripts, Gradescope) continue
+    // silently as enhancement data.
+    result.processing = {
+      background: true,
+      courses: payload.courses?.length ?? 0,
+    };
+    await chrome.storage.local.set({
+      lastSync: Date.now(),
+      lastResult: result,
+      lastError: null,
+    });
+    if (syncContext.syncMode === "manual" && Array.isArray(syncContext.syncSelectedIds) && syncContext.syncSelectedIds.length > 0) {
+      await chrome.storage.local.set({
+        lastSelectedCourseIds: syncContext.syncSelectedIds,
+        lastManualSyncAt: Date.now(),
+      });
+    }
+    if (syncContext.syncMode === "scout") {
+      await chrome.storage.local.set({
+        lastScoutAt: Date.now(),
+        lastScoutTrigger: syncContext.syncTrigger ?? null,
+      });
+    }
+    await clearSyncContext();
+    broadcastToPopup({ type: "SYNC_COMPLETE", result });
+    handedOffToWebsite = true;
+
     if (canvasModuleMaterialBatches.length > 0) {
       broadcastToPopup({
         type: "SYNC_PROGRESS",
@@ -1253,28 +1287,23 @@ async function handleCanvasData(payload) {
     }
 
     await flushSyncLog(scUrl, apiToken);
-    const localUpdate = {};
-    if (syncContext.syncMode === "manual" && Array.isArray(syncContext.syncSelectedIds) && syncContext.syncSelectedIds.length > 0) {
-      localUpdate.lastSelectedCourseIds = syncContext.syncSelectedIds;
-      localUpdate.lastManualSyncAt = Date.now();
-    }
-    if (syncContext.syncMode === "scout") {
-      localUpdate.lastScoutAt = Date.now();
-      localUpdate.lastScoutTrigger = syncContext.syncTrigger ?? null;
-    }
-    if (Object.keys(localUpdate).length > 0) {
-      await chrome.storage.local.set(localUpdate);
-    }
-    await clearSyncContext();
-    broadcastToPopup({ type: "SYNC_COMPLETE", result });
+    // SYNC_COMPLETE + clearSyncContext already fired right after canvas-main
+    // succeeded. Later phases here are silent enhancement uploads.
 
   } catch (err) {
-    syncLog("sync_fatal_error", { error: err?.message ?? String(err) });
+    syncLog(handedOffToWebsite ? "background_phase_error" : "sync_fatal_error", {
+      error: err?.message ?? String(err),
+      handedOffToWebsite,
+    });
     try {
       const { scUrl: u, apiToken: t } = await chrome.storage.local.get(["scUrl", "apiToken"]);
       if (u && t) await flushSyncLog(u, t);
     } catch { /* best-effort */ }
     await closeOffscreen();
+    if (handedOffToWebsite) {
+      console.warn("[worker] Background enhancement phase failed after handoff (non-fatal):", err?.message ?? err);
+      return;
+    }
     await clearSyncContext();
     handleError(err.message ?? String(err));
   }
