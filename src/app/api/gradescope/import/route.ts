@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { apiLogger } from "@/lib/logger";
 import {
@@ -6,6 +6,8 @@ import {
   rebuildCourseCorpusProjections,
 } from "@/lib/course-corpus/sync";
 import crypto from "crypto";
+
+export const maxDuration = 300;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -211,6 +213,7 @@ export async function POST(request: NextRequest) {
   let updated = 0;
   let created = 0;
   const debugCourses: { gsId: string; matched: string | null; updated: number; created: number }[] = [];
+  const corpusRefreshes: { courseId: string; courseName: string; gradescopeCourseId: string }[] = [];
 
   for (const gsCourse of courses) {
     const { gradescopeCourseId } = gsCourse;
@@ -497,10 +500,11 @@ export async function POST(request: NextRequest) {
       assignments: gsCourse.assignments,
     }).catch(() => undefined);
 
-    await rebuildCourseCorpusProjections({
+    corpusRefreshes.push({
       courseId,
       courseName: matchedCourse.name,
-    }).catch(() => undefined);
+      gradescopeCourseId,
+    });
 
     log.info("course matched", {
       gsId: gradescopeCourseId,
@@ -509,6 +513,36 @@ export async function POST(request: NextRequest) {
       created: courseCreated,
     });
     debugCourses.push({ gsId: gradescopeCourseId, matched: matchedCourse.name, updated: courseUpdated, created: courseCreated });
+  }
+
+  if (corpusRefreshes.length > 0) {
+    after(async () => {
+      const bgLog = apiLogger("POST /api/gradescope/import [after]", user.id);
+      bgLog.info("background corpus refresh started", { courses: corpusRefreshes.length });
+      await Promise.all(
+        corpusRefreshes.map(async (refresh) => {
+          try {
+            const result = await rebuildCourseCorpusProjections({
+              courseId: refresh.courseId,
+              courseName: refresh.courseName,
+            });
+            bgLog.info("background corpus refresh complete", {
+              courseName: refresh.courseName,
+              gsId: refresh.gradescopeCourseId,
+              weeksWritten: result.weeksWritten,
+              classScheduleSource: result.classScheduleSource,
+            });
+          } catch (error) {
+            bgLog.error("background corpus refresh failed", {
+              courseName: refresh.courseName,
+              gsId: refresh.gradescopeCourseId,
+              error: String(error),
+              stack: error instanceof Error ? error.stack : undefined,
+            });
+          }
+        }),
+      );
+    });
   }
 
   return log.respond(
