@@ -30,7 +30,7 @@ const dropRulesSchema = z.object({
   })),
 });
 
-/** Shared schema for ParsedTopic — also used by topic-pipeline.ts */
+/** Shared schema for ParsedTopic. */
 export const parsedTopicSchema = z.object({
   weekNumber: z.number(),
   weekLabel: z.string(),
@@ -210,7 +210,6 @@ const SECTION_LIST_AT_END_RX = /^(.*?)(\d{1,2}\.\d{1,2}(?:\s*,\s*\d{1,2}\.\d{1,2
 const TABULAR_ROW_SCORE_RX = /^\s*\d+\t(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)/gim;
 const COURSE_OUTLINE_HEADING_RX = /\bcourse outline\b/i;
 const LECTURE_OUTLINE_SECTION_RX = /([A-Z][A-Za-z0-9/&'()\-– ]{3,}?):\s*(?:\([^)]{0,180}\)\s*)?[–-]\s*(\d+)\s*lectures?\b/gi;
-const LECTURE_OUTLINE_BULLET_RX = /(?:^|[•\n\r])\s*lecture\s+(\d+)\s*:\s*([\s\S]*?)(?=(?:[•\n\r]\s*lecture\s+\d+\s*:)|$)/gi;
 const LECTURE_OUTLINE_BULLET_START_RX = /(?:^|[•\n\r])\s*lecture\s+(\d+)\s*:/gi;
 const INLINE_SINGLE_LECTURE_RX = /\(\s*lecture\s+(\d+)\s*\)\s*([\s\S]*?)$/i;
 const INLINE_SINGLE_LECTURE_GLOBAL_RX = /\(\s*lecture\s+(\d+)\s*\)\s*([\s\S]*?)(?=(?:[A-Z][A-Za-z0-9/&'()\-– ]{3,}:\s*(?:\([^)]{0,180}\)\s*)?[–-]\s*\d+\s*lectures?\b)|$)/gi;
@@ -396,13 +395,6 @@ function tryParseLectureOutlineSchedule(text: string): ParsedSchedule | null {
     return bestSection;
   };
 
-  const nextSectionIndexAfter = (index: number): number => {
-    for (const section of sectionMatches) {
-      if (section.index > index) return section.index;
-    }
-    return text.length;
-  };
-
   const lectureBullets = [...text.matchAll(LECTURE_OUTLINE_BULLET_START_RX)].map((match) => ({
     index: match.index ?? 0,
     bodyStart: (match.index ?? 0) + match[0].length,
@@ -546,140 +538,6 @@ function tryParseTabularSchedule(text: string): ParsedSchedule | null {
     hasExplicitDates: weeks.some((week) => Boolean(week.startDate)),
     hasExplicitBreakRows: weeks.some((week) => /\bspring break|holiday|no class/i.test(week.weekLabel)),
   };
-}
-
-export function renumberSequentialWeeks(weeks: ParsedTopic[]): ParsedTopic[] {
-  return [...weeks]
-    .sort((a, b) => a.weekNumber - b.weekNumber)
-    .map((w, i) => ({ ...w, weekNumber: i + 1 }));
-}
-
-// ─── Role 4 — Sanitizer ────────────────────────────────────────────────────────
-//
-// Code-only cleanup pass that runs immediately after AI extraction.
-// Removes policy-contaminated content, fixes week numbering, sorts by date.
-// Free (no API call) — always runs.
-
-/** Policy-only week labels — weeks whose label matches AND have no topics/readings are dropped. */
-const POLICY_LABEL_RX =
-  /^(grading|attendance\s+polic|academic\s+integrity|course\s+polic|syllabus\s+(overview|review)|late\s+(work|submission)\s+polic|extra\s+credit\s+polic|office\s+hours\s+polic|contact\s+info)/i;
-
-/** Topic/reading strings that are course-admin text, not academic content. */
-const POLICY_TOPIC_RX =
-  /\b(attendance\s+polic|plagiarism\s+polic|academic\s+(dishonesty|integrity)\s+polic|late\s+(work|submission|assignment)\s+polic|grading\s+polic|extra\s+credit\s+polic|point[s]?\s+possible\s*:)\b/i;
-
-/**
- * Cleans an AI-extracted schedule in place:
- * 1. Strips policy-language strings from topics/readings arrays
- * 2. Drops weeks where the label is purely administrative with no real content
- * 3. Sorts by weekNumber, then renumbers 1…N to close any gaps
- */
-export function sanitizeSchedule(weeks: ParsedTopic[]): ParsedTopic[] {
-  return weeks
-    // 1. Strip policy strings from topic/reading arrays within each week
-    .map((w) => ({
-      ...w,
-      topics: (w.topics ?? []).filter((t) => !POLICY_TOPIC_RX.test(t)),
-      readings: (w.readings ?? []).filter((r) => !POLICY_TOPIC_RX.test(r)),
-    }))
-    // 2. Drop weeks whose label sounds like admin-only AND have no real content
-    .filter((w) => {
-      if (
-        POLICY_LABEL_RX.test(w.weekLabel.trim()) &&
-        w.topics.length === 0 &&
-        w.readings.length === 0 &&
-        !w.notes
-      ) {
-        return false;
-      }
-      return true;
-    })
-    // 3. Sort ascending by weekNumber (preserve original numbering for cross-source merge)
-    .sort((a, b) => a.weekNumber - b.weekNumber);
-}
-
-// ─── Role 5 — Auditor ─────────────────────────────────────────────────────────
-//
-// AI second-pass that receives both the extracted JSON and the original source
-// text. Corrects errors the Sanitizer can't catch: wrong week labels, misread
-// table structure, out-of-order dates, hallucinated topics.
-//
-// Triggered only when the result looks suspicious (partial, contaminated, or
-// date-sequence broken) — typically costs ~$0.001 per course when it fires.
-
-/**
- * Returns true when the extracted schedule has signs of problems that
- * warrant a second AI review pass.
- */
-export function needsAudit(weeks: ParsedTopic[]): boolean {
-  if (weeks.length < 5) return true; // suspiciously few weeks (< 5 catches failures without over-auditing short intensive courses)
-
-  const emptyWeeks = weeks.filter(
-    (w) => (w.topics ?? []).length === 0 && (w.readings ?? []).length === 0 && !w.notes
-  ).length;
-  if (emptyWeeks / weeks.length > 0.25) return true; // >25% empty rows
-
-  // Check for non-monotonic startDates (AI hallucinated or reordered dates)
-  const dates = weeks
-    .filter((w) => w.startDate && /^\d{4}-\d{2}-\d{2}$/.test(w.startDate))
-    .map((w) => w.startDate!);
-  if (dates.length > 2) {
-    for (let i = 1; i < dates.length; i++) {
-      if (dates[i] < dates[i - 1]) return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Sends the extracted weeks + source snippet to gpt-5.4-nano for a quality
- * review. The model corrects week labels, removes hallucinated or policy
- * topics, fixes date ordering, and drops empty weeks.
- *
- * Falls back to the input weeks if the AI call fails or returns nothing useful.
- */
-export async function auditSchedule(
-  weeks: ParsedTopic[],
-  sourceText: string,
-  rowSemantics: RowSemantics = "unknown",
-): Promise<ParsedTopic[]> {
-  const auditSchema = z.object({ weeks: z.array(parsedTopicSchema) });
-  const numberingRule =
-    rowSemantics === "lecture_number"
-      ? "CRITICAL: These rows use lecture-number semantics. Preserve the original lecture identifiers exactly. Do NOT renumber lecture ids to close gaps."
-      : "Ensure weekNumbers are sequential with no gaps — renumber if needed.";
-
-  try {
-    const { object } = await generateObject({
-      ...modelConfig("medium"),
-      schema: auditSchema,
-      system: `You are a schedule quality auditor. You will receive:
-1. EXTRACTED SCHEDULE — a JSON array of schedule entries (possibly with errors). Entries may represent weeks OR individual lectures — preserve whichever granularity was extracted.
-2. ORIGINAL SOURCE — the text window used for extraction (up to 12k chars)
-
-Your job is to fix the extracted schedule:
-- Remove topics or readings that are course policy text (grading rules, attendance rules, late penalties, office hours). Academic content only.
-- Fix vague weekLabels like "Regular Class" or "TBD" — use actual topic names from the source if you can find them.
-- Remove entries that have no real topics or readings after cleanup.
-- ${numberingRule}
-- Validate startDates: they must increase chronologically. Remove or fix dates that are out of order.
-- Do NOT invent topics that aren't in the source. Only fix, never fabricate.
-- PRESERVE GRANULARITY: If the input has one entry per lecture (e.g. 41 entries for 41 lectures), keep them as individual entries. Do NOT collapse or merge lectures into weeks in the audit stage — the pipeline decides later whether that outline is usable as a canonical timeline.`,
-      prompt: `EXTRACTED SCHEDULE:\n${JSON.stringify(weeks, null, 2)}\n\nORIGINAL SOURCE:\n${sourceText.slice(0, 12000)}`,
-      abortSignal: AbortSignal.timeout(60_000),
-      maxRetries: 1,
-    });
-
-    const audited = object.weeks as ParsedTopic[];
-    // Accept only if the audit produced at least half as many weeks (avoid catastrophic drops)
-    if (audited.length >= Math.max(1, weeks.length / 2)) {
-      return audited;
-    }
-  } catch {
-    // generation failed — return unmodified
-  }
-  return weeks;
 }
 
 // ─── Class Schedule Extraction ────────────────────────────────────────────────
@@ -1224,7 +1082,7 @@ export async function parseSyllabusTopics(
   return schedule.weeks;
 }
 
-// ─── Shared Helpers (used by both route.ts and topic-pipeline.ts) ─────────────
+// ─── Shared Helpers ───────────────────────────────────────────────────────────
 
 /**
  * Scores how "schedule-dense" a text block is. Higher = more likely to contain
@@ -1346,13 +1204,4 @@ export function detectSourceFormat(text: string): string {
     lines.filter((l) => /^[-•*·]\s/.test(l.trim())).length / lines.length;
   if (bulletRatio > 0.25) return "bulleted list";
   return "paragraph text";
-}
-
-/** Returns true if an AI-returned topic has at least one piece of content. */
-export function isContentfulTopic(t: ParsedTopic): boolean {
-  if (Array.isArray(t.topics) && t.topics.length > 0) return true;
-  if (Array.isArray(t.readings) && t.readings.length > 0) return true;
-  if (typeof t.notes === "string" && t.notes.trim().length > 0) return true;
-  if (typeof t.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t.startDate)) return true;
-  return false;
 }

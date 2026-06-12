@@ -142,7 +142,7 @@ Rules:
         weekContexts: args.context.weekContexts ?? [],
       }),
       abortSignal: AbortSignal.timeout(55_000),
-      maxRetries: 1,
+      maxRetries: 2,
     });
 
     return object as TimelineSynthesisDecision;

@@ -659,6 +659,27 @@ export async function POST(request: NextRequest) {
     });
 
     try {
+      // canvas-main runs before the materials/pages/transcripts batches have
+      // landed. Rebuilding existing timelines from that partial corpus makes
+      // the schedule visibly flip mid-sync (and again at finalize). So the
+      // early pass is a first-sync safety net only: it projects courses that
+      // have no timeline yet, and everything else waits for finalize.
+      let projectionInputs = corpusInputs;
+      if (uploadPhase === "canvas-main" && !finalizeProjection) {
+        const coursesWithTopics = await db.courseTopic.findMany({
+          where: { courseId: { in: corpusInputs.map((input) => input.courseId) } },
+          distinct: ["courseId"],
+          select: { courseId: true },
+        });
+        const hasTimeline = new Set(coursesWithTopics.map((row) => row.courseId));
+        projectionInputs = corpusInputs.filter((input) => !hasTimeline.has(input.courseId));
+        bgLog.info("canvas-main projection gate", {
+          totalCourses: corpusInputs.length,
+          projectingNow: projectionInputs.length,
+          deferredToFinalize: corpusInputs.length - projectionInputs.length,
+        });
+      }
+
       const courseDebug: Array<{
         name: string;
         weeksWritten: number;
@@ -668,7 +689,7 @@ export async function POST(request: NextRequest) {
       }> = [];
 
       await Promise.all(
-        corpusInputs.map(async (input) => {
+        projectionInputs.map(async (input) => {
           const c = input.canvasCourse;
           try {
             const result = await rebuildCourseCorpusProjections({

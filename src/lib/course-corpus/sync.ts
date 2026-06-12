@@ -947,7 +947,10 @@ export async function ingestCanvasCourseEvidence(
 async function loadCourseEvidence(courseId: string): Promise<LoadedEvidence[]> {
   const rows = await db.courseEvidence.findMany({
     where: { courseId },
-    orderBy: [{ remoteUpdatedAt: "desc" }, { capturedAt: "desc" }],
+    // sourceKey tiebreak, NOT capturedAt: capturedAt is touched on every sync,
+    // so it would reshuffle tie order between runs and make projections drift
+    // even when no evidence content changed.
+    orderBy: [{ remoteUpdatedAt: "desc" }, { sourceKey: "asc" }],
   });
 
   return rows.map((row) => ({
@@ -964,6 +967,79 @@ async function loadCourseEvidence(courseId: string): Promise<LoadedEvidence[]> {
     contentHash: row.contentHash,
     derivedHints: ensureHints(row.derivedHints),
   }));
+}
+
+interface StoredRebuildInputs {
+  corpusFingerprint: string | null;
+  termStartAt: string | null;
+  termEndAt: string | null;
+  calendarEvents: NonNullable<RebuildCourseCorpusInput["calendarEvents"]> | null;
+}
+
+function parseStoredRebuildInputs(diagnostics: Prisma.JsonValue | null | undefined): StoredRebuildInputs {
+  const empty: StoredRebuildInputs = {
+    corpusFingerprint: null,
+    termStartAt: null,
+    termEndAt: null,
+    calendarEvents: null,
+  };
+  if (!diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)) return empty;
+  const raw = (diagnostics as Record<string, unknown>).rebuildInputs;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return empty;
+  const record = raw as Record<string, unknown>;
+  const calendarEvents = Array.isArray(record.calendarEvents)
+    ? record.calendarEvents.filter(
+        (event): event is { title: string; startAt: string; endAt: string; location: string | null } =>
+          !!event && typeof event === "object" &&
+          typeof (event as Record<string, unknown>).title === "string" &&
+          typeof (event as Record<string, unknown>).startAt === "string" &&
+          typeof (event as Record<string, unknown>).endAt === "string",
+      )
+    : null;
+  return {
+    corpusFingerprint: typeof record.corpusFingerprint === "string" ? record.corpusFingerprint : null,
+    termStartAt: typeof record.termStartAt === "string" ? record.termStartAt : null,
+    termEndAt: typeof record.termEndAt === "string" ? record.termEndAt : null,
+    calendarEvents,
+  };
+}
+
+/**
+ * Stable hash of everything the projection consumes. If this matches the
+ * fingerprint from the last committed rebuild, re-running the pipeline can
+ * only add AI variance — never information — so the rebuild is skipped.
+ */
+function computeCorpusFingerprint(args: {
+  courseName: string;
+  termStartAt: string | null;
+  termEndAt: string | null;
+  calendarEvents: NonNullable<RebuildCourseCorpusInput["calendarEvents"]>;
+  evidence: LoadedEvidence[];
+}): string {
+  const evidenceKeys = args.evidence
+    .map((item) =>
+      [
+        item.sourceKey,
+        item.sourceKind,
+        item.contentHash ?? "",
+        item.title,
+        item.structuredPayload ? JSON.stringify(item.structuredPayload) : "",
+      ].join("\u001f"),
+    )
+    .sort();
+  const calendarKeys = args.calendarEvents
+    .map((event) => `${event.title}|${event.startAt}|${event.endAt}`)
+    .sort();
+  return hashMaterialText(
+    JSON.stringify({
+      v: 1,
+      courseName: args.courseName,
+      termStartAt: args.termStartAt,
+      termEndAt: args.termEndAt,
+      calendarEvents: calendarKeys,
+      evidence: evidenceKeys,
+    }),
+  );
 }
 
 function getEvidenceDateSet(evidence: LoadedEvidence[]): string[] {
@@ -2038,7 +2114,7 @@ async function synthesizeProjectionWithCourseRag(args: {
   courseName: string;
   evidence: LoadedEvidence[];
   projection: CorpusProjectionResult;
-}): Promise<CorpusProjectionResult> {
+}): Promise<{ projection: CorpusProjectionResult; synthesisApplied: boolean }> {
   const context = await buildCourseTimelineContextBundle({
     courseId: args.courseId,
     courseName: args.courseName,
@@ -2054,6 +2130,36 @@ async function synthesizeProjectionWithCourseRag(args: {
   });
   if (!synthesis) {
     return {
+      synthesisApplied: false,
+      projection: {
+        ...args.projection,
+        diagnostics: {
+          ...args.projection.diagnostics,
+          ragContext: {
+            evidenceItems: context.evidence.length,
+            chunkItems: context.chunks.length,
+            queries: context.queries,
+            concerns: ["timeline synthesis unavailable; used deterministic fallback"],
+          },
+        },
+      },
+    };
+  }
+
+  const applied = applyTimelineSynthesisToProjection({
+    courseName: args.courseName,
+    evidence: args.evidence,
+    projection: args.projection,
+    context,
+    synthesis,
+  });
+  if (applied) {
+    return { projection: applied, synthesisApplied: true };
+  }
+
+  return {
+    synthesisApplied: false,
+    projection: {
       ...args.projection,
       diagnostics: {
         ...args.projection.diagnostics,
@@ -2061,28 +2167,9 @@ async function synthesizeProjectionWithCourseRag(args: {
           evidenceItems: context.evidence.length,
           chunkItems: context.chunks.length,
           queries: context.queries,
-          concerns: ["timeline synthesis unavailable; used deterministic fallback"],
+          synthesisConfidence: synthesis.confidence,
+          concerns: ["timeline synthesis rejected by deterministic guards", ...synthesis.concerns],
         },
-      },
-    };
-  }
-
-  return applyTimelineSynthesisToProjection({
-    courseName: args.courseName,
-    evidence: args.evidence,
-    projection: args.projection,
-    context,
-    synthesis,
-  }) ?? {
-    ...args.projection,
-    diagnostics: {
-      ...args.projection.diagnostics,
-      ragContext: {
-        evidenceItems: context.evidence.length,
-        chunkItems: context.chunks.length,
-        queries: context.queries,
-        synthesisConfidence: synthesis.confidence,
-        concerns: ["timeline synthesis rejected by deterministic guards", ...synthesis.concerns],
       },
     },
   };
@@ -2199,11 +2286,15 @@ function verificationStatusForBucket(bucket: CorpusWeekBucket): string {
   return "unverified";
 }
 
-async function persistPlacements(courseId: string, decisions: PlacementDecision[]): Promise<void> {
-  await db.courseEvidencePlacement.deleteMany({ where: { courseId } });
+// All three persist helpers run inside one transaction so a crash or timeout
+// mid-rebuild can never leave the user with a half-wiped timeline.
+type DbClient = Prisma.TransactionClient;
+
+async function persistPlacements(tx: DbClient, courseId: string, decisions: PlacementDecision[]): Promise<void> {
+  await tx.courseEvidencePlacement.deleteMany({ where: { courseId } });
   if (decisions.length === 0) return;
 
-  await db.courseEvidencePlacement.createMany({
+  await tx.courseEvidencePlacement.createMany({
     data: decisions.map((decision) => ({
       courseId,
       evidenceId: decision.evidenceId,
@@ -2219,8 +2310,8 @@ async function persistPlacements(courseId: string, decisions: PlacementDecision[
   });
 }
 
-async function persistProjectedMaterials(courseId: string, materials: ProjectedMaterialRecord[]): Promise<void> {
-  const existing = await db.courseMaterial.findMany({
+async function persistProjectedMaterials(tx: DbClient, courseId: string, materials: ProjectedMaterialRecord[]): Promise<void> {
+  const existing = await tx.courseMaterial.findMany({
     where: { courseId },
     select: {
       id: true,
@@ -2235,7 +2326,7 @@ async function persistProjectedMaterials(courseId: string, materials: ProjectedM
       .map((item) => [materialStateKey(item.sourceKind as never, item.sourceKey), item.userStoredForAIOverride]),
   );
 
-  await db.courseMaterial.deleteMany({
+  await tx.courseMaterial.deleteMany({
     where: {
       courseId,
       OR: [
@@ -2247,7 +2338,7 @@ async function persistProjectedMaterials(courseId: string, materials: ProjectedM
 
   if (materials.length === 0) return;
 
-  await db.courseMaterial.createMany({
+  await tx.courseMaterial.createMany({
     data: materials.map((material) => {
       const overrideKey = material.sourceKey ? materialStateKey(material.sourceKind as never, material.sourceKey) : null;
       const override = overrideKey ? existingOverrideMap.get(overrideKey) : undefined;
@@ -2275,15 +2366,16 @@ async function persistProjectedMaterials(courseId: string, materials: ProjectedM
 }
 
 async function persistProjectedTopicsAndAnchors(
+  tx: DbClient,
   courseId: string,
   finalBuckets: CorpusWeekBucket[],
 ): Promise<void> {
-  await db.courseTopic.deleteMany({ where: { courseId } });
-  await db.courseTimelineAnchor.deleteMany({ where: { courseId } });
+  await tx.courseTopic.deleteMany({ where: { courseId } });
+  await tx.courseTimelineAnchor.deleteMany({ where: { courseId } });
 
   if (finalBuckets.length === 0) return;
 
-  await db.courseTimelineAnchor.createMany({
+  await tx.courseTimelineAnchor.createMany({
     data: finalBuckets.map((bucket) => ({
       courseId,
       sequenceNumber: bucket.weekNumber,
@@ -2309,7 +2401,7 @@ async function persistProjectedTopicsAndAnchors(
     })),
   });
 
-  await db.courseTopic.createMany({
+  await tx.courseTopic.createMany({
     data: finalBuckets.map((bucket) => ({
       courseId,
       weekNumber: bucket.weekNumber,
@@ -2406,10 +2498,50 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
   classSchedule: ExtractedClassSchedule | null;
   syllabusEvents: Array<{ title: string; dueDate: string; type: string }>;
 }> {
+  const [course, existingTopicCount] = await Promise.all([
+    db.course.findUnique({
+      where: { id: input.courseId },
+      select: { timelineDiagnostics: true, classSchedule: true },
+    }),
+    db.courseTopic.count({ where: { courseId: input.courseId } }),
+  ]);
+  const storedInputs = parseStoredRebuildInputs(course?.timelineDiagnostics);
+
+  // Material uploads, Gradescope imports, and syllabus saves don't know the
+  // Canvas term window. Reuse the last Canvas-provided inputs so every caller
+  // projects onto the same week skeleton instead of re-deriving a different
+  // term range per route.
+  const termStartAt = input.termStartAt ?? storedInputs.termStartAt ?? null;
+  const termEndAt = input.termEndAt ?? storedInputs.termEndAt ?? null;
+  const calendarEvents = (input.calendarEvents?.length ? input.calendarEvents : storedInputs.calendarEvents) ?? [];
+
   const evidence = await loadCourseEvidence(input.courseId);
+  const corpusFingerprint = computeCorpusFingerprint({
+    courseName: input.courseName,
+    termStartAt,
+    termEndAt,
+    calendarEvents,
+    evidence,
+  });
+
+  // Unchanged inputs can only produce a different timeline through AI
+  // variance, never through new information — so don't rebuild at all.
+  if (existingTopicCount > 0 && storedInputs.corpusFingerprint === corpusFingerprint) {
+    console.log(`[corpus] ${input.courseName}: corpus unchanged (fingerprint match), keeping existing ${existingTopicCount} weeks`);
+    return {
+      weeksWritten: existingTopicCount,
+      classScheduleSource: "unchanged",
+      classSchedule: (course?.classSchedule as unknown as ExtractedClassSchedule | null) ?? null,
+      syllabusEvents: [],
+    };
+  }
+
   await ensureChunksForLoadedEvidence(evidence);
   const { classSchedule, classScheduleSource } = await deriveClassSchedule({
     ...input,
+    termStartAt,
+    termEndAt,
+    calendarEvents,
     evidence,
   });
   const syllabusEvents = await deriveSyllabusEvents(evidence);
@@ -2420,24 +2552,40 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
   const projection = deriveCorpusProjection({
     courseName: input.courseName,
     evidence,
-    termStartAt: input.termStartAt ?? null,
-    termEndAt: input.termEndAt ?? null,
+    termStartAt,
+    termEndAt,
     classSchedule,
-    calendarEvents: input.calendarEvents,
+    calendarEvents,
     parsedScheduleWeeks,
   });
-  const refinedProjection = await synthesizeProjectionWithCourseRag({
+  const { projection: refinedProjection, synthesisApplied } = await synthesizeProjectionWithCourseRag({
     courseId: input.courseId,
     courseName: input.courseName,
     evidence,
     projection,
-  }).catch(() => projection);
+  }).catch(() => ({ projection, synthesisApplied: false }));
 
-  await Promise.all([
-    persistPlacements(input.courseId, refinedProjection.finalPlacements),
-    persistProjectedTopicsAndAnchors(input.courseId, refinedProjection.finalBuckets),
-    persistProjectedMaterials(input.courseId, refinedProjection.projectedMaterials),
-    db.course.update({
+  // Fail closed: when synthesis is unavailable (timeout, API error, rejected
+  // by guards), the deterministic draft is a structurally different timeline,
+  // not a slightly worse one. Swapping it in would make the user's schedule
+  // flip based on API latency. Keep the committed timeline; the fingerprint
+  // stays un-updated so the next sync retries. Only commit the draft when
+  // there is no timeline yet (first sync — better than nothing).
+  if (!synthesisApplied && existingTopicCount > 0) {
+    console.warn(`[corpus] ${input.courseName}: timeline synthesis unavailable, keeping existing ${existingTopicCount} weeks`);
+    return {
+      weeksWritten: existingTopicCount,
+      classScheduleSource: `${classScheduleSource} (synthesis unavailable, kept previous timeline)`,
+      classSchedule,
+      syllabusEvents,
+    };
+  }
+
+  await db.$transaction(async (tx) => {
+    await persistPlacements(tx, input.courseId, refinedProjection.finalPlacements);
+    await persistProjectedTopicsAndAnchors(tx, input.courseId, refinedProjection.finalBuckets);
+    await persistProjectedMaterials(tx, input.courseId, refinedProjection.projectedMaterials);
+    await tx.course.update({
       where: { id: input.courseId },
       data: {
         classSchedule: classSchedule
@@ -2446,6 +2594,14 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
         syllabusEvents: syllabusEvents as unknown as Prisma.InputJsonValue,
         timelineMode: refinedProjection.finalBuckets.length > 0 ? "weekly" : "unknown",
         timelineDiagnostics: {
+          rebuildInputs: {
+            corpusFingerprint,
+            termStartAt,
+            termEndAt,
+            calendarEvents,
+          },
+          previousWeeksWritten: existingTopicCount,
+          synthesisApplied,
           timelineQuality: refinedProjection.finalBuckets.length > 0 ? "corpus-first" : "empty",
           corpusFirst: true,
           termRange: refinedProjection.termRange,
@@ -2474,8 +2630,8 @@ export async function rebuildCourseCorpusProjections(input: RebuildCourseCorpusI
           prunedWeeks: refinedProjection.diagnostics.prunedWeeks,
         } as Prisma.InputJsonValue,
       },
-    }),
-  ]);
+    });
+  }, { timeout: 30_000 });
 
   await refreshCanvasCandidateStates(input.courseId).catch(() => undefined);
 
